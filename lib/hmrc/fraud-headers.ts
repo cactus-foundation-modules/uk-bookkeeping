@@ -207,5 +207,10 @@ export function describeMissingHeaders(headers: Record<string, string>): string[
   if (!headers['Gov-Client-Multi-Factor']) {
     notes.push('This sign-in did not use a second factor, so none was declared.')
   }
+  // Never sent, and this is not an oversight: the browser's own source port is
+  // not visible to a serverless function, and HMRC's own specification allows
+  // for a value that cannot be collected. Said out loud so nobody spends an
+  // afternoon looking for where it went.
+  notes.push('The port your browser connected from is not something this hosting can see, so it is left out.')
   return notes
 }

@@ -8,6 +8,14 @@ import { parseCsv, csvRow } from './csv'
 import { parseImportAmount, parseImportDate, guessMapping } from './import'
 import { sniffMimeType, preflightFileError, isHeic } from './file-kinds'
 import { formatTimezoneOffset, keyValueHeader, percentEncode } from './hmrc/fraud-spec'
+import {
+  MAX_RANGE_DAYS,
+  assertValidPeriodKey,
+  assertValidVrn,
+  clampRange,
+  daysBetween,
+  parseDateOnly,
+} from './hmrc/limits'
 import { EXPECTED_TRIGGERS } from './health'
 
 // The arithmetic, the payload and the parsing, tested without a database.
@@ -264,5 +272,117 @@ describe('the record-protection guards', () => {
     expect(EXPECTED_TRIGGERS).toHaveLength(10)
     expect(EXPECTED_TRIGGERS.every((t) => t.name.startsWith('bk_'))).toBe(true)
     expect(EXPECTED_TRIGGERS.every((t) => t.protects.length > 10)).toBe(true)
+  })
+})
+
+describe("HMRC's limits on what you may ask it", () => {
+  const today = new Date('2026-08-21T00:00:00.000Z')
+
+  it('leaves a range HMRC would accept exactly as it is', () => {
+    expect(clampRange({ from: '2026-01-01', to: '2026-06-30' }, today)).toEqual({
+      from: '2026-01-01',
+      to: '2026-06-30',
+    })
+  })
+
+  it('trims an over-long range from the far end, keeping the recent days', () => {
+    // The old obligations sync asked for thirty months, which HMRC answer with
+    // INVALID_DATE_RANGE every single time. This is the guard against that
+    // coming back.
+    const clamped = clampRange({ from: '2024-01-01', to: '2026-06-30' }, today)
+    expect(clamped.to).toBe('2026-06-30')
+    expect(
+      daysBetween(parseDateOnly(clamped.from)!, parseDateOnly(clamped.to)!),
+    ).toBeLessThanOrEqual(MAX_RANGE_DAYS)
+  })
+
+  it('stays one day inside the documented 366, because of their leap-year bug', () => {
+    expect(MAX_RANGE_DAYS).toBe(365)
+  })
+
+  it('pulls a future end date back to today', () => {
+    expect(clampRange({ from: '2026-08-01', to: '2027-12-31' }, today).to).toBe('2026-08-21')
+  })
+
+  it('will not ask for anything from before MTD existed', () => {
+    expect(clampRange({ from: '2001-01-01', to: '2018-01-01' }, today).from).toBe('2017-12-01')
+  })
+
+  it('refuses a backwards or unreadable range rather than sending it', () => {
+    expect(() => clampRange({ from: '2026-06-30', to: '2026-01-01' }, today)).toThrow()
+    expect(() => clampRange({ from: 'last tuesday', to: '2026-01-01' }, today)).toThrow()
+  })
+
+  it('checks a period key is four characters of the right sort', () => {
+    expect(() => assertValidPeriodKey('18A1')).not.toThrow()
+    expect(() => assertValidPeriodKey('#001')).not.toThrow()
+    expect(() => assertValidPeriodKey('18A')).toThrow()
+    expect(() => assertValidPeriodKey('18A12')).toThrow()
+    expect(() => assertValidPeriodKey('18 1')).toThrow()
+  })
+
+  it('checks a VAT number is nine digits', () => {
+    expect(() => assertValidVrn('123456789')).not.toThrow()
+    expect(() => assertValidVrn('12345678')).toThrow()
+    expect(() => assertValidVrn('123 4567 89')).toThrow()
+    expect(() => assertValidVrn('GB123456789')).toThrow()
+  })
+})
+
+describe("the per-field limits HMRC actually publish", () => {
+  const base = assembleBoxes(totals({ box1: '1000.00', box4: '250.00' }), 'nearest')
+
+  it('refuses a box 5 above their lower cap, which is not the same as the others', () => {
+    // netVatDue maxes out at 99,999,999,999.99 - two orders of magnitude below
+    // its neighbours. One shape for all nine would have let this through.
+    // Built through the box query rather than by overriding one value, so the
+    // box 3 / box 5 identities still hold and it is genuinely the CAP under test.
+    const atCap = assembleBoxes(totals({ box1: '99999999999.99' }), 'nearest')
+    expect(atCap.netVatDue).toBe('99999999999.99')
+    expect(() => assertBoxesSendable(atCap)).not.toThrow()
+
+    const overCap = assembleBoxes(totals({ box1: '999999999999.99' }), 'nearest')
+    expect(overCap.vatDueSales).toBe('999999999999.99') // fine in box 1
+    expect(() => assertBoxesSendable(overCap)).toThrow() // not in box 5
+  })
+
+  it('accepts the full range on the boxes that do allow it', () => {
+    // Boxes 1 and 4 both at their ceiling, which nets box 5 to zero - so this
+    // exercises the wide limits without tripping the narrow one.
+    const big = assembleBoxes(
+      totals({ box1: '9999999999999.99', box4: '9999999999999.99' }),
+      'nearest',
+    )
+    expect(big.netVatDue).toBe('0.00')
+    expect(() => assertBoxesSendable(big)).not.toThrow()
+  })
+
+  it('refuses figures that break the identities HMRC re-check', () => {
+    expect(() => assertBoxesSendable({ ...base, totalVatDue: '999.00' })).toThrow()
+    expect(() => assertBoxesSendable({ ...base, netVatDue: '1.00' })).toThrow()
+  })
+
+  it('refuses a period key at the point of building the body', () => {
+    expect(() => buildVatReturnBody('nope!', base)).toThrow()
+  })
+
+  it('sends every field HMRC list as required, and nothing else', () => {
+    const body = JSON.parse(buildVatReturnBody('18A1', base))
+    expect(Object.keys(body).sort()).toEqual(
+      [
+        'finalised',
+        'netVatDue',
+        'periodKey',
+        'totalAcquisitionsExVAT',
+        'totalValueGoodsSuppliedExVAT',
+        'totalValuePurchasesExVAT',
+        'totalValueSalesExVAT',
+        'totalVatDue',
+        'vatDueAcquisitions',
+        'vatDueSales',
+        'vatReclaimedCurrPeriod',
+      ].sort(),
+    )
+    expect(body.finalised).toBe(true)
   })
 })

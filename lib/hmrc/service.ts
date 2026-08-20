@@ -26,6 +26,7 @@ import type { HmrcCallContext, HmrcClient, VatObligation } from './client'
 import { DirectHmrcClient } from './direct-client'
 import { isHmrcConfigured } from './endpoints'
 import { buildFraudHeaders, type FraudBag } from './fraud-headers'
+import { clampRange, toDateOnly as toDateOnlyString } from './limits'
 import { getAccessToken, getConnection } from './tokens'
 
 // Everything that needs HMRC, in one place, so the rest of the module never
@@ -94,30 +95,57 @@ export async function syncObligations(inputs: CallInputs): Promise<{
   const ctx = await buildCallContext(client, inputs)
   const vrn = await requireVrn()
 
-  // Eighteen months back and twelve forward covers every obligation an ordinary
-  // business has any interest in, and keeps the request inside the dispatcher's
-  // 60 second ceiling with room to spare.
-  const from = new Date()
-  from.setUTCMonth(from.getUTCMonth() - 18)
-  const to = new Date()
-  to.setUTCMonth(to.getUTCMonth() + 12)
+  // TWO calls, and the reason is a limit rather than a preference.
+  //
+  // HMRC cap the obligations date range at 366 days and answer INVALID_DATE_RANGE
+  // to anything wider - so the "eighteen months back, twelve forward" window this
+  // used to send was a guaranteed 400 on every single sync. Their own spec makes
+  // `from` and `to` optional *when status is O*, so:
+  //
+  //   1. status=O with no dates - every outstanding obligation, whenever it falls
+  //      and however far ahead. This is the one that matters: it is what the owner
+  //      still has to file.
+  //   2. status=F over one clamped window - recent history, so a period already
+  //      filed shows as filed rather than sitting there looking open.
+  //
+  // A failure on the second must not lose the first. Somebody with nothing filed
+  // yet is exactly the person who most needs to see what is due.
+  const open = await client.obligations({ vrn, status: 'O' }, ctx)
 
-  const obligations = await client.obligations(
-    { vrn, from: toDateOnly(from), to: toDateOnly(to) },
-    ctx,
-  )
+  const today = new Date()
+  const yearAgo = new Date(today.getTime())
+  yearAgo.setUTCFullYear(yearAgo.getUTCFullYear() - 1)
+  const history = clampRange({ from: toDateOnlyString(yearAgo), to: toDateOnlyString(today) })
+
+  let fulfilled: VatObligation[] = []
+  try {
+    fulfilled = await client.obligations(
+      { vrn, status: 'F', from: history.from, to: history.to },
+      ctx,
+    )
+  } catch (error) {
+    console.error('[uk-bookkeeping] fulfilled obligations lookup failed', error)
+  }
+
+  // Keyed by period rather than concatenated: an obligation could in principle
+  // come back on both calls, and creating it twice would trip the unique index
+  // on (start_date, end_date) rather than doing anything useful.
+  const byPeriod = new Map<string, VatObligation>()
+  for (const obligation of [...fulfilled, ...open]) {
+    byPeriod.set(`${obligation.start}|${obligation.end}`, obligation)
+  }
 
   let matched = 0
   let created = 0
   const settings = await getSettings()
 
-  for (const obligation of obligations) {
+  for (const obligation of byPeriod.values()) {
     const applied = await applyObligation(obligation, vrn, settings.scheme)
     if (applied === 'matched') matched += 1
     if (applied === 'created') created += 1
   }
 
-  return { fetched: obligations.length, matched, created }
+  return { fetched: byPeriod.size, matched, created }
 }
 
 async function applyObligation(
@@ -159,16 +187,47 @@ async function applyObligation(
   return 'created'
 }
 
+// Both endpoints require a date range, refuse anything before MTD existed, and
+// cap the window - so the range is brought inside those limits here rather than
+// being sent as typed and coming back a 400.
 export async function fetchLiabilities(inputs: CallInputs, from: string, to: string) {
   const client = getHmrcClient()
   const ctx = await buildCallContext(client, inputs)
-  return client.liabilities({ vrn: await requireVrn(), from, to }, ctx)
+  const range = clampRange({ from, to })
+  return client.liabilities({ vrn: await requireVrn(), ...range }, ctx)
 }
 
 export async function fetchPayments(inputs: CallInputs, from: string, to: string) {
   const client = getHmrcClient()
   const ctx = await buildCallContext(client, inputs)
-  return client.payments({ vrn: await requireVrn(), from, to }, ctx)
+  const range = clampRange({ from, to })
+  return client.payments({ vrn: await requireVrn(), ...range }, ctx)
+}
+
+/**
+ * Ask HMRC to mark our own fraud prevention headers.
+ *
+ * Their Test Fraud Prevention Headers API validates the headers on the request
+ * that carries it, so this sends a real call with the real bag and reports back
+ * what they said. Sandbox only, and application-restricted rather than
+ * user-authorised, so it works before anybody has connected a Government
+ * Gateway account - which is the point, since getting these right is a
+ * precondition of production approval rather than something to find out ten
+ * working days into the application.
+ */
+export async function checkFraudHeaders(inputs: CallInputs) {
+  const client = getHmrcClient()
+  const settings = await getSettings()
+  const fraudHeaders = await buildFraudHeaders({
+    request: inputs.request,
+    bag: inputs.fraudBag,
+    user: inputs.user,
+    usedMultiFactor: true,
+  })
+  return client.validateFraudHeaders(
+    { environment: settings.hmrc_environment, fraudHeaders },
+    inputs.user?.id ?? null,
+  )
 }
 
 // ---------------------------------------------------------------------------

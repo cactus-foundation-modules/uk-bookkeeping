@@ -65,6 +65,12 @@ It deliberately does not contain your admin path, so renaming that never breaks
 the connection. The settings tab prints the correct one for your site with a copy
 button.
 
+Before applying for production access, use **Have HMRC check the details we
+send** in the settings tab. It calls HMRC's own fraud prevention header checker
+with a real request and reports what they said - which is the evidence their
+approval process asks for, available in seconds rather than after a ten working
+day wait.
+
 Grant `bookkeeping.access` to whichever roles should see the section,
 `bookkeeping.record` to those who record entries, `bookkeeping.submit` to those
 who may finalise and file, and `bookkeeping.settings` to those who may change

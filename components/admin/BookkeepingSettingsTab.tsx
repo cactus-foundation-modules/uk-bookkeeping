@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { ErrorNotice, TriggerHealthNotice, type TriggerHealth } from './Notices'
+import { hmrcFetch } from '@/modules/uk-bookkeeping/lib/hmrc/fraud-client'
 
 // Settings, as a tab under the site's own Settings page rather than another
 // sidebar link.
@@ -44,6 +45,14 @@ type Hmrc = {
   fraudSpecSource: string
 }
 
+type HeaderVerdict = {
+  code: 'VALID_HEADERS' | 'INVALID_HEADERS' | 'POTENTIALLY_INVALID_HEADERS' | 'UNAVAILABLE'
+  message: string
+  specVersion: string | null
+  errors: { code: string; message: string; headers: string[] }[]
+  warnings: { code: string; message: string; headers: string[] }[]
+}
+
 type Payload = {
   settings: Settings
   hmrc: Hmrc
@@ -80,6 +89,8 @@ export function BookkeepingSettingsTab() {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [verdict, setVerdict] = useState<HeaderVerdict | null>(null)
+  const [checking, setChecking] = useState(false)
 
   const load = useCallback(async () => {
     const response = await fetch('/api/m/uk-bookkeeping/admin/settings')
@@ -135,6 +146,19 @@ export function BookkeepingSettingsTab() {
       return
     }
     window.location.href = payload.url
+  }
+
+  async function checkHeaders() {
+    setChecking(true)
+    setVerdict(null)
+    const response = await hmrcFetch('/api/m/uk-bookkeeping/admin/hmrc/check-headers', {})
+    const payload = await response.json().catch(() => null)
+    setChecking(false)
+    if (!response.ok || !payload) {
+      setError(payload?.error ?? 'HMRC could not be asked to check the details just now.')
+      return
+    }
+    setVerdict(payload)
   }
 
   async function disconnect() {
@@ -318,6 +342,63 @@ export function BookkeepingSettingsTab() {
           <summary style={{ cursor: 'pointer', fontSize: 'var(--text-sm)' }}>
             The technical bits HMRC asks about
           </summary>
+          <div style={{ padding: '0.625rem 0', borderBottom: '1px solid var(--color-border)' }}>
+            <p style={{ margin: '0 0 0.5rem', fontSize: 'var(--text-sm)' }}>
+              HMRC can check the details we send them before you apply for full access - which is
+              worth doing, because getting them wrong is what an application comes back on, and they
+              take up to ten working days to tell you.
+            </p>
+            <button className="btn btn-sm" onClick={checkHeaders} disabled={checking || !hmrc.configured}>
+              {checking ? 'Asking HMRC…' : 'Have HMRC check the details we send'}
+            </button>
+            {verdict && (
+              <div
+                style={{
+                  marginTop: '0.625rem',
+                  padding: '0.625rem 0.75rem',
+                  borderRadius: 6,
+                  border: '1px solid var(--color-border)',
+                  background: 'var(--color-surface)',
+                  fontSize: 'var(--text-sm)',
+                }}
+              >
+                <strong>
+                  {verdict.code === 'VALID_HEADERS'
+                    ? 'HMRC are happy with what we send.'
+                    : verdict.code === 'UNAVAILABLE'
+                      ? 'Not checked.'
+                      : 'HMRC had something to say.'}
+                </strong>
+                <p style={{ margin: '0.25rem 0 0' }}>{verdict.message}</p>
+                {verdict.errors.length > 0 && (
+                  <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.25rem' }}>
+                    {verdict.errors.map((item, index) => (
+                      <li key={`e-${index}`}>
+                        {item.message}
+                        {item.headers.length > 0 && ` (${item.headers.join(', ')})`}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {verdict.warnings.length > 0 && (
+                  <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.25rem', color: 'var(--color-text-muted, var(--color-text))' }}>
+                    {verdict.warnings.map((item, index) => (
+                      <li key={`w-${index}`}>
+                        {item.message}
+                        {item.headers.length > 0 && ` (${item.headers.join(', ')})`}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {verdict.specVersion && (
+                  <p style={{ margin: '0.5rem 0 0', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
+                    Checked against HMRC’s specification version {verdict.specVersion}.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
           <div style={row}>
             <label htmlFor="bk-vendor-ip">
               Your site’s public address

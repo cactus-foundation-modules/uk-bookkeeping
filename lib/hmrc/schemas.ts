@@ -70,6 +70,27 @@ export const PaymentsResponseSchema = z.object({
   ),
 })
 
+/** A client_credentials token: no refresh token, no user, short-lived. */
+export const ApplicationTokenSchema = z.object({
+  access_token: z.string().min(1),
+  expires_in: z.number().optional(),
+  token_type: z.string().optional(),
+})
+
+const FraudFindingSchema = z.object({
+  code: z.string(),
+  message: z.string().optional(),
+  headers: z.array(z.string()).optional(),
+})
+
+export const FraudHeaderVerdictSchema = z.object({
+  code: z.enum(['VALID_HEADERS', 'INVALID_HEADERS', 'POTENTIALLY_INVALID_HEADERS']),
+  message: z.string(),
+  specVersion: z.string().optional(),
+  errors: z.array(FraudFindingSchema).optional(),
+  warnings: z.array(FraudFindingSchema).optional(),
+})
+
 export const HmrcErrorSchema = z.object({
   code: z.string(),
   message: z.string().optional(),

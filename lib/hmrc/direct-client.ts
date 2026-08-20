@@ -1,6 +1,7 @@
 import { HmrcApiError, HmrcNotConfiguredError } from '../errors'
 import type {
   DateRangeQuery,
+  FraudHeaderVerdict,
   HmrcCallContext,
   HmrcClient,
   HmrcTokens,
@@ -21,8 +22,11 @@ import {
   encodePeriodKey,
   hmrcCredentials,
 } from './endpoints'
+import { assertValidPeriodKey, assertValidVrn } from './limits'
 import { buildVatReturnBody } from './payload'
 import {
+  ApplicationTokenSchema,
+  FraudHeaderVerdictSchema,
   HmrcErrorSchema,
   LiabilitiesResponseSchema,
   ObligationsResponseSchema,
@@ -92,9 +96,14 @@ export class DirectHmrcClient implements HmrcClient {
     const { clientId, clientSecret } = this.credentials()
     const body = new URLSearchParams({ ...fields, client_id: clientId, client_secret: clientSecret })
 
+    // No Accept header, deliberately. HMRC's versioned media type
+    // (application/vnd.hmrc.1.0+json) belongs on API RESOURCES, and requesting a
+    // version an endpoint does not serve is answered with 406 Not Acceptable.
+    // /oauth/token is not a versioned resource and HMRC's own documented
+    // examples send content-type alone - so this sends exactly what they show.
     const response = await fetch(`${HMRC_HOSTS[environment].api}/oauth/token`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: HMRC_ACCEPT },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     })
@@ -191,6 +200,7 @@ export class DirectHmrcClient implements HmrcClient {
   }
 
   async obligations(input: ObligationsQuery, ctx: HmrcCallContext): Promise<VatObligation[]> {
+    assertValidVrn(input.vrn)
     const query = new URLSearchParams()
     if (input.from) query.set('from', input.from)
     if (input.to) query.set('to', input.to)
@@ -206,6 +216,9 @@ export class DirectHmrcClient implements HmrcClient {
   }
 
   async submitReturn(input: VatReturnPayload, ctx: HmrcCallContext): Promise<VatSubmissionReceipt> {
+    assertValidVrn(input.vrn)
+    // buildVatReturnBody validates the period key and every box against HMRC's
+    // own limits, and throws before anything is sent.
     const body = buildVatReturnBody(input.periodKey, input.boxes)
     const { text, correlationId, receiptId, receiptTimestamp } = await this.call(
       'POST',
@@ -229,6 +242,8 @@ export class DirectHmrcClient implements HmrcClient {
     input: { vrn: string; periodKey: string },
     ctx: HmrcCallContext,
   ): Promise<VatReturnView> {
+    assertValidVrn(input.vrn)
+    assertValidPeriodKey(input.periodKey)
     const { text } = await this.call(
       'GET',
       `/organisations/vat/${encodeURIComponent(input.vrn)}/returns/${encodePeriodKey(input.periodKey)}`,
@@ -250,6 +265,7 @@ export class DirectHmrcClient implements HmrcClient {
   }
 
   async liabilities(input: DateRangeQuery, ctx: HmrcCallContext): Promise<VatLiability[]> {
+    assertValidVrn(input.vrn)
     const query = new URLSearchParams({ from: input.from, to: input.to })
     const { text } = await this.call(
       'GET',
@@ -267,6 +283,7 @@ export class DirectHmrcClient implements HmrcClient {
   }
 
   async payments(input: DateRangeQuery, ctx: HmrcCallContext): Promise<VatPayment[]> {
+    assertValidVrn(input.vrn)
     const query = new URLSearchParams({ from: input.from, to: input.to })
     const { text } = await this.call(
       'GET',
@@ -277,6 +294,131 @@ export class DirectHmrcClient implements HmrcClient {
       amount: fromHmrcNumber(p.amount),
       received: p.received ?? null,
     }))
+  }
+
+  /**
+   * HMRC marking our own homework.
+   *
+   * Their Test Fraud Prevention Headers API validates the headers on whatever
+   * request carries it, so this is a real call with the real bag rather than a
+   * description of one. **Application-restricted**, so it uses a
+   * client_credentials token of its own rather than the owner's - which means it
+   * works before anybody has connected a Government Gateway account, and getting
+   * the headers right stops being something you discover ten working days into a
+   * production approval application.
+   *
+   * Sandbox only. On production it reports UNAVAILABLE rather than pretending,
+   * because HMRC do not publish it there.
+   */
+  async validateFraudHeaders(
+    input: { environment: HmrcEnvironment; fraudHeaders: Record<string, string> },
+    actorUserId: string | null,
+  ): Promise<FraudHeaderVerdict> {
+    if (input.environment !== 'sandbox') {
+      return {
+        code: 'UNAVAILABLE',
+        message:
+          'HMRC only offer this check on their practice service. Switch to it if you want your details checked before you apply for production access.',
+        specVersion: null,
+        errors: [],
+        warnings: [],
+      }
+    }
+
+    const path = '/test/fraud-prevention-headers/validate'
+    const callId = await beginApiCall({
+      environment: input.environment,
+      method: 'GET',
+      path,
+      fraudHeaders: input.fraudHeaders,
+      actorUserId,
+    })
+    const startedAt = Date.now()
+
+    try {
+      const token = await this.applicationToken(input.environment)
+      const response = await fetch(`${HMRC_HOSTS[input.environment].api}${path}`, {
+        method: 'GET',
+        headers: {
+          Accept: HMRC_ACCEPT,
+          Authorization: `Bearer ${token}`,
+          ...input.fraudHeaders,
+        },
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      })
+      const text = await response.text()
+      await completeApiCall(callId, {
+        statusCode: response.status,
+        durationMs: Date.now() - startedAt,
+        correlationId: response.headers.get('X-CorrelationId'),
+      })
+
+      const parsed = FraudHeaderVerdictSchema.safeParse(safeJson(text))
+      if (!parsed.success) {
+        return {
+          code: 'UNAVAILABLE',
+          message: 'HMRC answered in a way we did not recognise. Nothing is wrong with your records.',
+          specVersion: null,
+          errors: [],
+          warnings: [],
+        }
+      }
+      return {
+        code: parsed.data.code,
+        message: parsed.data.message,
+        specVersion: parsed.data.specVersion ?? null,
+        errors: (parsed.data.errors ?? []).map(normaliseFinding),
+        warnings: (parsed.data.warnings ?? []).map(normaliseFinding),
+      }
+    } catch (error) {
+      await completeApiCall(callId, {
+        statusCode: null,
+        durationMs: Date.now() - startedAt,
+        errorCode: 'NETWORK',
+        errorBody: { message: error instanceof Error ? error.message : 'unknown' },
+      })
+      return {
+        code: 'UNAVAILABLE',
+        message: 'We could not reach HMRC to have the details checked. Try again in a moment.',
+        specVersion: null,
+        errors: [],
+        warnings: [],
+      }
+    }
+  }
+
+  /**
+   * A token for this application rather than for a person. Not stored: it is
+   * short-lived, it authorises nothing about anybody's VAT account, and keeping
+   * it would be one more secret at rest for no benefit.
+   */
+  private async applicationToken(environment: HmrcEnvironment): Promise<string> {
+    const { clientId, clientSecret } = this.credentials()
+    const response = await fetch(`${HMRC_HOSTS[environment].api}/oauth/token`, {
+      method: 'POST',
+      // Same reasoning as the user token above: no Accept on /oauth/token.
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: clientId,
+        client_secret: clientSecret,
+      }).toString(),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    })
+    const text = await response.text()
+    if (!response.ok) {
+      throw toHmrcError(response.status, text, response.headers.get('X-CorrelationId'))
+    }
+    const parsed = ApplicationTokenSchema.parse(JSON.parse(text))
+    return parsed.access_token
+  }
+}
+
+function normaliseFinding(finding: { code: string; message?: string; headers?: string[] }) {
+  return {
+    code: finding.code,
+    message: finding.message ?? finding.code,
+    headers: finding.headers ?? [],
   }
 }
 
@@ -305,23 +447,52 @@ function toHmrcError(status: number, text: string, correlationId: string | null)
   })
 }
 
-/** Plain English for the codes an owner is actually likely to meet. */
+/**
+ * Plain English for every error code HMRC document on the endpoints this module
+ * calls, plus the two we raise ourselves. Branching is on the CODE - the codes
+ * are contractual, their wording is not - and anything unlisted falls through to
+ * HMRC's own message rather than being guessed at.
+ */
 export function glossHmrcCode(code: string): string | null {
   switch (code) {
+    // Submission
     case 'DUPLICATE_SUBMISSION':
       return 'HMRC says a return has already been filed for this period.'
     case 'PERIOD_KEY_INVALID':
       return 'HMRC does not recognise the period this return is filed against. Refresh your obligations and try again.'
-    case 'VRN_INVALID':
-      return 'HMRC does not recognise that VAT number.'
-    case 'INVALID_REQUEST':
-      return 'HMRC would not accept the figures as sent. Nothing has been filed.'
-    case 'CLIENT_OR_AGENT_NOT_AUTHORISED':
-      return 'The Government Gateway account you connected is not authorised for this VAT number.'
     case 'TAX_PERIOD_NOT_ENDED':
       return 'That VAT period has not finished yet, so HMRC will not accept a return for it.'
+    case 'NOT_FINALISED':
+      return 'HMRC did not see the declaration that these figures are final. Nothing has been filed.'
+    case 'INVALID_REQUEST':
+      return 'HMRC would not accept the return as sent. Nothing has been filed.'
+    case 'VAT_TOTAL_VALUE':
+      return 'HMRC checked the totals and they did not add up on their side. Nothing has been filed - please report this.'
+    case 'VAT_NET_VALUE':
+      return 'HMRC checked box 5 against boxes 3 and 4 and it did not match. Nothing has been filed - please report this.'
+    case 'INVALID_MONETARY_AMOUNT':
+    case 'INVALID_NUMERIC_VALUE':
+      return 'HMRC would not accept one of the figures as written. Nothing has been filed - please report this.'
+    // Obligations, liabilities and payments
+    case 'INVALID_DATE_FROM':
+    case 'INVALID_DATE_TO':
+      return 'HMRC would not accept those dates.'
+    case 'INVALID_DATE_RANGE':
+      return 'HMRC will only look at a year at a time. Try a shorter stretch of dates.'
+    case 'INVALID_STATUS':
+      return 'HMRC did not understand which returns were being asked for.'
+    case 'NOT_FOUND':
+      return 'HMRC has nothing on record for that.'
+    // Account-level
+    case 'VRN_INVALID':
+      return 'HMRC does not recognise that VAT number.'
+    case 'CLIENT_OR_AGENT_NOT_AUTHORISED':
+      return 'The Government Gateway account you connected is not authorised for this VAT number.'
+    case 'RULE_INSOLVENT_TRADER':
+      return 'HMRC have flagged this VAT number as insolvent, so it cannot be used here. You will need to speak to them.'
     case 'BUSINESS_ERROR':
       return 'HMRC rejected the return. Their message is below.'
+    // Ours
     case 'NETWORK':
       return 'We could not reach HMRC. Nothing has been sent.'
     default:

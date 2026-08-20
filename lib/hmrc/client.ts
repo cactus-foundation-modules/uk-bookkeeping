@@ -76,6 +76,18 @@ export type VatReturnView = VatBoxes & { periodKey: string }
 
 export type DateRangeQuery = { vrn: string; from: string; to: string }
 
+/**
+ * HMRC's own verdict on the fraud prevention headers we send. `code` is what to
+ * branch on; `message` is theirs to word.
+ */
+export type FraudHeaderVerdict = {
+  code: 'VALID_HEADERS' | 'INVALID_HEADERS' | 'POTENTIALLY_INVALID_HEADERS' | 'UNAVAILABLE'
+  message: string
+  specVersion: string | null
+  errors: { code: string; message: string; headers: string[] }[]
+  warnings: { code: string; message: string; headers: string[] }[]
+}
+
 export type VatLiability = {
   taxPeriodFrom: string | null
   taxPeriodTo: string | null
@@ -102,4 +114,13 @@ export interface HmrcClient {
   ): Promise<VatReturnView>
   liabilities(input: DateRangeQuery, ctx: HmrcCallContext): Promise<VatLiability[]>
   payments(input: DateRangeQuery, ctx: HmrcCallContext): Promise<VatPayment[]>
+  /**
+   * Deliberately does NOT take an HmrcCallContext: the validator is
+   * application-restricted rather than user-authorised, so it works before
+   * anybody has connected a Government Gateway account.
+   */
+  validateFraudHeaders(
+    input: { environment: HmrcEnvironment; fraudHeaders: Record<string, string> },
+    actorUserId: string | null,
+  ): Promise<FraudHeaderVerdict>
 }
