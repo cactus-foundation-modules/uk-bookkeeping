@@ -1,0 +1,72 @@
+{
+  "name": "uk-bookkeeping",
+  "version": "0.1.0",
+  "tablePrefix": "bk_",
+  "description": "UK bookkeeping with Making Tax Digital VAT returns. Records income and expenses with evidence, works the nine VAT boxes out from those records, and files them with HMRC.",
+  "permissions": [
+    "bookkeeping.access",
+    "bookkeeping.record",
+    "bookkeeping.submit",
+    "bookkeeping.settings"
+  ],
+  "requiresCoreVersion": "0.5.1156",
+  "navEntries": [
+    {
+      "label": "Bookkeeping",
+      "path": "/m/uk-bookkeeping/transactions",
+      "icon": "<path d=\"M4 4h11l5 5v11H4z\"/><path d=\"M8 10h8M8 14h8M8 18h5\"/>",
+      "permission": "bookkeeping.access"
+    }
+  ],
+  "requiredEnvVars": [
+    { "name": "HMRC_CLIENT_ID", "required": false },
+    { "name": "HMRC_CLIENT_SECRET", "required": false }
+  ],
+  "cookieCategories": [
+    "functional"
+  ],
+  "teardown": [
+    "bk_hmrc_api_calls",
+    "bk_hmrc_oauth_states",
+    "bk_hmrc_connection",
+    "bk_audit_log",
+    "bk_period_snapshot_lines",
+    "bk_period_snapshots",
+    "bk_attachments",
+    "bk_transaction_lines",
+    "bk_transactions",
+    "bk_vat_periods",
+    "bk_categories",
+    "bk_import_batches",
+    "bk_settings"
+  ],
+  "settingsTabs": [
+    {
+      "id": "uk-bookkeeping",
+      "label": "Bookkeeping",
+      "permission": "bookkeeping.settings",
+      "import": "./components/admin/BookkeepingSettingsTab",
+      "component": "BookkeepingSettingsTab"
+    }
+  ],
+  "emailTemplates": {
+    "groupLabel": "Bookkeeping",
+    "import": "./lib/email-templates",
+    "export": "ukBookkeepingEmailTemplates"
+  },
+  "extensionPoints": [
+    {
+      "point": "core.media-usage-providers",
+      "id": "uk-bookkeeping",
+      "import": "./lib/media-usage-provider",
+      "component": "ukBookkeepingMediaUsageProvider"
+    },
+    {
+      "point": "core.media-reference-rewriters",
+      "id": "uk-bookkeeping",
+      "import": "./lib/media-reference-rewriter",
+      "component": "ukBookkeepingMediaReferenceRewriter"
+    }
+  ],
+  "requiresModules": []
+}
