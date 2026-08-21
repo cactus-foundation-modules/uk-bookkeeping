@@ -194,9 +194,18 @@ async function fileDocument(
     )
     return ' The invoice is attached to it.'
   } catch (error) {
+    // The reason travels with the refusal, in the publisher's own words rather
+    // than ours. "Could not be attached" on its own sent somebody hunting
+    // through a bookkeeping module for an afternoon over a file store that was
+    // refusing every upload on the site - the sentence that would have settled
+    // it in a minute was sitting in a log nobody can read from a deployed site.
+    // Truncated because this is appended to a message the publisher stores.
     const message = error instanceof Error ? error.message : String(error)
     console.error('[uk-bookkeeping] could not attach an external sale document:', message)
-    return ' The invoice itself could not be attached.'
+    const reason = message.replace(/\s+/g, ' ').trim().slice(0, 200)
+    return reason
+      ? ` The invoice itself could not be attached - the file store said: ${reason}`
+      : ' The invoice itself could not be attached.'
   }
 }
 
