@@ -51,6 +51,9 @@ export type TransactionInput = {
   source?: string
   sourceRef?: string | null
   importBatchId?: string | null
+  /** The account it was paid from or into, where that is known. */
+  bankAccountId?: string | null
+  statementId?: string | null
   correctsTransactionId?: string | null
   correctionReason?: string | null
   lines: LineInput[]
@@ -344,11 +347,13 @@ export async function insertTransactionRows(
     INSERT INTO "bk_transactions" (
       "entry_type", "direction", "tax_point_date", "settled_date", "counterparty",
       "description", "reference", "status", "source", "source_ref", "import_batch_id",
+      "bank_account_id", "statement_id",
       "corrects_transaction_id", "correction_reason", "created_by_user_id", "updated_by_user_id"
     ) VALUES (
       ${input.entryType ?? 'normal'}, ${input.direction}, ${taxPoint}::date, ${settled}::date,
       ${input.counterparty.trim()}, ${input.description?.trim() ?? ''}, ${input.reference?.trim() || null},
       ${input.status ?? 'posted'}, ${input.source ?? 'manual'}, ${input.sourceRef ?? null}, ${input.importBatchId ?? null},
+      ${input.bankAccountId ?? null}, ${input.statementId ?? null},
       ${input.correctsTransactionId ?? null}, ${input.correctionReason?.trim() ?? null},
       ${user?.id ?? null}, ${user?.id ?? null}
     )

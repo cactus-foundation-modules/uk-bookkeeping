@@ -24,6 +24,15 @@ export const EXPECTED_TRIGGERS: { name: string; table: string; protects: string 
   { name: 'bk_period_snapshots_append_only', table: 'bk_period_snapshots', protects: 'return snapshots are append-only' },
   { name: 'bk_period_snapshot_lines_append_only', table: 'bk_period_snapshot_lines', protects: 'snapshot workings are append-only' },
   { name: 'bk_hmrc_api_calls_append_only', table: 'bk_hmrc_api_calls', protects: 'the record of what was sent to HMRC is write-once' },
+  // From 007_journal_immutability.sql. The balance checks are the ones that
+  // matter day to day: without them a posted journal could be left half-entered,
+  // and a set of books whose two sides disagree is not a set of books.
+  { name: 'bk_journal_lines_balanced', table: 'bk_journal_lines', protects: 'a posted journal always balances' },
+  { name: 'bk_journals_balanced', table: 'bk_journals', protects: 'a journal cannot be posted unless it balances' },
+  { name: 'bk_journals_immutable', table: 'bk_journals', protects: 'a journal in a filed return cannot be changed or deleted' },
+  { name: 'bk_journal_lines_immutable', table: 'bk_journal_lines', protects: 'lines of such a journal cannot be changed' },
+  { name: 'bk_journal_lines_no_insert_locked', table: 'bk_journal_lines', protects: 'no line can be added to such a journal' },
+  { name: 'bk_reconciliations_locked', table: 'bk_reconciliations', protects: 'how a filed entry was matched to the bank cannot be rewritten' },
 ]
 
 export type TriggerHealth = {

@@ -190,6 +190,9 @@ export function PeriodStatusBadge({
 const TABS = [
   { key: 'overview', label: 'Overview' },
   { key: 'transactions', label: 'Entries' },
+  { key: 'journals', label: 'Journals' },
+  { key: 'reconcile', label: 'Reconcile' },
+  { key: 'director-loan', label: 'Director’s loan' },
   { key: 'vat', label: 'VAT returns' },
   { key: 'reports', label: 'Reports' },
   { key: 'import', label: 'Import' },

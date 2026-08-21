@@ -115,6 +115,8 @@ export type BkTransactionRow = {
   source: string
   source_ref: string | null
   import_batch_id: string | null
+  bank_account_id: string | null
+  statement_id: string | null
   corrects_transaction_id: string | null
   correction_reason: string | null
   finalised_period_id: string | null
@@ -187,6 +189,172 @@ export type BkVatPeriodRow = {
   updated_at: Date
 }
 
+// ---------------------------------------------------------------------------
+// Bank accounts, statements and reconciliation
+// ---------------------------------------------------------------------------
+
+export type BankAccountKind = 'bank' | 'card' | 'cash'
+export type BankTransactionStatus = 'unreconciled' | 'reconciled' | 'ignored'
+export type MatchMethod = 'manual' | 'suggested' | 'import'
+
+export type BkBankAccountRow = {
+  id: string
+  name: string
+  kind: BankAccountKind
+  bank_name: string | null
+  account_last4: string | null
+  sort_code: string | null
+  opening_balance: Money
+  opening_date: Date | null
+  archived: boolean
+  position: number
+  created_at: Date
+  updated_at: Date
+}
+
+export type BkBankStatementRow = {
+  id: string
+  bank_account_id: string
+  filename: string
+  format: 'csv' | 'pdf'
+  preset: string | null
+  period_start: Date | null
+  period_end: Date | null
+  opening_balance: Money | null
+  closing_balance: Money | null
+  total_paid_in: Money | null
+  total_paid_out: Money | null
+  row_count: number
+  imported_count: number
+  duplicate_count: number
+  mapping: unknown
+  created_by_user_id: string | null
+  created_at: Date
+}
+
+export type BkBankTransactionRow = {
+  id: string
+  bank_account_id: string
+  statement_id: string | null
+  date: Date
+  details: string
+  counterparty: string
+  reference: string | null
+  transaction_type: string | null
+  /** Signed: positive is money in, negative is money out. */
+  amount: Money
+  statement_balance: Money | null
+  fingerprint: string
+  status: BankTransactionStatus
+  ignored_reason: string | null
+  created_at: Date
+  updated_at: Date
+}
+
+export type BkReconciliationRow = {
+  id: string
+  bank_transaction_id: string
+  transaction_id: string
+  amount: Money
+  match_method: MatchMethod
+  created_by_user_id: string | null
+  created_at: Date
+}
+
+// ---------------------------------------------------------------------------
+// Ledger accounts and journals
+// ---------------------------------------------------------------------------
+
+export type AccountKind = 'asset' | 'liability' | 'equity' | 'income' | 'expense'
+
+export type AccountSubtype =
+  | 'other'
+  | 'bank'
+  | 'cash'
+  | 'director_loan'
+  | 'vat_control'
+  | 'debtors'
+  | 'creditors'
+  | 'fixed_assets'
+  | 'depreciation'
+  | 'share_capital'
+  | 'reserves'
+  | 'suspense'
+  | 'profit_and_loss'
+
+export type JournalStatus = 'draft' | 'posted'
+
+export const ACCOUNT_KIND_LABELS: Record<AccountKind, string> = {
+  asset: 'Things the business owns or is owed',
+  liability: 'Things the business owes',
+  equity: 'The owners’ stake',
+  income: 'Income',
+  expense: 'Costs',
+}
+
+/**
+ * Which side of an account an increase falls on.
+ *
+ * Assets and costs go up on the debit side; everything else goes up on the
+ * credit side. This is the one piece of double-entry convention the module has
+ * to state outright, and every balance it works out reads from here rather than
+ * from a sign convention repeated in four places.
+ */
+export const INCREASES_ON_DEBIT: Record<AccountKind, boolean> = {
+  asset: true,
+  expense: true,
+  liability: false,
+  equity: false,
+  income: false,
+}
+
+export type BkAccountRow = {
+  id: string
+  code: string
+  name: string
+  kind: AccountKind
+  subtype: AccountSubtype
+  category_id: string | null
+  bank_account_id: string | null
+  person_name: string | null
+  position: number
+  archived: boolean
+  is_system: boolean
+  created_at: Date
+  updated_at: Date
+}
+
+export type BkJournalRow = {
+  id: string
+  date: Date
+  reference: string | null
+  narrative: string
+  status: JournalStatus
+  source: string
+  reverses_journal_id: string | null
+  reversed_by_journal_id: string | null
+  finalised_period_id: string | null
+  locked_period_id: string | null
+  locked_at: Date | null
+  created_by_user_id: string | null
+  updated_by_user_id: string | null
+  created_at: Date
+  updated_at: Date
+}
+
+export type BkJournalLineRow = {
+  id: string
+  journal_id: string
+  position: number
+  account_id: string
+  description: string
+  debit: Money
+  credit: Money
+  locked_period_id: string | null
+  created_at: Date
+  updated_at: Date
+}
+
 export type BkSettingsRow = {
   id: string
   business_name: string | null
@@ -206,6 +374,9 @@ export type BkSettingsRow = {
   attachment_max_bytes: number
   retention_years: number
   vendor_public_ip: string | null
+  /** The accounting year end, as a month and a day: "31 March", not a date. */
+  year_end_month: number
+  year_end_day: number
   created_at: Date
   updated_at: Date
 }

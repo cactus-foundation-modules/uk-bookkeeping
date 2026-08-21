@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Prisma } from '@prisma/client'
 import { describe, expect, it } from 'vitest'
 import { assembleBoxes, boxesMatch, netVatDirection } from './vat-boxes'
@@ -265,12 +267,29 @@ describe('the fraud prevention headers', () => {
 })
 
 describe('the record-protection guards', () => {
-  it('names every trigger the migration installs', () => {
-    // A guard against the health check drifting from the migration: if
-    // 002_immutability.sql grows a trigger, this list has to grow with it or the
-    // banner will never mention the missing one.
-    expect(EXPECTED_TRIGGERS).toHaveLength(10)
+  it('names every trigger the migrations install, and no others', () => {
+    // Read from the migrations rather than counted by hand.
+    //
+    // The point of this test is that the health check cannot drift from what the
+    // database actually has: a migration that adds a guard the check does not
+    // know about means the red banner will never mention that guard going
+    // missing, which is the one job the banner has. A hardcoded count catches
+    // that only if somebody remembers to update the count, which is precisely
+    // the thing being forgotten.
+    const directory = join(__dirname, '..', 'migrations')
+    const installed = new Set<string>()
+    for (const file of readdirSync(directory).filter((name) => name.endsWith('.sql'))) {
+      const sql = readFileSync(join(directory, file), 'utf8')
+      for (const match of sql.matchAll(/CREATE\s+(?:CONSTRAINT\s+)?TRIGGER\s+(\w+)/gi)) {
+        installed.add(match[1]!)
+      }
+    }
+
+    expect(installed.size).toBeGreaterThan(0)
+    expect([...EXPECTED_TRIGGERS.map((t) => t.name)].sort()).toEqual([...installed].sort())
     expect(EXPECTED_TRIGGERS.every((t) => t.name.startsWith('bk_'))).toBe(true)
+    // Every entry has to say what it protects in words a site owner can read,
+    // because that sentence is what the banner shows them.
     expect(EXPECTED_TRIGGERS.every((t) => t.protects.length > 10)).toBe(true)
   })
 })

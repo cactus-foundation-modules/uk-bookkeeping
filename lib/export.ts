@@ -30,6 +30,11 @@ export type ExportKind =
   | 'transactions'
   | 'lines'
   | 'attachments'
+  | 'journals'
+  | 'journal-lines'
+  | 'accounts'
+  | 'bank-transactions'
+  | 'reconciliations'
   | 'periods'
   | 'snapshots'
   | 'snapshot-lines'
@@ -40,6 +45,11 @@ export const EXPORT_KINDS: ExportKind[] = [
   'transactions',
   'lines',
   'attachments',
+  'journals',
+  'journal-lines',
+  'accounts',
+  'bank-transactions',
+  'reconciliations',
   'periods',
   'snapshots',
   'snapshot-lines',
@@ -60,6 +70,23 @@ const HEADERS: Record<ExportKind, string[]> = {
   ],
   attachments: [
     'id', 'transaction_id', 'name', 'filename', 'mime_type', 'size', 'sha256', 'url', 'created_at',
+  ],
+  journals: [
+    'id', 'date', 'reference', 'narrative', 'status', 'source', 'reverses_journal_id',
+    'reversed_by_journal_id', 'locked_period_id', 'created_at',
+  ],
+  'journal-lines': [
+    'id', 'journal_id', 'position', 'account_code', 'account_name', 'description',
+    'debit', 'credit',
+  ],
+  accounts: ['id', 'code', 'name', 'kind', 'subtype', 'person_name', 'archived'],
+  'bank-transactions': [
+    'id', 'bank_account_name', 'statement_id', 'date', 'details', 'counterparty',
+    'reference', 'transaction_type', 'amount', 'statement_balance', 'status',
+    'ignored_reason', 'created_at',
+  ],
+  reconciliations: [
+    'id', 'bank_transaction_id', 'transaction_id', 'amount', 'match_method', 'created_at',
   ],
   periods: [
     'id', 'period_key', 'start_date', 'end_date', 'due_date', 'status', 'scheme',
@@ -125,6 +152,54 @@ async function fetchPage(kind: ExportKind, cursor: string | bigint | null): Prom
         SELECT "id", "transaction_id", "name", "filename", "mime_type", "size", "sha256",
                "url", "created_at"
         FROM "bk_attachments" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
+      `
+      return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }
+    }
+    case 'journals': {
+      const after = (cursor as string | null) ?? ''
+      const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+        SELECT "id", "date", "reference", "narrative", "status", "source",
+               "reverses_journal_id", "reversed_by_journal_id", "locked_period_id", "created_at"
+        FROM "bk_journals" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
+      `
+      return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }
+    }
+    case 'journal-lines': {
+      const after = (cursor as string | null) ?? ''
+      const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+        SELECT l."id", l."journal_id", l."position", a."code" AS account_code,
+               a."name" AS account_name, l."description", l."debit", l."credit"
+        FROM "bk_journal_lines" l
+        JOIN "bk_accounts" a ON a."id" = l."account_id"
+        WHERE l."id" > ${after} ORDER BY l."id" ASC LIMIT ${CHUNK}
+      `
+      return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }
+    }
+    case 'accounts': {
+      const after = (cursor as string | null) ?? ''
+      const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+        SELECT "id", "code", "name", "kind", "subtype", "person_name", "archived"
+        FROM "bk_accounts" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
+      `
+      return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }
+    }
+    case 'bank-transactions': {
+      const after = (cursor as string | null) ?? ''
+      const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+        SELECT b."id", a."name" AS bank_account_name, b."statement_id", b."date", b."details",
+               b."counterparty", b."reference", b."transaction_type", b."amount",
+               b."statement_balance", b."status", b."ignored_reason", b."created_at"
+        FROM "bk_bank_transactions" b
+        JOIN "bk_bank_accounts" a ON a."id" = b."bank_account_id"
+        WHERE b."id" > ${after} ORDER BY b."id" ASC LIMIT ${CHUNK}
+      `
+      return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }
+    }
+    case 'reconciliations': {
+      const after = (cursor as string | null) ?? ''
+      const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+        SELECT "id", "bank_transaction_id", "transaction_id", "amount", "match_method", "created_at"
+        FROM "bk_reconciliations" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
       `
       return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }
     }
@@ -242,6 +317,10 @@ export async function exportSummary(): Promise<ExportBundle> {
       transactions: bigint
       lines: bigint
       attachments: bigint
+      journals: bigint
+      journal_lines: bigint
+      bank_transactions: bigint
+      reconciliations: bigint
       periods: bigint
       snapshots: bigint
       snapshot_lines: bigint
@@ -253,6 +332,10 @@ export async function exportSummary(): Promise<ExportBundle> {
       (SELECT COUNT(*) FROM "bk_transactions")::bigint          AS transactions,
       (SELECT COUNT(*) FROM "bk_transaction_lines")::bigint     AS lines,
       (SELECT COUNT(*) FROM "bk_attachments")::bigint           AS attachments,
+      (SELECT COUNT(*) FROM "bk_journals")::bigint              AS journals,
+      (SELECT COUNT(*) FROM "bk_journal_lines")::bigint         AS journal_lines,
+      (SELECT COUNT(*) FROM "bk_bank_transactions")::bigint     AS bank_transactions,
+      (SELECT COUNT(*) FROM "bk_reconciliations")::bigint       AS reconciliations,
       (SELECT COUNT(*) FROM "bk_vat_periods")::bigint           AS periods,
       (SELECT COUNT(*) FROM "bk_period_snapshots")::bigint      AS snapshots,
       (SELECT COUNT(*) FROM "bk_period_snapshot_lines")::bigint AS snapshot_lines,
@@ -268,6 +351,10 @@ export async function exportSummary(): Promise<ExportBundle> {
       transactions: Number(counts?.transactions ?? 0n),
       lines: Number(counts?.lines ?? 0n),
       attachments: Number(counts?.attachments ?? 0n),
+      journals: Number(counts?.journals ?? 0n),
+      journalLines: Number(counts?.journal_lines ?? 0n),
+      bankTransactions: Number(counts?.bank_transactions ?? 0n),
+      reconciliations: Number(counts?.reconciliations ?? 0n),
       periods: Number(counts?.periods ?? 0n),
       snapshots: Number(counts?.snapshots ?? 0n),
       snapshotLines: Number(counts?.snapshot_lines ?? 0n),

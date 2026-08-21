@@ -1,7 +1,9 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { useAdminPath } from '@/components/admin/AdminPathContext'
 import { ErrorNotice, TriggerHealthNotice, type TriggerHealth } from './Notices'
+import { formatDate, poundsFromString } from './format'
 import { hmrcFetch } from '@/modules/uk-bookkeeping/lib/hmrc/fraud-client'
 
 // Settings, as a tab under the site's own Settings page rather than another
@@ -30,6 +32,22 @@ type Settings = {
   attachmentMaxBytes: number
   retentionYears: number
   vendorPublicIp: string | null
+  /** The year end is a month and a day - "31 March", every year - not a date. */
+  yearEndMonth: number
+  yearEndDay: number
+}
+
+/**
+ * The settings as they arrive. Everything is camelCase except the year end,
+ * which is new enough that a site running an older server may still answer with
+ * the column's own spelling - so take either and settle it in one place, rather
+ * than showing 31 March to somebody who set something else.
+ */
+type SettingsResponse = Omit<Settings, 'yearEndMonth' | 'yearEndDay'> & {
+  yearEndMonth?: number
+  yearEndDay?: number
+  year_end_month?: number
+  year_end_day?: number
 }
 
 type Hmrc = {
@@ -55,11 +73,168 @@ type HeaderVerdict = {
 }
 
 type Payload = {
-  settings: Settings
+  settings: SettingsResponse
   hmrc: Hmrc
   health: TriggerHealth
   chainHead: string | null
 }
+
+// Row shapes as JSON leaves the server: dates arrive as strings and every money
+// value as a decimal string. Declared here rather than imported from lib/types,
+// so this file never reaches for anything Prisma-shaped - the same rule the
+// other bookkeeping screens keep.
+type BankAccountKind = 'bank' | 'card' | 'cash'
+
+type BankAccount = {
+  id: string
+  name: string
+  kind: BankAccountKind
+  bank_name: string | null
+  account_last4: string | null
+  sort_code: string | null
+  opening_balance: string
+  opening_date: string | null
+  archived: boolean
+  position: number
+  position_summary: {
+    openingBalance: string
+    statementBalance: string
+    lastStatementDate: string | null
+    unreconciledCount: number
+    unreconciledTotal: string
+  }
+}
+
+type AccountKind = 'asset' | 'liability' | 'equity' | 'income' | 'expense'
+
+type AccountSubtype =
+  | 'other'
+  | 'bank'
+  | 'cash'
+  | 'director_loan'
+  | 'vat_control'
+  | 'debtors'
+  | 'creditors'
+  | 'fixed_assets'
+  | 'depreciation'
+  | 'share_capital'
+  | 'reserves'
+  | 'suspense'
+  | 'profit_and_loss'
+
+type LedgerAccount = {
+  id: string
+  code: string
+  name: string
+  kind: AccountKind
+  subtype: AccountSubtype
+  person_name: string | null
+  position: number
+  archived: boolean
+  is_system: boolean
+}
+
+type NewBankAccount = {
+  name: string
+  kind: BankAccountKind
+  bankName: string
+  accountLast4: string
+  sortCode: string
+  openingBalance: string
+  openingDate: string
+}
+
+type NewLedgerAccount = {
+  name: string
+  kind: AccountKind
+  subtype: AccountSubtype
+  personName: string
+}
+
+const EMPTY_BANK_ACCOUNT: NewBankAccount = {
+  name: '',
+  kind: 'bank',
+  bankName: '',
+  accountLast4: '',
+  sortCode: '',
+  openingBalance: '',
+  openingDate: '',
+}
+
+const EMPTY_LEDGER_ACCOUNT: NewLedgerAccount = {
+  name: '',
+  kind: 'liability',
+  subtype: 'other',
+  personName: '',
+}
+
+const MONTHS = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+]
+
+// 31 March, which is what a company incorporated without a thought about it ends
+// up with often enough to be the least surprising thing to show.
+const DEFAULT_YEAR_END_MONTH = 3
+const DEFAULT_YEAR_END_DAY = 31
+
+const BANK_KIND_LABELS: Record<BankAccountKind, string> = {
+  bank: 'Bank account',
+  card: 'Credit or charge card',
+  cash: 'Cash',
+}
+
+// The same plain-English headings the accounts are grouped under on the journals
+// screen, so the two lists read as one list.
+const KIND_GROUPS: { kind: AccountKind; label: string }[] = [
+  { kind: 'asset', label: 'Things the business owns or is owed' },
+  { kind: 'liability', label: 'Things the business owes' },
+  { kind: 'equity', label: 'The owners’ stake' },
+  { kind: 'income', label: 'Income' },
+  { kind: 'expense', label: 'Costs' },
+]
+
+const SUBTYPE_LABELS: Record<AccountSubtype, string> = {
+  other: 'Nothing special',
+  bank: 'Money in a bank account',
+  cash: 'Cash',
+  director_loan: 'Director’s loan',
+  vat_control: 'VAT owed to HMRC',
+  debtors: 'Money owed to the business',
+  creditors: 'Money the business owes',
+  fixed_assets: 'Equipment and other lasting things',
+  depreciation: 'Wear and tear',
+  share_capital: 'Shares',
+  reserves: 'Profits kept in the business',
+  suspense: 'Somewhere to park the unexplained',
+  profit_and_loss: 'Profit and loss',
+}
+
+const SUBTYPE_ORDER: AccountSubtype[] = [
+  'other',
+  'director_loan',
+  'bank',
+  'cash',
+  'vat_control',
+  'debtors',
+  'creditors',
+  'fixed_assets',
+  'depreciation',
+  'share_capital',
+  'reserves',
+  'suspense',
+  'profit_and_loss',
+]
 
 const input: React.CSSProperties = {
   padding: '0.375rem 0.625rem',
@@ -80,11 +255,29 @@ const row: React.CSSProperties = {
   borderBottom: '1px solid var(--color-border)',
 }
 
+const quiet: React.CSSProperties = {
+  display: 'block',
+  fontSize: 'var(--text-xs, 0.75rem)',
+  color: 'var(--color-text-muted, var(--color-text))',
+}
+
+const headStyle: React.CSSProperties = { padding: '0.5rem 0.625rem', textAlign: 'left' }
+const cellStyle: React.CSSProperties = { padding: '0.5rem 0.625rem', verticalAlign: 'top' }
+
 function toDateValue(value: string | null): string {
   return value ? String(value).slice(0, 10) : ''
 }
 
+function withYearEnd(raw: SettingsResponse): Settings {
+  return {
+    ...raw,
+    yearEndMonth: raw.yearEndMonth ?? raw.year_end_month ?? DEFAULT_YEAR_END_MONTH,
+    yearEndDay: raw.yearEndDay ?? raw.year_end_day ?? DEFAULT_YEAR_END_DAY,
+  }
+}
+
 export function BookkeepingSettingsTab() {
+  const adminPath = useAdminPath()
   const [data, setData] = useState<Payload | null>(null)
   const [settings, setSettings] = useState<Settings | null>(null)
   const [saved, setSaved] = useState(false)
@@ -105,6 +298,24 @@ export function BookkeepingSettingsTab() {
   const [savedCreds, setSavedCreds] = useState(false)
   const [credError, setCredError] = useState<string | null>(null)
 
+  // The two account lists save themselves as you go, rather than waiting for the
+  // button at the bottom, so they keep their own errors and their own busy flag.
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[] | null>(null)
+  const [bankError, setBankError] = useState<string | null>(null)
+  const [bankNotice, setBankNotice] = useState<string | null>(null)
+  const [bankBusy, setBankBusy] = useState(false)
+  const [newBank, setNewBank] = useState<NewBankAccount>(EMPTY_BANK_ACCOUNT)
+
+  // The categories, for the one dropdown that needs them: what sales handed over
+  // by another module get filed under.
+  const [categories, setCategories] = useState<{ id: string; name: string; direction: string }[] | null>(null)
+
+  const [ledgerAccounts, setLedgerAccounts] = useState<LedgerAccount[] | null>(null)
+  const [ledgerError, setLedgerError] = useState<string | null>(null)
+  const [ledgerNotice, setLedgerNotice] = useState<string | null>(null)
+  const [ledgerBusy, setLedgerBusy] = useState(false)
+  const [newLedger, setNewLedger] = useState<NewLedgerAccount>(EMPTY_LEDGER_ACCOUNT)
+
   const load = useCallback(async () => {
     try {
       const [response, envResponse] = await Promise.all([
@@ -117,7 +328,7 @@ export function BookkeepingSettingsTab() {
       }
       const payload: Payload = await response.json()
       setData(payload)
-      setSettings(payload.settings)
+      setSettings(withYearEnd(payload.settings))
       // Only site admins may manage credentials; anybody else keeps the
       // read-only view rather than a form that cannot save.
       if (envResponse.ok) {
@@ -131,10 +342,64 @@ export function BookkeepingSettingsTab() {
     }
   }, [])
 
+  const loadBankAccounts = useCallback(async () => {
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/bank-accounts')
+      const payload = (await response.json().catch(() => ({}))) as {
+        accounts?: BankAccount[]
+        error?: string
+      }
+      if (!response.ok) {
+        setBankError(payload.error ?? 'The bank accounts could not be loaded.')
+        return
+      }
+      setBankAccounts(payload.accounts ?? [])
+    } catch {
+      setBankError('The bank accounts could not be loaded. Check the connection and reload the page.')
+    }
+  }, [])
+
+  const loadLedgerAccounts = useCallback(async () => {
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/accounts')
+      const payload = (await response.json().catch(() => ({}))) as {
+        accounts?: LedgerAccount[]
+        error?: string
+      }
+      if (!response.ok) {
+        setLedgerError(payload.error ?? 'The accounts could not be loaded.')
+        return
+      }
+      setLedgerAccounts(payload.accounts ?? [])
+    } catch {
+      setLedgerError('The accounts could not be loaded. Check the connection and reload the page.')
+    }
+  }, [])
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- delegating to an async helper; every setState is after an await
     load()
   }, [load])
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- delegating to an async helper; every setState is after an await
+    loadBankAccounts()
+  }, [loadBankAccounts])
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- delegating to an async helper; every setState is after an await
+    loadLedgerAccounts()
+  }, [loadLedgerAccounts])
+
+  useEffect(() => {
+    fetch('/api/m/uk-bookkeeping/admin/categories')
+      .then(async (response) => {
+        if (!response.ok) return
+        const payload = (await response.json()) as { categories?: { id: string; name: string; direction: string }[] }
+        setCategories(payload.categories ?? [])
+      })
+      .catch(() => {})
+  }, [])
 
   if (error && !data) return <ErrorNotice message={error} />
   if (!data || !settings) return <p>Loading…</p>
@@ -260,6 +525,204 @@ export function BookkeepingSettingsTab() {
     }
   }
 
+  async function addBankAccount() {
+    setBankError(null)
+    setBankNotice(null)
+    if (!newBank.name.trim()) {
+      setBankError('The account needs a name, so you can tell it from the others.')
+      return
+    }
+    setBankBusy(true)
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/bank-accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newBank.name.trim(),
+          kind: newBank.kind,
+          bankName: newBank.bankName.trim() || null,
+          accountLast4: newBank.accountLast4.trim() || null,
+          sortCode: newBank.sortCode.trim() || null,
+          // A decimal string from the keystroke to the save, never a number: an
+          // empty box means nothing was in the account on day one, so it is sent
+          // as an amount rather than left for the server to guess at.
+          openingBalance: newBank.openingBalance.trim() || '0.00',
+          openingDate: newBank.openingDate || null,
+        }),
+      })
+      const payload = (await response.json().catch(() => ({}))) as { error?: string }
+      if (!response.ok) {
+        setBankError(payload.error ?? 'That account could not be added.')
+        return
+      }
+      setNewBank(EMPTY_BANK_ACCOUNT)
+      await loadBankAccounts()
+    } catch {
+      setBankError('The save did not reach the server. Check the connection and try again.')
+    } finally {
+      setBankBusy(false)
+    }
+  }
+
+  async function archiveBankAccount(account: BankAccount) {
+    setBankError(null)
+    setBankNotice(null)
+    setBankBusy(true)
+    try {
+      const response = await fetch(`/api/m/uk-bookkeeping/admin/bank-accounts/${account.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ archived: true }),
+      })
+      const payload = (await response.json().catch(() => ({}))) as { error?: string }
+      if (!response.ok) {
+        setBankError(payload.error ?? 'That account could not be put away.')
+        return
+      }
+      setBankNotice(`${account.name} has been put away. Everything on it is kept.`)
+      await loadBankAccounts()
+    } catch {
+      setBankError('That did not reach the server. Check the connection and try again.')
+    } finally {
+      setBankBusy(false)
+    }
+  }
+
+  async function removeBankAccount(account: BankAccount) {
+    if (
+      !window.confirm(
+        `Remove ${account.name}? If a statement has ever been imported against it, it is put away instead.`,
+      )
+    ) {
+      return
+    }
+    setBankError(null)
+    setBankNotice(null)
+    setBankBusy(true)
+    try {
+      const response = await fetch(`/api/m/uk-bookkeeping/admin/bank-accounts/${account.id}`, {
+        method: 'DELETE',
+      })
+      const payload = (await response.json().catch(() => ({}))) as {
+        outcome?: 'deleted' | 'archived'
+        error?: string
+      }
+      if (!response.ok) {
+        setBankError(payload.error ?? 'That account could not be removed.')
+        return
+      }
+      setBankNotice(
+        payload.outcome === 'archived'
+          ? `${account.name} has been put away rather than removed - a statement has been imported against it, and the lines behind your ticked-off entries hang off it.`
+          : `${account.name} has been removed.`,
+      )
+      await loadBankAccounts()
+    } catch {
+      setBankError('That did not reach the server. Check the connection and try again.')
+    } finally {
+      setBankBusy(false)
+    }
+  }
+
+  async function addLedgerAccount() {
+    setLedgerError(null)
+    setLedgerNotice(null)
+    if (!newLedger.name.trim()) {
+      setLedgerError('An account needs a name.')
+      return
+    }
+    // The server refuses this one too. Saying so here saves a round trip and
+    // keeps what has been typed.
+    if (newLedger.subtype === 'director_loan' && !newLedger.personName.trim()) {
+      setLedgerError('A director’s loan account needs to say whose it is.')
+      return
+    }
+    setLedgerBusy(true)
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newLedger.name.trim(),
+          kind: newLedger.kind,
+          subtype: newLedger.subtype,
+          personName: newLedger.personName.trim() || null,
+        }),
+      })
+      const payload = (await response.json().catch(() => ({}))) as { error?: string }
+      if (!response.ok) {
+        setLedgerError(payload.error ?? 'That account could not be added.')
+        return
+      }
+      setNewLedger(EMPTY_LEDGER_ACCOUNT)
+      await loadLedgerAccounts()
+    } catch {
+      setLedgerError('The save did not reach the server. Check the connection and try again.')
+    } finally {
+      setLedgerBusy(false)
+    }
+  }
+
+  async function archiveLedgerAccount(account: LedgerAccount) {
+    setLedgerError(null)
+    setLedgerNotice(null)
+    setLedgerBusy(true)
+    try {
+      const response = await fetch(`/api/m/uk-bookkeeping/admin/accounts/${account.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ archived: true }),
+      })
+      const payload = (await response.json().catch(() => ({}))) as { error?: string }
+      if (!response.ok) {
+        setLedgerError(payload.error ?? 'That account could not be put away.')
+        return
+      }
+      setLedgerNotice(`${account.name} has been put away. Old journals still show it.`)
+      await loadLedgerAccounts()
+    } catch {
+      setLedgerError('That did not reach the server. Check the connection and try again.')
+    } finally {
+      setLedgerBusy(false)
+    }
+  }
+
+  async function removeLedgerAccount(account: LedgerAccount) {
+    if (
+      !window.confirm(
+        `Remove ${account.name}? If a journal has ever used it, it is put away instead.`,
+      )
+    ) {
+      return
+    }
+    setLedgerError(null)
+    setLedgerNotice(null)
+    setLedgerBusy(true)
+    try {
+      const response = await fetch(`/api/m/uk-bookkeeping/admin/accounts/${account.id}`, {
+        method: 'DELETE',
+      })
+      const payload = (await response.json().catch(() => ({}))) as {
+        outcome?: 'deleted' | 'archived'
+        error?: string
+      }
+      if (!response.ok) {
+        setLedgerError(payload.error ?? 'That account could not be removed.')
+        return
+      }
+      setLedgerNotice(
+        payload.outcome === 'archived'
+          ? `${account.name} has been put away rather than removed - a journal has used it, and a journal from years ago can only explain itself if the accounts it points at are still there.`
+          : `${account.name} has been removed.`,
+      )
+      await loadLedgerAccounts()
+    } catch {
+      setLedgerError('That did not reach the server. Check the connection and try again.')
+    } finally {
+      setLedgerBusy(false)
+    }
+  }
+
   const { hmrc } = data
 
   const credentialsFields = envLocalMode ? (
@@ -355,6 +818,42 @@ export function BookkeepingSettingsTab() {
           <label htmlFor="bk-registered">VAT registered from</label>
           <input id="bk-registered" type="date" style={input} value={toDateValue(settings.vatRegisteredFrom)} onChange={(e) => set('vatRegisteredFrom', e.target.value || null)} />
         </div>
+      </div>
+
+      <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+        <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Your accounting year end</h3>
+        <div style={row}>
+          <label htmlFor="bk-year-end-month">Month</label>
+          <select
+            id="bk-year-end-month"
+            style={input}
+            value={settings.yearEndMonth}
+            onChange={(e) => set('yearEndMonth', Number(e.target.value))}
+          >
+            {MONTHS.map((month, index) => (
+              <option key={month} value={index + 1}>
+                {month}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-year-end-day">Day</label>
+          <input
+            id="bk-year-end-day"
+            type="number"
+            min={1}
+            max={31}
+            style={input}
+            value={settings.yearEndDay}
+            onChange={(e) => set('yearEndDay', Number(e.target.value))}
+          />
+        </div>
+        <p style={{ margin: '0.75rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+          The date your financial year ends - often 31 March, or the anniversary of the month the
+          company was set up. The director&rsquo;s loan screen works out where the loan stood at this
+          date, which is the figure that decides whether anything has to be paid back.
+        </p>
       </div>
 
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
@@ -674,6 +1173,344 @@ export function BookkeepingSettingsTab() {
         Save settings
       </button>
       {saved && <span style={{ marginLeft: '0.75rem', color: 'var(--color-success, var(--color-text))', fontSize: 'var(--text-sm)' }}>Saved</span>}
+
+      {/*
+        Both lists below sit under the save button on purpose: everything above it
+        is settings you save in one go, and these save themselves the moment you
+        press a button. Mixing the two in one column is how somebody ends up
+        adding an account, pressing Save, and wondering which of the two happened.
+      */}
+      <div className="card" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
+        <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Bank accounts</h3>
+        <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
+          A statement is imported against one particular account, so there has to be an account here
+          before anything can be brought in. Changes on this card take effect straight away rather
+          than waiting for the save button above.
+        </p>
+        <ErrorNotice message={bankError} />
+        {bankNotice && (
+          <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+            {bankNotice}
+          </p>
+        )}
+
+        {!bankAccounts ? (
+          <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>Loading…</p>
+        ) : bankAccounts.length === 0 ? (
+          <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+            Nothing here yet. Add the account your statements come from, below.
+          </p>
+        ) : (
+          <div style={{ overflowX: 'auto', marginBottom: '1rem' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
+                  <th style={headStyle}>Account</th>
+                  <th style={headStyle}>Numbers</th>
+                  <th style={{ ...headStyle, textAlign: 'right' }}>Statement balance</th>
+                  <th style={headStyle}>Still to explain</th>
+                  <th style={headStyle}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {bankAccounts.map((account) => (
+                  <tr key={account.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                    <td style={cellStyle}>
+                      {account.name}
+                      <span style={quiet}>
+                        {BANK_KIND_LABELS[account.kind]}
+                        {account.bank_name ? ` at ${account.bank_name}` : ''}
+                      </span>
+                    </td>
+                    <td style={cellStyle}>
+                      {account.sort_code ?? '—'}
+                      {account.account_last4 && <span style={quiet}>ending {account.account_last4}</span>}
+                    </td>
+                    <td style={{ ...cellStyle, textAlign: 'right' }}>
+                      {poundsFromString(account.position_summary.statementBalance)}
+                      <span style={quiet}>
+                        {account.position_summary.lastStatementDate
+                          ? `to ${formatDate(account.position_summary.lastStatementDate)}`
+                          : 'no statement yet'}
+                      </span>
+                    </td>
+                    <td style={cellStyle}>
+                      {account.position_summary.unreconciledCount > 0 ? (
+                        <a href={`/${adminPath}/m/uk-bookkeeping/reconcile`}>
+                          {account.position_summary.unreconciledCount} to explain
+                          <span style={quiet}>
+                            {poundsFromString(account.position_summary.unreconciledTotal)}
+                          </span>
+                        </a>
+                      ) : (
+                        <span style={{ color: 'var(--color-text-muted, var(--color-text))' }}>
+                          Nothing waiting
+                        </span>
+                      )}
+                    </td>
+                    <td style={cellStyle}>
+                      <div style={{ display: 'flex', gap: '0.375rem', flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => archiveBankAccount(account)}
+                          disabled={bankBusy}
+                        >
+                          Put away
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => removeBankAccount(account)}
+                          disabled={bankBusy}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <p style={{ margin: '0 0 0.5rem', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
+          An account a statement has ever been imported against is put away rather than removed. The
+          statement lines behind every entry you have ticked off hang from it, so taking it away
+          would take the tick with it.
+        </p>
+
+        <h4 style={{ margin: '1rem 0 0.25rem', fontSize: 'var(--text-sm)' }}>Add an account</h4>
+        <div style={row}>
+          <label htmlFor="bk-new-bank-name">
+            What you call it
+            <span style={quiet}>Required. Whatever you would say out loud: &ldquo;Current account&rdquo;.</span>
+          </label>
+          <input
+            id="bk-new-bank-name"
+            style={input}
+            value={newBank.name}
+            onChange={(e) => setNewBank({ ...newBank, name: e.target.value })}
+          />
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-bank-kind">What sort</label>
+          <select
+            id="bk-new-bank-kind"
+            style={input}
+            value={newBank.kind}
+            onChange={(e) => setNewBank({ ...newBank, kind: e.target.value as BankAccountKind })}
+          >
+            <option value="bank">Bank account</option>
+            <option value="card">Credit or charge card</option>
+            <option value="cash">Cash</option>
+          </select>
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-bank-bank">Who it is with</label>
+          <input
+            id="bk-new-bank-bank"
+            style={input}
+            value={newBank.bankName}
+            onChange={(e) => setNewBank({ ...newBank, bankName: e.target.value })}
+          />
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-bank-last4">
+            Last four digits
+            <span style={quiet}>Only the last four are kept, whatever you type.</span>
+          </label>
+          <input
+            id="bk-new-bank-last4"
+            inputMode="numeric"
+            style={input}
+            value={newBank.accountLast4}
+            onChange={(e) => setNewBank({ ...newBank, accountLast4: e.target.value })}
+          />
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-bank-sort">Sort code</label>
+          <input
+            id="bk-new-bank-sort"
+            inputMode="numeric"
+            placeholder="00-00-00"
+            style={input}
+            value={newBank.sortCode}
+            onChange={(e) => setNewBank({ ...newBank, sortCode: e.target.value })}
+          />
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-bank-opening">
+            What was in it to start with
+            <span style={quiet}>Leave it empty if you are starting from nothing.</span>
+          </label>
+          <input
+            id="bk-new-bank-opening"
+            inputMode="decimal"
+            placeholder="0.00"
+            style={input}
+            value={newBank.openingBalance}
+            onChange={(e) => setNewBank({ ...newBank, openingBalance: e.target.value })}
+          />
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-bank-opening-date">…as at</label>
+          <input
+            id="bk-new-bank-opening-date"
+            type="date"
+            style={input}
+            value={newBank.openingDate}
+            onChange={(e) => setNewBank({ ...newBank, openingDate: e.target.value })}
+          />
+        </div>
+        <div style={{ marginTop: '0.75rem' }}>
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            onClick={addBankAccount}
+            disabled={bankBusy}
+          >
+            {bankBusy ? 'Adding…' : 'Add account'}
+          </button>
+        </div>
+      </div>
+
+      <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+        <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Ledger accounts</h3>
+        <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
+          These are the pots a journal moves money between, and they arrive ready made - most people
+          never need to add one. The exception is a director&rsquo;s loan account: if more than one
+          director lends the company money, give each of them their own, so each running total is
+          their own. Changes here take effect straight away.
+        </p>
+        <ErrorNotice message={ledgerError} />
+        {ledgerNotice && (
+          <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+            {ledgerNotice}
+          </p>
+        )}
+
+        {!ledgerAccounts ? (
+          <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>Loading…</p>
+        ) : ledgerAccounts.length === 0 ? (
+          <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+            Nothing here yet.
+          </p>
+        ) : (
+          KIND_GROUPS.map((group) => {
+            const rows = ledgerAccounts.filter((account) => account.kind === group.kind)
+            if (rows.length === 0) return null
+            return (
+              <div key={group.kind}>
+                <h4 style={{ margin: '1rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+                  {group.label}
+                </h4>
+                {rows.map((account) => (
+                  <div key={account.id} style={row}>
+                    <span>
+                      {account.name}
+                      <span style={quiet}>
+                        {account.person_name ? `${account.person_name} · ` : ''}
+                        {SUBTYPE_LABELS[account.subtype]}
+                        {account.is_system ? ' · built in' : ''}
+                      </span>
+                    </span>
+                    <span style={{ display: 'flex', gap: '0.375rem', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => archiveLedgerAccount(account)}
+                        disabled={ledgerBusy}
+                      >
+                        Put away
+                      </button>
+                      {!account.is_system && (
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => removeLedgerAccount(account)}
+                          disabled={ledgerBusy}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )
+          })
+        )}
+
+        <h4 style={{ margin: '1rem 0 0.25rem', fontSize: 'var(--text-sm)' }}>Add an account</h4>
+        <div style={row}>
+          <label htmlFor="bk-new-account-name">
+            Name
+            <span style={quiet}>Required. What you would like to see it called on a journal.</span>
+          </label>
+          <input
+            id="bk-new-account-name"
+            style={input}
+            value={newLedger.name}
+            onChange={(e) => setNewLedger({ ...newLedger, name: e.target.value })}
+          />
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-account-kind">What sort of account</label>
+          <select
+            id="bk-new-account-kind"
+            style={input}
+            value={newLedger.kind}
+            onChange={(e) => setNewLedger({ ...newLedger, kind: e.target.value as AccountKind })}
+          >
+            {KIND_GROUPS.map((group) => (
+              <option key={group.kind} value={group.kind}>
+                {group.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-account-subtype">What it is for</label>
+          <select
+            id="bk-new-account-subtype"
+            style={input}
+            value={newLedger.subtype}
+            onChange={(e) => setNewLedger({ ...newLedger, subtype: e.target.value as AccountSubtype })}
+          >
+            {SUBTYPE_ORDER.map((subtype) => (
+              <option key={subtype} value={subtype}>
+                {SUBTYPE_LABELS[subtype]}
+              </option>
+            ))}
+          </select>
+        </div>
+        {newLedger.subtype === 'director_loan' && (
+          <div style={row}>
+            <label htmlFor="bk-new-account-person">
+              Whose account is it
+              <span style={quiet}>Required. The director whose money this account follows.</span>
+            </label>
+            <input
+              id="bk-new-account-person"
+              style={input}
+              value={newLedger.personName}
+              onChange={(e) => setNewLedger({ ...newLedger, personName: e.target.value })}
+            />
+          </div>
+        )}
+        <div style={{ marginTop: '0.75rem' }}>
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            onClick={addLedgerAccount}
+            disabled={ledgerBusy}
+          >
+            {ledgerBusy ? 'Adding…' : 'Add account'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

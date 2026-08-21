@@ -42,6 +42,8 @@ export async function GET() {
       attachmentMaxBytes: settings.attachment_max_bytes,
       retentionYears: settings.retention_years,
       vendorPublicIp: settings.vendor_public_ip,
+      yearEndMonth: settings.year_end_month,
+      yearEndDay: settings.year_end_day,
     },
     hmrc: {
       configured: isHmrcConfigured(),
@@ -78,6 +80,10 @@ const PatchBody = z.object({
   attachmentMaxBytes: z.number().int().min(1024).max(100 * 1024 * 1024).optional(),
   retentionYears: z.number().int().min(1).max(20).optional(),
   vendorPublicIp: z.string().nullable().optional(),
+  // The accounting year end, as a month and a day. Whether the day exists in the
+  // chosen month is settled in lib/settings.ts, which can say so in a sentence.
+  yearEndMonth: z.number().int().min(1).max(12).optional(),
+  yearEndDay: z.number().int().min(1).max(31).optional(),
 })
 
 export async function PATCH(request: NextRequest) {

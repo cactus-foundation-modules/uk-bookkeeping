@@ -26,6 +26,10 @@ const FALLBACK: BkSettingsRow = {
   attachment_max_bytes: 15_728_640,
   retention_years: 6,
   vendor_public_ip: null,
+  // 31 March, which is what a company incorporated without a thought about it
+  // ends up with often enough to be the least surprising default.
+  year_end_month: 3,
+  year_end_day: 31,
   created_at: new Date(),
   updated_at: new Date(),
 }
@@ -64,6 +68,9 @@ export type SettingsPatch = {
   attachmentMaxBytes?: number
   retentionYears?: number
   vendorPublicIp?: string | null
+  /** The accounting year end, as a month and a day. Drives the director's loan position. */
+  yearEndMonth?: number
+  yearEndDay?: number
 }
 
 /**
@@ -124,6 +131,17 @@ export async function updateSettings(patch: SettingsPatch): Promise<BkSettingsRo
       'The first VAT period cannot end before it starts - check the two dates.',
     )
   }
+  // A year end of 31 February is not a year end. The CHECK constraint would
+  // refuse it anyway; this refuses it in a sentence.
+  const yearEndMonth = patch.yearEndMonth ?? current.year_end_month
+  const yearEndDay = patch.yearEndDay ?? current.year_end_day
+  if (
+    (patch.yearEndMonth !== undefined || patch.yearEndDay !== undefined) &&
+    (yearEndMonth < 1 || yearEndMonth > 12 || yearEndDay < 1 || yearEndDay > 31)
+  ) {
+    throw new BookkeepingError('invalid', 'That is not a date the year could end on.')
+  }
+
   if (patch.errorThresholdPercent !== undefined) {
     checkAmountSetting(patch.errorThresholdPercent, 'The error threshold percentage')
     const percent = Number(patch.errorThresholdPercent)
@@ -187,6 +205,8 @@ export async function updateSettings(patch: SettingsPatch): Promise<BkSettingsRo
       "attachment_max_bytes"    = ${patch.attachmentMaxBytes ?? current.attachment_max_bytes},
       "retention_years"         = ${patch.retentionYears ?? current.retention_years},
       "vendor_public_ip"        = ${patch.vendorPublicIp === undefined ? current.vendor_public_ip : patch.vendorPublicIp},
+      "year_end_month"          = ${patch.yearEndMonth ?? current.year_end_month},
+      "year_end_day"            = ${patch.yearEndDay ?? current.year_end_day},
       "updated_at"              = NOW()
     WHERE "id" = 'singleton'
   `
