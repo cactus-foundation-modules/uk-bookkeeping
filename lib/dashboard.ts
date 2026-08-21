@@ -43,6 +43,8 @@ export type DashboardData = {
   } | null
   month: { from: string; income: string; expenses: string; profit: string }
   drafts: number
+  /** Statement lines the bank has and the books do not, on live accounts. */
+  unreconciled: number
   missingEvidence: number
   /** Assets raised off a ticked purchase line that nobody has finished off yet. */
   unfinishedAssets: number
@@ -133,6 +135,17 @@ export async function getDashboard(): Promise<DashboardData> {
   const [draftRow] = await prisma.$queryRaw<{ count: bigint }[]>`
     SELECT COUNT(*)::bigint AS count FROM "bk_transactions" WHERE "status" = 'draft'
   `
+  // Statement lines nobody has matched yet. A different queue from the drafts
+  // above - drafts are half-written entries, these are the bank's own version of
+  // events with nothing in the books against them - and the overview said
+  // nothing at all about them until it counted them here. Archived accounts are
+  // left out: their leftovers are history, not a job.
+  const [unreconciledRow] = await prisma.$queryRaw<{ count: bigint }[]>`
+    SELECT COUNT(*)::bigint AS count
+    FROM "bk_bank_transactions" b
+    JOIN "bk_bank_accounts" a ON a."id" = b."bank_account_id"
+    WHERE b."status" = 'unreconciled' AND a."archived" = FALSE
+  `
   const [evidenceRow] = await prisma.$queryRaw<{ count: bigint }[]>`
     SELECT COUNT(*)::bigint AS count FROM "bk_transactions" t
     WHERE t."status" = 'posted'
@@ -161,6 +174,7 @@ export async function getDashboard(): Promise<DashboardData> {
       profit: formatMoney(month.income.minus(month.expenses)),
     },
     drafts: Number(draftRow?.count ?? 0n),
+    unreconciled: Number(unreconciledRow?.count ?? 0n),
     missingEvidence: Number(evidenceRow?.count ?? 0n),
     unfinishedAssets,
     recent: recentList.rows.map((row) => ({

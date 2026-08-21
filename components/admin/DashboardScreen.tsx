@@ -43,6 +43,7 @@ type Data = {
   } | null
   month: { from: string; income: string; expenses: string; profit: string }
   drafts: number
+  unreconciled: number
   missingEvidence: number
   unfinishedAssets: number
   recent: {
@@ -130,6 +131,43 @@ export default function DashboardScreen({
   }, [load])
 
   const base = `/${adminPath}/m/uk-bookkeeping`
+
+  // Everything a human still has to look at, each queue with its own count and
+  // its own screen. Drafts and unmatched statement lines are separate piles in
+  // separate tables, and the headline used to be the drafts alone - which read
+  // as "nothing to do" on a site with a fortnight of statement lines sat
+  // unmatched on the reconcile screen.
+  const waiting = data
+    ? [
+        {
+          key: 'drafts',
+          count: data.drafts,
+          href: `${base}/transactions?status=draft`,
+          label: `imported entr${data.drafts === 1 ? 'y' : 'ies'} to review`,
+        },
+        {
+          key: 'bank',
+          count: data.unreconciled,
+          href: `${base}/reconcile`,
+          label: `bank line${data.unreconciled === 1 ? '' : 's'} to match up`,
+        },
+        {
+          key: 'evidence',
+          count: data.missingEvidence,
+          href: `${base}/transactions?hasEvidence=0`,
+          label: 'without a receipt',
+        },
+        {
+          key: 'assets',
+          count: data.unfinishedAssets,
+          href: `${base}/assets`,
+          label: `asset${data.unfinishedAssets === 1 ? '' : 's'} to finish off`,
+        },
+      ].filter((item) => item.count > 0)
+    : []
+  // The two review queues. A missing receipt or an unfinished asset is worth
+  // saying, but neither is a row sitting in a queue with a tick box next to it.
+  const toReview = data ? data.drafts + data.unreconciled : 0
 
   return (
     <div>
@@ -227,38 +265,26 @@ export default function DashboardScreen({
                 style={{
                   ...tileValue,
                   color:
-                    data.drafts > 0
-                      ? 'var(--color-warning, var(--color-text))'
-                      : 'var(--color-text)',
+                    toReview > 0 ? 'var(--color-warning, var(--color-text))' : 'var(--color-text)',
                 }}
               >
-                {data.drafts}
+                {toReview}
               </span>
               <span style={tileNote}>
-                <a href={`${base}/transactions?status=draft`}>
-                  imported entr{data.drafts === 1 ? 'y' : 'ies'} to review
-                </a>
-                {data.missingEvidence > 0 && (
-                  <>
-                    {' · '}
-                    <a href={`${base}/transactions?hasEvidence=0`}>
-                      {data.missingEvidence} without a receipt
-                    </a>
-                  </>
-                )}
                 {/*
                   An asset nobody finished off claims no capital allowances, and
                   the only place that shows up is a tax bill that is too big.
                   Said here because this is the page people actually look at.
                 */}
-                {data.unfinishedAssets > 0 && (
-                  <>
-                    {' · '}
-                    <a href={`${base}/assets`}>
-                      {data.unfinishedAssets} asset{data.unfinishedAssets === 1 ? '' : 's'} to finish off
+                {waiting.length === 0 && 'Nothing waiting.'}
+                {waiting.map((item, index) => (
+                  <span key={item.key}>
+                    {index > 0 && ' · '}
+                    <a href={item.href}>
+                      {item.count} {item.label}
                     </a>
-                  </>
-                )}
+                  </span>
+                ))}
               </span>
             </div>
           </>
