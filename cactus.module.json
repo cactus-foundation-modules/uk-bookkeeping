@@ -1,6 +1,6 @@
 {
   "name": "uk-bookkeeping",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "tablePrefix": "bk_",
   "description": "UK bookkeeping with Making Tax Digital VAT returns. Records income and expenses with evidence, works the nine VAT boxes out from those records, and files them with HMRC.",
   "permissions": [
@@ -85,6 +85,12 @@
       "id": "uk-bookkeeping",
       "import": "./lib/external-sales",
       "component": "ukBookkeepingShopSaleRecorder"
+    },
+    {
+      "point": "shop.invoice-voided",
+      "id": "uk-bookkeeping",
+      "import": "./lib/external-sales",
+      "component": "ukBookkeepingShopSaleVoider"
     }
   ],
   "requiresModules": []

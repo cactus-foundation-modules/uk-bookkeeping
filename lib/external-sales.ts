@@ -1,10 +1,20 @@
 import { prisma } from '@/lib/db/prisma'
+import { getActiveMediaProvider, isMediaProviderConfigured } from '@/lib/config/env'
+import { saveMediaRecord, uploadMedia } from '@/lib/media/upload'
+import {
+  createAttachment,
+  evidenceFolderPath,
+  hashBytes,
+  listAttachments,
+  resolveEvidenceFolderId,
+} from './attachments'
 import { getCategory, getCategoryByCode } from './categories'
 import { BackdatedIntoClosedPeriodError } from './errors'
+import { sniffMimeType } from './file-kinds'
 import { formatMoney } from './money'
 import { getSettings } from './settings'
-import { createTransaction, type LineInput } from './transactions'
-import type { VatRateCode } from './types'
+import { createTransaction, deleteTransaction, getTransaction, type LineInput } from './transactions'
+import type { BkTransactionLineRow, VatRateCode } from './types'
 
 // Recording a sale another module already knows about.
 //
@@ -46,6 +56,32 @@ export type ExternalSalePayload = {
   taxBreakdown: { ratePercent: string; net: string; tax: string; gross: string }[]
   description?: string
   documentUrl?: string | null
+  /** The document itself, where the publisher can print one. Filed as evidence
+   *  against the entry, because a set of books that cannot produce the invoice
+   *  behind a line is a set of books with a hole in it - and a link is not
+   *  evidence: it dies with the module that served it.
+   *
+   *  A function rather than bytes because printing an invoice is expensive and
+   *  most recorders will not want it. Sinks are called in-process, so this costs
+   *  nothing to pass. */
+  document?: ExternalSaleDocument
+}
+
+export type ExternalSaleDocument = {
+  filename: string
+  mimeType: string
+  bytes: () => Promise<Buffer | Uint8Array | null>
+}
+
+/** What a publisher hands over when it withdraws one. */
+export type ExternalSaleVoidPayload = {
+  source: string
+  invoiceNumber: string
+  orderNumber?: string
+  voidedAt?: string
+  reason?: string
+  taxPointDate?: string
+  description?: string
 }
 
 export type ExternalSaleOutcome = { ok: boolean; message: string }
@@ -84,6 +120,86 @@ async function existingEntry(source: string, ref: string): Promise<string | null
   return rows[0]?.id ?? null
 }
 
+// ---------------------------------------------------------------------------
+// Evidence
+// ---------------------------------------------------------------------------
+
+/**
+ * Files the publisher's own document against the entry it just made.
+ *
+ * Never throws and never fails the sale. An entry with no invoice behind it is
+ * worth having; a sale that vanished because a file upload timed out is not. A
+ * failure comes back as a sentence, the entry stands, and pressing the
+ * publisher's "send to the books again" button tries the attachment again -
+ * which is why this is idempotent on the filename.
+ */
+async function fileDocument(
+  transactionId: string,
+  taxPointDate: Date,
+  document: ExternalSaleDocument | undefined,
+): Promise<string> {
+  if (!document) return ''
+  try {
+    const already = await listAttachments(transactionId)
+    if (already.some((row) => row.filename === document.filename)) return ''
+
+    const provider = await getActiveMediaProvider()
+    if (!provider || !isMediaProviderConfigured(provider)) {
+      return ' The invoice itself is not attached: this site has no file storage set up yet.'
+    }
+
+    const raw = await document.bytes()
+    if (!raw) return ' The invoice itself could not be printed, so nothing is attached to it.'
+    // Buffer.from on a Buffer copies; on a Uint8Array it wraps. Either way what
+    // goes to storage is a Buffer, because Buffer.isBuffer is false for plenty
+    // of things that hold bytes.
+    const buffer = Buffer.isBuffer(raw) ? raw : Buffer.from(raw)
+
+    // The bytes decide what it is, exactly as the upload route does it. A
+    // publisher that hands over an error page labelled .pdf files nothing.
+    const actual = sniffMimeType(buffer)
+    if (!actual) return ' The invoice itself was not in a format we can keep, so nothing is attached to it.'
+
+    const settings = await getSettings()
+    if (buffer.length > settings.attachment_max_bytes) {
+      return ' The invoice itself is too big to keep as evidence, so nothing is attached to it.'
+    }
+
+    const folderId = await resolveEvidenceFolderId(taxPointDate)
+    const folderPath = await evidenceFolderPath(folderId)
+    const result = await uploadMedia(buffer, actual, provider, document.filename, folderPath || undefined)
+    const record = await saveMediaRecord({
+      key: result.key,
+      url: result.url,
+      provider,
+      mimeType: result.mimeType,
+      sizeBytes: result.sizeBytes,
+      originalName: document.filename,
+      folderId,
+    })
+    await createAttachment(
+      {
+        transactionId,
+        name: 'Invoice',
+        filename: document.filename,
+        url: result.url,
+        mediaProvider: provider,
+        mediaKey: result.key,
+        mediaId: record?.id ?? null,
+        mimeType: actual,
+        size: result.sizeBytes,
+        sha256: hashBytes(buffer),
+      },
+      null,
+    )
+    return ' The invoice is attached to it.'
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error('[uk-bookkeeping] could not attach an external sale document:', message)
+    return ' The invoice itself could not be attached.'
+  }
+}
+
 /**
  * Records one sale in the books, or explains in a sentence why it did not.
  *
@@ -105,7 +221,13 @@ export async function recordExternalSale(payload: ExternalSalePayload): Promise<
     }
 
     const already = await existingEntry(source, ref)
-    if (already) return { ok: true, message: `Already in the books - nothing recorded twice.` }
+    if (already) {
+      // The re-send button lands here. Nothing is recorded twice, but a document
+      // that never made it the first time gets another go.
+      const existingTx = await getTransaction(already)
+      const filed = existingTx ? await fileDocument(already, existingTx.tax_point_date, payload.document) : ''
+      return { ok: true, message: `Already in the books - nothing recorded twice.${filed}` }
+    }
 
     const category = settings.external_sales_category_id
       ? await getCategory(settings.external_sales_category_id)
@@ -165,12 +287,13 @@ export async function recordExternalSale(payload: ExternalSalePayload): Promise<
     const gross = lines.reduce((sum, line) => sum + Number(line.grossAmount), 0)
 
     try {
-      await createTransaction(input, null)
+      const created = await createTransaction(input, null)
+      const filed = await fileDocument(created.id, created.tax_point_date, payload.document)
       return {
         ok: true,
-        message: input.status === 'draft'
+        message: (input.status === 'draft'
           ? `Saved as a draft entry of ${formatMoney(gross.toFixed(2))} for review.`
-          : `Recorded as income of ${formatMoney(gross.toFixed(2))} in the books.`,
+          : `Recorded as income of ${formatMoney(gross.toFixed(2))} in the books.`) + filed,
       }
     } catch (error) {
       // The one refusal worth working around. A sale dated inside a VAT return
@@ -180,10 +303,12 @@ export async function recordExternalSale(payload: ExternalSalePayload): Promise<
       // call (a correction in the open period, usually) where it belongs: with
       // the person who files the returns.
       if (error instanceof BackdatedIntoClosedPeriodError) {
-        await createTransaction({ ...input, status: 'draft' }, null)
+        const draft = await createTransaction({ ...input, status: 'draft' }, null)
+        const filed = await fileDocument(draft.id, draft.tax_point_date, payload.document)
         return {
           ok: false,
-          message: 'That VAT period is already filed, so this was saved as a draft entry for you to correct in the open period.',
+          message:
+            'That VAT period is already filed, so this was saved as a draft entry for you to correct in the open period.' + filed,
         }
       }
       throw error
@@ -199,4 +324,178 @@ export async function recordExternalSale(payload: ExternalSalePayload): Promise<
  *  publisher it is registered against; the work is generic and lives above. */
 export async function ukBookkeepingShopSaleRecorder(payload: ExternalSalePayload): Promise<ExternalSaleOutcome> {
   return recordExternalSale(payload)
+}
+
+// ---------------------------------------------------------------------------
+// Taking one back out again
+// ---------------------------------------------------------------------------
+//
+// A voided invoice is not an invoice that was never raised. By the time somebody
+// withdraws one, the sale is in the books and its VAT is in a box on a return -
+// so unless the publisher says so, the shop goes on owing HMRC tax on a sale it
+// withdrew. That is what `shop.invoice-voided` is for.
+//
+// Two ways out, and which one is right depends entirely on what has happened to
+// the entry since:
+//
+//  - Nothing has: the return it belongs to is still open, no bank line has been
+//    matched to it and nothing corrects it. Then the honest thing is to remove
+//    it. It never happened, and leaving a sale and a mirror-image reversal in an
+//    open period makes the books harder to read for no gain.
+//
+//  - Something has: it is in a filed return, it is reconciled against a bank
+//    line, or a correction points at it. Then it stays exactly where it is and a
+//    reversing entry goes in the open period, which is what a credit note is and
+//    the only way a filed return is ever put right.
+
+export type SaleRemovalPlan = 'delete' | 'reverse'
+
+/** Which of the two, given what has happened to the entry. Pure, so the rule can
+ *  be read and tested without a database. */
+export function planSaleRemoval(state: {
+  locked: boolean
+  finalised: boolean
+  reconciled: boolean
+  corrected: boolean
+}): SaleRemovalPlan {
+  return state.locked || state.finalised || state.reconciled || state.corrected ? 'reverse' : 'delete'
+}
+
+/** The original's lines, negated. Same categories, same VAT treatment, same
+ *  rates - a credit note is the sale in reverse, not a fresh judgement about
+ *  what it was. Gross stays net plus VAT, which is what the CHECK constraint and
+ *  the validator both insist on. */
+export function reversalLines(lines: Pick<
+  BkTransactionLineRow,
+  'category_id' | 'description' | 'vat_treatment' | 'vat_rate_code' | 'vat_rate_percent' | 'net_amount' | 'vat_amount' | 'gross_amount' | 'is_capital'
+>[]): LineInput[] {
+  const negate = (value: unknown): string => {
+    const amount = Number(value)
+    // -0.00 is a real thing in JavaScript and reads as nonsense on a page.
+    const flipped = Number.isFinite(amount) ? -amount : 0
+    return (flipped === 0 ? 0 : flipped).toFixed(2)
+  }
+  return lines.map((line) => ({
+    categoryId: line.category_id,
+    description: line.description,
+    vatTreatment: line.vat_treatment,
+    vatRateCode: line.vat_rate_code,
+    vatRatePercent: Number(line.vat_rate_percent).toFixed(2),
+    netAmount: negate(line.net_amount),
+    vatAmount: negate(line.vat_amount),
+    grossAmount: negate(line.gross_amount),
+    isCapital: line.is_capital,
+  }))
+}
+
+async function isReconciled(transactionId: string): Promise<boolean> {
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT "id" FROM "bk_reconciliations" WHERE "transaction_id" = ${transactionId} LIMIT 1
+  `
+  return rows.length > 0
+}
+
+async function isCorrected(transactionId: string): Promise<boolean> {
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT "id" FROM "bk_transactions" WHERE "corrects_transaction_id" = ${transactionId} LIMIT 1
+  `
+  return rows.length > 0
+}
+
+/** Today, as a plain yyyy-mm-dd. What a reversal is dated: it is a thing done
+ *  now, in the period that is open now. */
+function today(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+/**
+ * Takes a sale back out of the books after the publisher withdrew its invoice.
+ *
+ * Never throws, for the same reason nothing else here does: it runs inside the
+ * publisher's own void, and a bookkeeping problem must not stop somebody
+ * withdrawing a document. Idempotent both ways - the entry is gone or the
+ * reversal is already there, and either way saying it twice changes nothing.
+ */
+export async function reverseExternalSale(payload: ExternalSaleVoidPayload): Promise<ExternalSaleOutcome> {
+  try {
+    const ref = payload.invoiceNumber?.trim()
+    if (!ref) return { ok: false, message: 'The void arrived with no invoice number, so nothing could be matched to it.' }
+    const source = payload.source?.trim() || 'external'
+    const voidRef = `${ref}:void`
+
+    const originalId = await existingEntry(source, ref)
+    if (!originalId) {
+      const reversed = await existingEntry(source, voidRef)
+      return {
+        ok: true,
+        message: reversed
+          ? 'Already taken out of the books - nothing to do.'
+          : 'That invoice was never in the books, so there was nothing to take out.',
+      }
+    }
+
+    const alreadyReversed = await existingEntry(source, voidRef)
+    if (alreadyReversed) return { ok: true, message: 'Already reversed in the books - nothing recorded twice.' }
+
+    const original = await getTransaction(originalId)
+    if (!original) return { ok: true, message: 'That invoice was never in the books, so there was nothing to take out.' }
+
+    const plan = planSaleRemoval({
+      locked: Boolean(original.locked_period_id),
+      finalised: Boolean(original.finalised_period_id),
+      reconciled: await isReconciled(originalId),
+      corrected: await isCorrected(originalId),
+    })
+
+    if (plan === 'delete') {
+      await deleteTransaction(originalId, null)
+      return { ok: true, message: 'Taken out of the books, along with the VAT on it.' }
+    }
+
+    const reason = `Invoice ${ref} was voided${payload.reason?.trim() ? `: ${payload.reason.trim()}` : ''}`
+    const input = {
+      entryType: 'adjustment' as const,
+      direction: original.direction,
+      taxPointDate: today(),
+      settledDate: null,
+      counterparty: original.counterparty,
+      description: payload.description ?? `Invoice ${ref} voided`,
+      reference: ref,
+      status: 'posted' as const,
+      source,
+      sourceRef: voidRef,
+      correctsTransactionId: originalId,
+      correctionReason: reason,
+      lines: reversalLines(original.lines),
+    }
+
+    const gross = input.lines.reduce((sum, line) => sum + Number(line.grossAmount), 0)
+    try {
+      await createTransaction(input, null)
+      return {
+        ok: true,
+        message: `The sale was in a filed return or matched to the bank, so it stays put and a reversal of ${formatMoney(gross.toFixed(2))} was recorded in the open period.`,
+      }
+    } catch (error) {
+      // Today itself sitting inside a filed return. Vanishingly rare, and a
+      // draft is still better than losing the reversal entirely.
+      if (error instanceof BackdatedIntoClosedPeriodError) {
+        await createTransaction({ ...input, status: 'draft' }, null)
+        return {
+          ok: false,
+          message: 'Every open period is filed, so the reversal was saved as a draft entry for you to date yourself.',
+        }
+      }
+      throw error
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error('[uk-bookkeeping] could not reverse an external sale:', message)
+    return { ok: false, message }
+  }
+}
+
+/** What the shop's `shop.invoice-voided` extension point calls. */
+export async function ukBookkeepingShopSaleVoider(payload: ExternalSaleVoidPayload): Promise<ExternalSaleOutcome> {
+  return reverseExternalSale(payload)
 }
