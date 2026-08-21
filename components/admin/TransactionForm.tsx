@@ -117,6 +117,11 @@ function netForGross(gross: string, ratePercent: string): string {
   return fromPence(Math.round((pence(gross) * 10000) / (rate + 10000)))
 }
 
+// No entry-level description. What an entry was for is asked once per line, in
+// "What it was made up of", because that is the level it is actually true at: a
+// receipt with a tank of fuel and a sandwich on it was for two things, and one
+// box at the top can only ever hold one of them. The header text a list needs is
+// worked out from the lines when the entry is saved.
 export type TransactionFormValue = {
   id?: string
   entryType?: string
@@ -124,7 +129,6 @@ export type TransactionFormValue = {
   taxPointDate: string
   settledDate: string
   counterparty: string
-  description: string
   reference: string
   correctsTransactionId?: string | null
   correctionReason?: string
@@ -154,7 +158,6 @@ export default function TransactionForm({
       taxPointDate: today(),
       settledDate: today(),
       counterparty: '',
-      description: '',
       reference: '',
       correctsTransactionId: correcting?.id ?? null,
       correctionReason: '',
@@ -296,7 +299,6 @@ export default function TransactionForm({
       taxPointDate: value.taxPointDate,
       settledDate: value.settledDate || null,
       counterparty: value.counterparty,
-      description: value.description,
       reference: value.reference || null,
       correctsTransactionId: value.correctsTransactionId ?? null,
       correctionReason: value.correctionReason || null,
@@ -413,15 +415,6 @@ export default function TransactionForm({
               onChange={(e) => setValue({ ...value, reference: e.target.value })}
             />
           </div>
-          <div style={{ gridColumn: '1 / -1' }}>
-            <label style={label} htmlFor="bk-description">What it was for</label>
-            <input
-              id="bk-description"
-              style={input}
-              value={value.description}
-              onChange={(e) => setValue({ ...value, description: e.target.value })}
-            />
-          </div>
           {value.entryType === 'adjustment' && (
             <div style={{ gridColumn: '1 / -1' }}>
               <label style={label} htmlFor="bk-reason">Why this correction is needed</label>
@@ -454,6 +447,16 @@ export default function TransactionForm({
             }}
           >
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.75rem' }}>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <label style={label} htmlFor={`bk-line-${line.uid}-description`}>What it was for</label>
+                <input
+                  id={`bk-line-${line.uid}-description`}
+                  style={input}
+                  value={line.description}
+                  placeholder={value.direction === 'income' ? 'What was sold' : 'What was bought'}
+                  onChange={(e) => setLine(index, { description: e.target.value })}
+                />
+              </div>
               <div>
                 <label style={label} htmlFor={`bk-line-${line.uid}-category`}>Category</label>
                 <select

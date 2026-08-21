@@ -35,6 +35,21 @@ import type { BkTransactionLineRow, VatRateCode } from './types'
 // twice (its own re-send button does exactly that), and a sale recorded twice is
 // a wrong VAT return.
 
+/** One thing on the publisher's document: what it was, and the money on it at
+ *  one rate. Mirrors `ShpLedgerItem` in the shop module; see the note above
+ *  about why it is copied rather than imported.
+ *
+ *  Optional, and never trusted blind. A publisher too old to send these, or one
+ *  whose rows do not add up to the rate summary, gets an entry filed one line
+ *  per rate exactly as before - see `saleLines`. */
+export type ExternalSaleItem = {
+  description: string
+  ratePercent: string
+  net: string
+  tax: string
+  gross: string
+}
+
 /** What a publisher hands over. Mirrors `ShopInvoiceSinkPayload` in the shop
  *  module; see the note above about why it is copied rather than imported. */
 export type ExternalSalePayload = {
@@ -54,6 +69,11 @@ export type ExternalSalePayload = {
   totals?: { net?: string; tax?: string; gross?: string }
   /** Net, tax and gross at each rate. This is the part the books actually need. */
   taxBreakdown: { ratePercent: string; net: string; tax: string; gross: string }[]
+  /** The same money itemised, where the publisher can break it down that far:
+   *  one row per thing sold, delivery and rounding included as rows of their
+   *  own. Used in preference to `taxBreakdown` when the two agree to the penny,
+   *  so the entry reads as a list of goods rather than one lump per VAT rate. */
+  items?: ExternalSaleItem[]
   description?: string
   documentUrl?: string | null
   /** The document itself, where the publisher can print one. Filed as evidence
@@ -113,6 +133,10 @@ export type ExternalSaleCreditPayload = {
   totals?: { net?: string; tax?: string; gross?: string }
   /** Net, tax and gross at each rate, all positive. */
   taxBreakdown: { ratePercent: string; net: string; tax: string; gross: string }[]
+  /** The same money itemised, all positive, where the publisher can break it
+   *  down that far. Used in preference to `taxBreakdown` when the two agree to
+   *  the penny. */
+  items?: ExternalSaleItem[]
   /** Whether this credits the whole invoice or part of it. */
   full?: boolean
   reason?: string
@@ -145,6 +169,105 @@ function rateCodeFor(percent: number): VatRateCode {
 function decimal(value: string | undefined): string {
   const n = Number(value)
   return Number.isFinite(n) ? n.toFixed(2) : '0.00'
+}
+
+/** Pennies, as an integer, so two money strings can be compared without asking
+ *  a float whether 0.1 + 0.2 is 0.3. */
+function pennies(value: string): number {
+  return Math.round((Number(value) || 0) * 100)
+}
+
+/** -0.00 is a real thing in JavaScript and reads as nonsense on a page. */
+function signed(value: string, negate: boolean): string {
+  const amount = Number(value)
+  const flipped = Number.isFinite(amount) ? (negate ? -amount : amount) : 0
+  return (flipped === 0 ? 0 : flipped).toFixed(2)
+}
+
+/** A product name long enough to bury the rest of the entry is trimmed, because
+ *  a ledger line is read in a table. The document itself is filed as evidence
+ *  beside it and carries the full thing. */
+function ledgerDescription(text: string): string {
+  const trimmed = (text || '').trim()
+  return trimmed.length > 200 ? `${trimmed.slice(0, 199)}\u2026` : trimmed
+}
+
+/**
+ * The lines an entry is made of, itemised where the publisher could break it
+ * down that far and per VAT rate where it could not.
+ *
+ * Itemised is what an owner wants: an entry that says what was sold, with a
+ * "what it was for" against each part, exactly as a hand-typed one does. But an
+ * entry that disagrees with the invoice behind it by a penny is a wrong VAT
+ * return, and that is a far worse fault than a terse one. So the items are used
+ * only when they add up to the same money the rate summary does, and the
+ * per-rate lines - the shape this has always filed - are what happens otherwise.
+ *
+ * Rates and treatments come from the rate summary either way. The publisher
+ * knows what it charged, not what HMRC calls it, and `rateCodeFor` is where that
+ * vocabulary lives.
+ *
+ * Pure, so the rule can be read and tested without a database.
+ */
+export function ledgerLines(
+  taxBreakdown: { ratePercent: string; net: string; tax: string; gross: string }[],
+  items: ExternalSaleItem[] | undefined,
+  categoryId: string,
+  fallbackDescription: string,
+  opts: { negate?: boolean } = {},
+): LineInput[] {
+  const negate = opts.negate ?? false
+
+  const build = (
+    rows: { description: string; ratePercent: string; net: string; tax: string; gross: string }[],
+  ): LineInput[] => {
+    const lines: LineInput[] = []
+    for (const row of rows) {
+      const net = decimal(row.net)
+      const vat = decimal(row.tax)
+      const gross = decimal(row.gross)
+      // A row that contributed nothing is not a line. It would pass validation
+      // and then sit in the books saying nothing.
+      if (pennies(net) === 0 && pennies(vat) === 0 && pennies(gross) === 0) continue
+      const percent = Number(row.ratePercent) || 0
+      lines.push({
+        categoryId,
+        description: ledgerDescription(row.description),
+        vatTreatment: 'domestic',
+        vatRateCode: rateCodeFor(percent),
+        vatRatePercent: percent.toFixed(2),
+        netAmount: signed(net, negate),
+        vatAmount: signed(vat, negate),
+        grossAmount: signed(gross, negate),
+      })
+    }
+    return lines
+  }
+
+  const perRate = build(
+    taxBreakdown.map((row) => ({
+      ...row,
+      // The rate in the description is what tells two otherwise identical lines
+      // apart when this is all the detail there is.
+      description: `${fallbackDescription}${Number(row.ratePercent) > 0 ? ` (${row.ratePercent}%)` : ''}`,
+    })),
+  )
+
+  if (!items || items.length === 0) return perRate
+
+  const itemised = build(items)
+  if (itemised.length === 0) return perRate
+
+  // The tie. Not a tolerance and not a "close enough": the entry either comes to
+  // the same money the document does or the itemised version is not used at all.
+  const total = (lines: LineInput[], field: 'netAmount' | 'vatAmount' | 'grossAmount'): number =>
+    lines.reduce((sum, line) => sum + pennies(line[field]), 0)
+  const ties =
+    total(itemised, 'netAmount') === total(perRate, 'netAmount') &&
+    total(itemised, 'vatAmount') === total(perRate, 'vatAmount') &&
+    total(itemised, 'grossAmount') === total(perRate, 'grossAmount')
+
+  return ties ? itemised : perRate
 }
 
 /** The entry this sale already made, if it made one. */
@@ -285,29 +408,16 @@ export async function recordExternalSale(payload: ExternalSalePayload): Promise<
       return { ok: false, message: `"${category.name}" is an expense category, so sales cannot be filed into it.` }
     }
 
-    // One line per VAT rate, which is exactly the shape the books want and
-    // exactly what a mixed-rate basket needs: a return that lumps 20% and 0%
-    // together is wrong in box 1 and box 6 at once.
-    const lines: LineInput[] = []
-    for (const row of payload.taxBreakdown ?? []) {
-      const net = decimal(row.net)
-      const vat = decimal(row.tax)
-      const gross = decimal(row.gross)
-      // A rate that contributed nothing is not a line. It would pass validation
-      // and then sit in the books saying nothing.
-      if (Number(net) === 0 && Number(vat) === 0 && Number(gross) === 0) continue
-      const percent = Number(row.ratePercent) || 0
-      lines.push({
-        categoryId: category.id,
-        description: `${payload.description ?? `Invoice ${ref}`}${percent > 0 ? ` (${row.ratePercent}%)` : ''}`,
-        vatTreatment: 'domestic',
-        vatRateCode: rateCodeFor(percent),
-        vatRatePercent: percent.toFixed(2),
-        netAmount: net,
-        vatAmount: vat,
-        grossAmount: gross,
-      })
-    }
+    // One line per thing sold where the publisher itemised it, one line per VAT
+    // rate where it did not. The per-rate shape is the floor, not the aim: a
+    // return that lumps 20% and 0% together is wrong in box 1 and box 6 at once,
+    // so a mixed-rate basket is never one line either way.
+    const lines = ledgerLines(
+      payload.taxBreakdown ?? [],
+      payload.items,
+      category.id,
+      payload.description ?? `Invoice ${ref}`,
+    )
     if (lines.length === 0) {
       return { ok: true, message: 'Nothing to record - the invoice came to zero.' }
     }
@@ -572,7 +682,8 @@ function creditRef(creditNoteNumber: string): string {
 }
 
 /**
- * The publisher's own rate rows, negated into ledger lines.
+ * The publisher's own rows, negated into ledger lines - itemised where it sent
+ * items that tie, per VAT rate where it did not. See `ledgerLines`.
  *
  * Its rates and its figures, not a scaling of the original sale's: a part refund
  * of a mixed-rate basket is not a fixed proportion of anything, and only the
@@ -586,34 +697,9 @@ export function creditLines(
   taxBreakdown: { ratePercent: string; net: string; tax: string; gross: string }[],
   categoryId: string,
   description: string,
+  items?: ExternalSaleItem[],
 ): LineInput[] {
-  const negate = (value: string): string => {
-    const amount = Number(value)
-    // -0.00 is a real thing in JavaScript and reads as nonsense on a page.
-    const flipped = Number.isFinite(amount) ? -amount : 0
-    return (flipped === 0 ? 0 : flipped).toFixed(2)
-  }
-  const lines: LineInput[] = []
-  for (const row of taxBreakdown) {
-    const net = decimal(row.net)
-    const vat = decimal(row.tax)
-    const gross = decimal(row.gross)
-    // A rate that contributed nothing is not a line. It would pass validation
-    // and then sit in the books saying nothing.
-    if (Number(net) === 0 && Number(vat) === 0 && Number(gross) === 0) continue
-    const percent = Number(row.ratePercent) || 0
-    lines.push({
-      categoryId,
-      description: `${description}${percent > 0 ? ` (${row.ratePercent}%)` : ''}`,
-      vatTreatment: 'domestic',
-      vatRateCode: rateCodeFor(percent),
-      vatRatePercent: percent.toFixed(2),
-      netAmount: negate(net),
-      vatAmount: negate(vat),
-      grossAmount: negate(gross),
-    })
-  }
-  return lines
+  return ledgerLines(taxBreakdown, items, categoryId, description, { negate: true })
 }
 
 /**
@@ -682,7 +768,12 @@ export async function recordExternalCredit(payload: ExternalSaleCreditPayload): 
       return { ok: false, message: 'No sales category to file this under. Pick one in Bookkeeping settings.' }
     }
 
-    const lines = creditLines(payload.taxBreakdown ?? [], category.id, payload.description ?? `Credit note ${creditNumber}`)
+    const lines = creditLines(
+      payload.taxBreakdown ?? [],
+      category.id,
+      payload.description ?? `Credit note ${creditNumber}`,
+      payload.items,
+    )
     if (lines.length === 0) {
       return { ok: true, message: 'Nothing to record - the credit note came to zero.' }
     }

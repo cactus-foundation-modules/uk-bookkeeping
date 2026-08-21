@@ -328,6 +328,36 @@ export async function createTransaction(
   return (await getTransaction(id))!
 }
 
+/**
+ * The one-line summary a list, a report and a bank statement all want, worked
+ * out from the lines when the caller did not hand one over.
+ *
+ * "What it was for" is asked per line, because that is the level it is true at.
+ * But `bk_transactions.description` is what the transactions table, the CSV
+ * export and the reconciliation screen print, and none of those has room for a
+ * list. So the line texts are folded into one sentence here, distinct and in
+ * order, and a caller that knows better (the importer, a publisher handing over
+ * its own wording) still gets to say so by passing one.
+ */
+export function describeFromLines(lines: LineInput[]): string {
+  const seen: string[] = []
+  for (const line of lines) {
+    const text = line.description?.trim()
+    if (text && !seen.includes(text)) seen.push(text)
+  }
+  if (seen.length === 0) return ''
+  // Three is what fits. Beyond that the entry is a shop order or a long receipt
+  // and the count is more use than a truncated fourth item.
+  if (seen.length <= 3) return seen.join(', ')
+  return `${seen.slice(0, 3).join(', ')} and ${seen.length - 3} more`
+}
+
+/** The description to store: the caller's where it gave one, the lines' summary
+ *  otherwise. Trimmed, because a description of spaces is not one. */
+function resolveDescription(input: TransactionInput): string {
+  return input.description?.trim() || describeFromLines(input.lines)
+}
+
 type TxClient = Omit<typeof prisma, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
 
 /**
@@ -351,7 +381,7 @@ export async function insertTransactionRows(
       "corrects_transaction_id", "correction_reason", "created_by_user_id", "updated_by_user_id"
     ) VALUES (
       ${input.entryType ?? 'normal'}, ${input.direction}, ${taxPoint}::date, ${settled}::date,
-      ${input.counterparty.trim()}, ${input.description?.trim() ?? ''}, ${input.reference?.trim() || null},
+      ${input.counterparty.trim()}, ${resolveDescription(input)}, ${input.reference?.trim() || null},
       ${input.status ?? 'posted'}, ${input.source ?? 'manual'}, ${input.sourceRef ?? null}, ${input.importBatchId ?? null},
       ${input.bankAccountId ?? null}, ${input.statementId ?? null},
       ${input.correctsTransactionId ?? null}, ${input.correctionReason?.trim() ?? null},
@@ -425,7 +455,7 @@ export async function updateTransaction(
         "tax_point_date"    = ${taxPoint}::date,
         "settled_date"      = ${settled}::date,
         "counterparty"      = ${input.counterparty.trim()},
-        "description"       = ${input.description?.trim() ?? ''},
+        "description"       = ${resolveDescription(input)},
         "reference"         = ${input.reference?.trim() || null},
         "status"            = ${status},
         "corrects_transaction_id" = ${correctsId},

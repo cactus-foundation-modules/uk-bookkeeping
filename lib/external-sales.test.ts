@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Prisma } from '@prisma/client'
-import { creditLines, planSaleRemoval, reversalLines } from '@/modules/uk-bookkeeping/lib/external-sales'
+import { creditLines, ledgerLines, planSaleRemoval, reversalLines } from '@/modules/uk-bookkeeping/lib/external-sales'
+import type { ExternalSaleItem } from '@/modules/uk-bookkeeping/lib/external-sales'
 import type { BkTransactionLineRow } from '@/modules/uk-bookkeeping/lib/types'
 
 // A voided invoice that the books never hear about leaves VAT standing on a sale
@@ -149,5 +150,109 @@ describe('creditLines', () => {
       'x',
     )
     expect(lines).toHaveLength(1)
+  })
+})
+
+// Itemising an entry is worth having, and it is worth nothing at all if the
+// entry stops coming to what the invoice came to. Every case below is really
+// the same question: when do the publisher's items get used, and what happens
+// the moment they stop adding up.
+
+const BREAKDOWN = [{ ratePercent: '20', net: '1000.00', tax: '200.00', gross: '1200.00' }]
+
+const ITEMS: ExternalSaleItem[] = [
+  { description: 'Oak desk (DSK-1)', ratePercent: '20', net: '800.00', tax: '160.00', gross: '960.00' },
+  { description: 'Delivery', ratePercent: '20', net: '200.00', tax: '40.00', gross: '240.00' },
+]
+
+describe('ledgerLines', () => {
+  it('files one line per rate when the publisher sent no items', () => {
+    const lines = ledgerLines(BREAKDOWN, undefined, 'cat-1', 'Invoice INV-1')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]!.description).toBe('Invoice INV-1 (20%)')
+  })
+
+  it('files one line per item when it did, each saying what it was for', () => {
+    const lines = ledgerLines(BREAKDOWN, ITEMS, 'cat-1', 'Invoice INV-1')
+    expect(lines.map((l) => l.description)).toEqual(['Oak desk (DSK-1)', 'Delivery'])
+    expect(lines.every((l) => l.categoryId === 'cat-1')).toBe(true)
+    expect(lines.every((l) => l.vatRateCode === 'standard')).toBe(true)
+  })
+
+  it('comes to exactly what the rate summary comes to', () => {
+    const lines = ledgerLines(BREAKDOWN, ITEMS, 'cat-1', 'Invoice INV-1')
+    expect(lines.reduce((sum, l) => sum + Number(l.netAmount), 0)).toBeCloseTo(1000, 2)
+    expect(lines.reduce((sum, l) => sum + Number(l.vatAmount), 0)).toBeCloseTo(200, 2)
+    expect(lines.reduce((sum, l) => sum + Number(l.grossAmount), 0)).toBeCloseTo(1200, 2)
+  })
+
+  it('falls back to the rate summary when the items do not add up to it', () => {
+    // The whole safety net. A publisher that leaves an item off must not be able
+    // to shrink a VAT return by doing so, so a set of items that disagrees with
+    // the summary by a penny is not used at all.
+    const short: ExternalSaleItem[] = [
+      { description: 'Oak desk', ratePercent: '20', net: '999.99', tax: '200.00', gross: '1199.99' },
+    ]
+    const lines = ledgerLines(BREAKDOWN, short, 'cat-1', 'Invoice INV-1')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]!.description).toBe('Invoice INV-1 (20%)')
+    expect(lines[0]!.grossAmount).toBe('1200.00')
+  })
+
+  it('falls back on an empty item list rather than filing an empty entry', () => {
+    const lines = ledgerLines(BREAKDOWN, [], 'cat-1', 'Invoice INV-1')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]!.grossAmount).toBe('1200.00')
+  })
+
+  it('keeps each item on its own VAT rate', () => {
+    const breakdown = [
+      { ratePercent: '20', net: '100.00', tax: '20.00', gross: '120.00' },
+      { ratePercent: '0', net: '50.00', tax: '0.00', gross: '50.00' },
+    ]
+    const items: ExternalSaleItem[] = [
+      { description: 'Desk', ratePercent: '20', net: '100.00', tax: '20.00', gross: '120.00' },
+      { description: 'Book', ratePercent: '0', net: '50.00', tax: '0.00', gross: '50.00' },
+    ]
+    const lines = ledgerLines(breakdown, items, 'cat-1', 'x')
+    expect(lines.map((l) => l.vatRateCode)).toEqual(['standard', 'zero'])
+  })
+
+  it('keeps gross equal to net plus VAT on every itemised line', () => {
+    for (const line of ledgerLines(BREAKDOWN, ITEMS, 'cat-1', 'x')) {
+      expect(Number(line.grossAmount)).toBeCloseTo(Number(line.netAmount) + Number(line.vatAmount), 2)
+    }
+  })
+
+  it('trims a description too long to read in a table', () => {
+    const long = 'A'.repeat(400)
+    const items: ExternalSaleItem[] = [{ description: long, ratePercent: '20', net: '1000.00', tax: '200.00', gross: '1200.00' }]
+    const lines = ledgerLines(BREAKDOWN, items, 'cat-1', 'x')
+    expect(lines[0]!.description).toHaveLength(200)
+    expect(lines[0]!.description!.endsWith('\u2026')).toBe(true)
+  })
+})
+
+describe('creditLines - itemised', () => {
+  it('negates each item and still comes to the credited total', () => {
+    const lines = creditLines(BREAKDOWN, 'cat-1', 'Credit note CN-1', ITEMS)
+    expect(lines.map((l) => l.description)).toEqual(['Oak desk (DSK-1)', 'Delivery'])
+    expect(lines.map((l) => l.grossAmount)).toEqual(['-960.00', '-240.00'])
+    expect(lines.reduce((sum, l) => sum + Number(l.grossAmount), 0)).toBeCloseTo(-1200, 2)
+  })
+
+  it('still falls back to one line per rate when the items do not tie', () => {
+    const short: ExternalSaleItem[] = [
+      { description: 'Oak desk', ratePercent: '20', net: '500.00', tax: '100.00', gross: '600.00' },
+    ]
+    const lines = creditLines(BREAKDOWN, 'cat-1', 'Credit note CN-1', short)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]!.grossAmount).toBe('-1200.00')
+  })
+
+  it('does not write minus zero on a zero-rated item', () => {
+    const breakdown = [{ ratePercent: '0', net: '100.00', tax: '0.00', gross: '100.00' }]
+    const items: ExternalSaleItem[] = [{ description: 'Book', ratePercent: '0', net: '100.00', tax: '0.00', gross: '100.00' }]
+    expect(creditLines(breakdown, 'cat-1', 'x', items)[0]!.vatAmount).toBe('0.00')
   })
 })

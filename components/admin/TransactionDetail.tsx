@@ -136,13 +136,16 @@ export default function TransactionDetail({
       taxPointDate: toDateInput(transaction.tax_point_date),
       settledDate: toDateInput(transaction.settled_date),
       counterparty: transaction.counterparty,
-      description: transaction.description,
       reference: transaction.reference ?? '',
       correctsTransactionId: transaction.corrects_transaction_id,
       correctionReason: transaction.correction_reason ?? '',
       lines: transaction.lines.map((line) => ({
         categoryId: line.category_id,
-        description: line.description,
+        // "What it was for" used to be asked once for the whole entry and is now
+        // asked per line. An entry recorded under the old shape has the text at
+        // the top and nothing on its lines, so it is handed down here rather
+        // than being lost the moment somebody opens it to change a date.
+        description: line.description || transaction.description,
         vatTreatment: line.vat_treatment,
         vatRateCode: line.vat_rate_code,
         vatRatePercent: line.vat_rate_percent,
@@ -241,6 +244,7 @@ export default function TransactionDetail({
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
           <thead>
             <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--color-border)' }}>
+              <th style={{ padding: '0.625rem 0.75rem' }}>What it was for</th>
               <th style={{ padding: '0.625rem 0.75rem' }}>Category</th>
               <th style={{ padding: '0.625rem 0.75rem' }}>VAT</th>
               <th style={{ padding: '0.625rem 0.75rem', textAlign: 'right' }}>Before VAT</th>
@@ -251,6 +255,7 @@ export default function TransactionDetail({
           <tbody>
             {transaction.lines.map((line) => (
               <tr key={line.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                <td style={{ padding: '0.5rem 0.75rem' }}>{line.description || '—'}</td>
                 <td style={{ padding: '0.5rem 0.75rem' }}>
                   {transaction.category_names[line.category_id] ?? '—'}
                 </td>
