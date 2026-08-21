@@ -30,6 +30,13 @@ const FALLBACK: BkSettingsRow = {
   // ends up with often enough to be the least surprising default.
   year_end_month: 3,
   year_end_day: 31,
+  // On, because a business that installs both a shop and the books almost
+  // certainly wants its sales in the books. The off switch is there for the one
+  // that also imports its bank statements and would otherwise count each sale
+  // twice - see migrations/008_external_sales.sql.
+  external_sales_enabled: true,
+  external_sales_category_id: null,
+  external_sales_status: 'posted',
   created_at: new Date(),
   updated_at: new Date(),
 }
@@ -71,6 +78,10 @@ export type SettingsPatch = {
   /** The accounting year end, as a month and a day. Drives the director's loan position. */
   yearEndMonth?: number
   yearEndDay?: number
+  /** Sales handed over by another module - see lib/external-sales.ts. */
+  externalSalesEnabled?: boolean
+  externalSalesCategoryId?: string | null
+  externalSalesStatus?: 'draft' | 'posted'
 }
 
 /**
@@ -207,6 +218,13 @@ export async function updateSettings(patch: SettingsPatch): Promise<BkSettingsRo
       "vendor_public_ip"        = ${patch.vendorPublicIp === undefined ? current.vendor_public_ip : patch.vendorPublicIp},
       "year_end_month"          = ${patch.yearEndMonth ?? current.year_end_month},
       "year_end_day"            = ${patch.yearEndDay ?? current.year_end_day},
+      "external_sales_enabled"  = ${patch.externalSalesEnabled ?? current.external_sales_enabled},
+      "external_sales_category_id" = ${
+        patch.externalSalesCategoryId === undefined
+          ? current.external_sales_category_id
+          : patch.externalSalesCategoryId || null
+      },
+      "external_sales_status"   = ${patch.externalSalesStatus ?? current.external_sales_status},
       "updated_at"              = NOW()
     WHERE "id" = 'singleton'
   `

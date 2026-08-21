@@ -44,6 +44,9 @@ export async function GET() {
       vendorPublicIp: settings.vendor_public_ip,
       yearEndMonth: settings.year_end_month,
       yearEndDay: settings.year_end_day,
+      externalSalesEnabled: settings.external_sales_enabled,
+      externalSalesCategoryId: settings.external_sales_category_id,
+      externalSalesStatus: settings.external_sales_status,
     },
     hmrc: {
       configured: isHmrcConfigured(),
@@ -84,6 +87,9 @@ const PatchBody = z.object({
   // chosen month is settled in lib/settings.ts, which can say so in a sentence.
   yearEndMonth: z.number().int().min(1).max(12).optional(),
   yearEndDay: z.number().int().min(1).max(31).optional(),
+  externalSalesEnabled: z.boolean().optional(),
+  externalSalesCategoryId: z.string().nullable().optional(),
+  externalSalesStatus: z.enum(['draft', 'posted']).optional(),
 })
 
 export async function PATCH(request: NextRequest) {

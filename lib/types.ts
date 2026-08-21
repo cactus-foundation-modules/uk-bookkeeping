@@ -377,6 +377,12 @@ export type BkSettingsRow = {
   /** The accounting year end, as a month and a day: "31 March", not a date. */
   year_end_month: number
   year_end_day: number
+  /** Sales handed over by another module (see lib/external-sales.ts): whether to
+   *  take them at all, what to file them under, and whether they land as records
+   *  or as drafts for a human to look at. */
+  external_sales_enabled: boolean
+  external_sales_category_id: string | null
+  external_sales_status: 'draft' | 'posted'
   created_at: Date
   updated_at: Date
 }

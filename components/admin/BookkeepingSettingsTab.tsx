@@ -35,6 +35,11 @@ type Settings = {
   /** The year end is a month and a day - "31 March", every year - not a date. */
   yearEndMonth: number
   yearEndDay: number
+  /** Sales handed over by another module on this site - a shop raising an
+   *  invoice, today. See lib/external-sales.ts. */
+  externalSalesEnabled: boolean
+  externalSalesCategoryId: string | null
+  externalSalesStatus: 'draft' | 'posted'
 }
 
 /**
@@ -1131,6 +1136,60 @@ export function BookkeepingSettingsTab() {
             list as read on {hmrc.fraudSpecReadOn}.
           </p>
         </details>
+      </div>
+
+      <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+        <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Sales from elsewhere on this site</h3>
+        <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+          Another part of the site - a shop raising an invoice, for instance - can hand a sale straight to the books,
+          split by VAT rate, so nobody types it in twice. Each one is recorded once and once only, against its
+          invoice number.
+        </p>
+        <div style={row}>
+          <label htmlFor="bk-external-sales">Take sales handed over automatically</label>
+          <input
+            id="bk-external-sales"
+            type="checkbox"
+            checked={settings.externalSalesEnabled}
+            onChange={(e) => set('externalSalesEnabled', e.target.checked)}
+          />
+        </div>
+        {settings.externalSalesEnabled && (
+          <>
+            <div style={row}>
+              <label htmlFor="bk-external-category">File them under</label>
+              <select
+                id="bk-external-category"
+                style={input}
+                value={settings.externalSalesCategoryId ?? ''}
+                onChange={(e) => set('externalSalesCategoryId', e.target.value || null)}
+              >
+                <option value="">Sales and turnover (the usual one)</option>
+                {(categories ?? [])
+                  .filter((category) => category.direction !== 'expense')
+                  .map((category) => (
+                    <option key={category.id} value={category.id}>{category.name}</option>
+                  ))}
+              </select>
+            </div>
+            <div style={row}>
+              <label htmlFor="bk-external-status">Record them as</label>
+              <select
+                id="bk-external-status"
+                style={input}
+                value={settings.externalSalesStatus}
+                onChange={(e) => set('externalSalesStatus', e.target.value as 'draft' | 'posted')}
+              >
+                <option value="posted">Records straight away</option>
+                <option value="draft">Drafts, for somebody to look at first</option>
+              </select>
+            </div>
+          </>
+        )}
+        <p style={{ margin: '0.75rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+          Switch this off if you also bring the same money in from a bank statement - counting a sale twice makes a
+          wrong return, not an untidy one.
+        </p>
       </div>
 
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
