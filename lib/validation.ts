@@ -23,6 +23,7 @@ export const LineBody = z.object({
   vatAmount: z.string(),
   grossAmount: z.string(),
   isCapital: z.boolean().optional(),
+  registerAsset: z.boolean().optional(),
 })
 
 export const TransactionBody = z.object({

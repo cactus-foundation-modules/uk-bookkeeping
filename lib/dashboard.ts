@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
+import { countAssetDrafts } from './fixed-assets'
 import { formatMoney } from './money'
 import { isOverdue, listPeriods, toDateOnly } from './periods'
 import { getSettings } from './settings'
@@ -43,6 +44,8 @@ export type DashboardData = {
   month: { from: string; income: string; expenses: string; profit: string }
   drafts: number
   missingEvidence: number
+  /** Assets raised off a ticked purchase line that nobody has finished off yet. */
+  unfinishedAssets: number
   recent: {
     id: string
     date: string
@@ -135,6 +138,11 @@ export async function getDashboard(): Promise<DashboardData> {
     WHERE t."status" = 'posted'
       AND NOT EXISTS (SELECT 1 FROM "bk_attachments" a WHERE a."transaction_id" = t."id")
   `
+  // An asset nobody finished off claims no capital allowances, so the tax
+  // computation is quietly short by it. Counted here because the overview is
+  // where a thing gets noticed, and the asset register is not somewhere anyone
+  // visits unprompted.
+  const unfinishedAssets = await countAssetDrafts()
 
   const recentList = await listTransactions({ limit: 6 })
 
@@ -154,6 +162,7 @@ export async function getDashboard(): Promise<DashboardData> {
     },
     drafts: Number(draftRow?.count ?? 0n),
     missingEvidence: Number(evidenceRow?.count ?? 0n),
+    unfinishedAssets,
     recent: recentList.rows.map((row) => ({
       id: row.id,
       date: toDateOnly(row.tax_point_date),

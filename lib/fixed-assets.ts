@@ -12,6 +12,7 @@ import type {
   BkFixedAssetRow,
   CapitalAllowancePool,
   DepreciationMethod,
+  FixedAssetStatus,
   Money,
 } from './types'
 
@@ -64,12 +65,19 @@ export type FixedAssetWithState = BkFixedAssetRow & {
   expense_account_name: string
 }
 
-const ASSET_SELECT = Prisma.sql`
-  SELECT f.*,
-         COALESCE(charged.total, 0)::numeric AS accumulated_depreciation,
-         (f."cost" - COALESCE(charged.total, 0))::numeric AS net_book_value,
-         aa."name" AS asset_account_name,
-         ea."name" AS expense_account_name
+// Kept as two fragments rather than one string so a query that needs an extra
+// column - the drafts list wants the supplier off the purchase - can add one
+// without restating how an asset's written-down value is worked out. Two copies
+// of that arithmetic is two things to keep in step, and they never stay in step.
+const ASSET_COLUMNS = Prisma.sql`
+  f.*,
+  COALESCE(charged.total, 0)::numeric AS accumulated_depreciation,
+  (f."cost" - COALESCE(charged.total, 0))::numeric AS net_book_value,
+  aa."name" AS asset_account_name,
+  ea."name" AS expense_account_name
+`
+
+const ASSET_FROM = Prisma.sql`
   FROM "bk_fixed_assets" f
   LEFT JOIN LATERAL (
     SELECT SUM(c."amount") AS total
@@ -79,15 +87,73 @@ const ASSET_SELECT = Prisma.sql`
   LEFT JOIN "bk_accounts" ea ON ea."id" = f."expense_account_id"
 `
 
+const ASSET_SELECT = Prisma.sql`SELECT ${ASSET_COLUMNS} ${ASSET_FROM}`
+
+/**
+ * The register.
+ *
+ * Defaults to FINISHED assets only, and that default is the safety catch. A
+ * draft has no depreciation rate anybody chose and no allowance pool anybody
+ * picked; if it leaked into a depreciation run it would charge a rate of
+ * nothing, and if it leaked into the tax computation it would claim an
+ * allowance nobody asked for. Every caller that wants drafts has to say so out
+ * loud, which is one word here and one fewer wrong number on a tax return.
+ */
 export async function listFixedAssets(
-  options: { includeDisposed?: boolean; includeArchived?: boolean } = {},
+  options: {
+    includeDisposed?: boolean
+    includeArchived?: boolean
+    status?: FixedAssetStatus | 'all'
+  } = {},
 ): Promise<FixedAssetWithState[]> {
+  const status = options.status ?? 'active'
   return prisma.$queryRaw<FixedAssetWithState[]>(Prisma.sql`
     ${ASSET_SELECT}
     WHERE (${options.includeArchived ?? false} OR f."archived" = FALSE)
       AND (${options.includeDisposed ?? true} OR f."disposed_date" IS NULL)
+      AND (${status === 'all'} OR f."status" = ${status === 'all' ? 'active' : status})
     ORDER BY f."acquired_date" DESC, f."description" ASC
   `)
+}
+
+/** What a draft still needs, and what the purchase it came from actually said. */
+export type AssetDraft = FixedAssetWithState & {
+  /** Who it was bought from, off the purchase. Context, so the row is recognisable. */
+  counterparty: string | null
+  /** What the line on that receipt was called, when it was called anything. */
+  line_description: string | null
+}
+
+/**
+ * The assets waiting to be finished off.
+ *
+ * This list is the whole point of the tick on a purchase line. Anything sitting
+ * here is money the business has spent that is claiming no capital allowances,
+ * which means a corporation tax bill that is too big by an amount nothing else
+ * on any screen would ever mention.
+ */
+export async function listAssetDrafts(): Promise<AssetDraft[]> {
+  return prisma.$queryRaw<AssetDraft[]>(Prisma.sql`
+    SELECT ${ASSET_COLUMNS},
+           t."counterparty" AS counterparty,
+           l."description" AS line_description
+    ${ASSET_FROM}
+    LEFT JOIN "bk_transactions" t ON t."id" = f."transaction_id"
+    LEFT JOIN "bk_transaction_lines" l
+      ON l."transaction_id" = f."transaction_id"
+     AND l."position" = f."transaction_line_position"
+    WHERE f."status" = 'draft' AND f."archived" = FALSE
+    ORDER BY f."acquired_date" DESC, f."description" ASC
+  `)
+}
+
+/** How many are waiting. For the dashboard, which is where forgetting happens. */
+export async function countAssetDrafts(): Promise<number> {
+  const [row] = await prisma.$queryRaw<{ count: bigint }[]>`
+    SELECT COUNT(*)::bigint AS count FROM "bk_fixed_assets"
+    WHERE "status" = 'draft' AND "archived" = FALSE
+  `
+  return Number(row?.count ?? 0)
 }
 
 export async function getFixedAsset(id: string): Promise<FixedAssetWithState | null> {
@@ -128,6 +194,8 @@ export type FixedAssetInput = {
   residualValue?: string
   caPool?: CapitalAllowancePool
   notes?: string | null
+  /** Which line of the purchase raised it. Set by the draft path, never by hand. */
+  transactionLinePosition?: number | null
 }
 
 /**
@@ -138,7 +206,9 @@ export type FixedAssetInput = {
  * and one that has split its fixed assets into buildings and vehicles can set
  * them per asset.
  */
-async function resolveAccounts(input: FixedAssetInput): Promise<{
+async function resolveAccounts(
+  input: Pick<FixedAssetInput, 'assetAccountId' | 'depreciationAccountId' | 'expenseAccountId'>,
+): Promise<{
   assetAccountId: string
   depreciationAccountId: string
   expenseAccountId: string
@@ -205,12 +275,14 @@ export async function createFixedAsset(
   const rows = await prisma.$queryRaw<{ id: string }[]>`
     INSERT INTO "bk_fixed_assets" (
       "description", "reference", "acquired_date", "cost", "transaction_id",
+      "transaction_line_position",
       "asset_account_id", "depreciation_account_id", "expense_account_id",
       "depreciation_method", "depreciation_rate", "residual_value", "ca_pool",
       "notes", "created_by_user_id"
     ) VALUES (
       ${input.description.trim()}, ${input.reference?.trim() || null}, ${acquired}::date,
       ${formatMoney(cost)}::numeric, ${input.transactionId || null},
+      ${input.transactionLinePosition ?? null},
       ${accounts.assetAccountId}, ${accounts.depreciationAccountId}, ${accounts.expenseAccountId},
       ${method}, ${rate}::numeric, ${formatMoney(residual)}::numeric,
       ${input.caPool ?? 'aia'}, ${input.notes?.trim() || null}, ${user?.id ?? null}
@@ -231,11 +303,28 @@ export async function createFixedAsset(
 
 export async function updateFixedAsset(
   id: string,
-  patch: Partial<FixedAssetInput> & { archived?: boolean },
+  patch: Partial<FixedAssetInput> & { archived?: boolean; status?: FixedAssetStatus },
   user: SessionUser | null,
 ): Promise<FixedAssetWithState> {
   const current = await requireFixedAsset(id)
   const charges = await listChargesFor(id)
+  const status = patch.status ?? current.status
+  // The body reaches here unvalidated, and a bad value would otherwise surface
+  // as a raw CHECK violation with a 500 attached to it.
+  if (status !== 'draft' && status !== 'active') {
+    throw new BookkeepingError('invalid', 'An asset is either waiting to be finished off, or it is on the register.')
+  }
+
+  // Finishing a draft is the one edit that changes what the asset DOES: from
+  // then on it is depreciated and it claims allowances. checkRate below is
+  // what stops it being finished without a rate anybody chose, which would
+  // charge nothing every year and look like it was working.
+  if (status === 'active' && current.status === 'draft' && toMoney(current.cost).isZero()) {
+    throw new BookkeepingError(
+      'invalid',
+      'This came off a purchase line with nothing on it. Put the cost right before finishing it off.',
+    )
+  }
 
   // The cost and the date are what every charge already posted was worked out
   // from. Changing them under those charges would leave the register saying one
@@ -272,6 +361,7 @@ export async function updateFixedAsset(
       "depreciation_rate"   = ${rate}::numeric,
       "residual_value"      = ${patch.residualValue !== undefined ? formatMoney(patch.residualValue) : formatMoney(current.residual_value)}::numeric,
       "ca_pool"             = ${patch.caPool ?? current.ca_pool},
+      "status"              = ${status},
       "notes"               = ${patch.notes === undefined ? current.notes : patch.notes?.trim() || null},
       "archived"            = ${patch.archived ?? current.archived},
       "updated_at"          = NOW()
@@ -280,10 +370,13 @@ export async function updateFixedAsset(
   `
   if (!rows[0]) throw new NotFoundError('That asset')
   await appendAudit({
-    action: 'fixed_asset.updated',
+    action: status === 'active' && current.status === 'draft' ? 'fixed_asset.confirmed' : 'fixed_asset.updated',
     entityType: 'fixed_asset',
     entityId: id,
-    summary: `Asset updated: ${patch.description?.trim() ?? current.description}`,
+    summary:
+      status === 'active' && current.status === 'draft'
+        ? `Asset finished off and added to the register: ${patch.description?.trim() ?? current.description}`
+        : `Asset updated: ${patch.description?.trim() ?? current.description}`,
     detail: { before: current, after: patch },
     user,
   })
@@ -364,6 +457,114 @@ export async function undoDisposal(id: string, user: SessionUser | null): Promis
     user,
   })
   return requireFixedAsset(id)
+}
+
+// ---------------------------------------------------------------------------
+// Assets raised off a purchase
+// ---------------------------------------------------------------------------
+
+/**
+ * Keep the draft assets for one purchase in step with its ticked lines.
+ *
+ * PER LINE, and that is the whole design. A single receipt is routinely a desk
+ * and a chair, which are two assets with two lives and possibly two allowance
+ * pools - so the tick lives on the line and each ticked line raises its own
+ * draft. A tick on the entry as a whole would be unable to say what it meant on
+ * the day someone bought two things at once, which is most days.
+ *
+ * Idempotent: safe to call after every save. The unique index on
+ * (transaction_id, transaction_line_position) is what makes it so, rather than
+ * a count-and-compare that races the second browser tab.
+ *
+ * Drafts only exist for POSTED entries. An import sitting in the review queue
+ * is not a record yet, and raising assets off one would fill the register with
+ * things nobody has agreed happened.
+ */
+export async function syncAssetDraftsForTransaction(
+  transactionId: string,
+  user: SessionUser | null,
+): Promise<number> {
+  // Untick a line, or delete it, and its draft goes. Only ever a DRAFT: once an
+  // asset has been finished off it is a register entry in its own right, and
+  // editing the receipt it came from must not be able to delete it.
+  await prisma.$executeRaw`
+    DELETE FROM "bk_fixed_assets" f
+    WHERE f."transaction_id" = ${transactionId}
+      AND f."status" = 'draft'
+      AND NOT EXISTS (
+        SELECT 1 FROM "bk_transaction_lines" l
+        JOIN "bk_transactions" t ON t."id" = l."transaction_id"
+        WHERE l."transaction_id" = f."transaction_id"
+          AND l."position" = f."transaction_line_position"
+          AND l."register_asset" = TRUE
+          AND t."status" = 'posted'
+      )
+  `
+
+  const accounts = await resolveAccounts({})
+  const raised = await prisma.$executeRaw`
+    INSERT INTO "bk_fixed_assets" (
+      "description", "acquired_date", "cost", "status",
+      "transaction_id", "transaction_line_position",
+      "asset_account_id", "depreciation_account_id", "expense_account_id",
+      "created_by_user_id"
+    )
+    SELECT
+      -- What the line was called, then what the whole receipt was called, then
+      -- who it was bought from. Something recognisable, never an empty row.
+      COALESCE(
+        NULLIF(BTRIM(l."description"), ''),
+        NULLIF(BTRIM(t."description"), ''),
+        t."counterparty"
+      ),
+      t."tax_point_date",
+      -- Net, because the VAT on it was reclaimed on the return this entry is
+      -- already in. This module has no partial exemption, so there is no case
+      -- here where the irrecoverable VAT belongs in the cost of the asset.
+      l."net_amount",
+      'draft',
+      t."id", l."position",
+      ${accounts.assetAccountId}, ${accounts.depreciationAccountId}, ${accounts.expenseAccountId},
+      ${user?.id ?? null}
+    FROM "bk_transaction_lines" l
+    JOIN "bk_transactions" t ON t."id" = l."transaction_id"
+    WHERE l."transaction_id" = ${transactionId}
+      AND l."register_asset" = TRUE
+      AND t."status" = 'posted'
+      -- A credit note line cannot be an asset, and letting one through would
+      -- fail the cost CHECK and take the whole save down with it.
+      AND l."net_amount" >= 0
+    ON CONFLICT ("transaction_id", "transaction_line_position")
+      WHERE "transaction_id" IS NOT NULL AND "transaction_line_position" IS NOT NULL
+      DO NOTHING
+  `
+
+  if (raised > 0) {
+    await appendAudit({
+      action: 'fixed_asset.raised_from_entry',
+      entityType: 'transaction',
+      entityId: transactionId,
+      summary: `${raised} asset${raised === 1 ? '' : 's'} raised off this entry, waiting to be finished off`,
+      detail: { transactionId, raised },
+      user,
+    })
+  }
+  return raised
+}
+
+/**
+ * Drop the drafts belonging to a purchase that is being deleted.
+ *
+ * The foreign key is ON DELETE SET NULL, which is right for a finished asset -
+ * the register should not lose a van because someone tidied up a receipt - and
+ * wrong for a draft, which without its purchase is a row with no cost, no date
+ * and nothing to say where it came from.
+ */
+export async function removeAssetDraftsForTransaction(transactionId: string): Promise<void> {
+  await prisma.$executeRaw`
+    DELETE FROM "bk_fixed_assets"
+    WHERE "transaction_id" = ${transactionId} AND "status" = 'draft'
+  `
 }
 
 // ---------------------------------------------------------------------------

@@ -44,6 +44,7 @@ type Data = {
   month: { from: string; income: string; expenses: string; profit: string }
   drafts: number
   missingEvidence: number
+  unfinishedAssets: number
   recent: {
     id: string
     date: string
@@ -242,6 +243,19 @@ export default function DashboardScreen({
                     {' · '}
                     <a href={`${base}/transactions?hasEvidence=0`}>
                       {data.missingEvidence} without a receipt
+                    </a>
+                  </>
+                )}
+                {/*
+                  An asset nobody finished off claims no capital allowances, and
+                  the only place that shows up is a tax bill that is too big.
+                  Said here because this is the page people actually look at.
+                */}
+                {data.unfinishedAssets > 0 && (
+                  <>
+                    {' · '}
+                    <a href={`${base}/assets`}>
+                      {data.unfinishedAssets} asset{data.unfinishedAssets === 1 ? '' : 's'} to finish off
                     </a>
                   </>
                 )}

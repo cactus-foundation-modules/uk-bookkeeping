@@ -26,6 +26,12 @@ type Line = {
   vatAmount: string
   grossAmount: string
   isCapital: boolean
+  /**
+   * "Start an asset for this line." One per LINE, never one per entry: a
+   * receipt for a desk and a chair is two assets with two lives, and a single
+   * tick at the top of the form could not say which of them it meant.
+   */
+  registerAsset: boolean
 }
 
 // Keys must survive a mid-list removal: keyed by index, deleting line two hands
@@ -90,6 +96,11 @@ function emptyLine(category: Pick<Category, 'id' | 'is_capital'> | null): Line {
     vatAmount: '0.00',
     grossAmount: '0.00',
     isCapital: category?.is_capital ?? false,
+    // Ticked by default on a capital category, because that is what a capital
+    // category MEANS: something the business will still have next year. The
+    // ones that are not - a deposit, a stage payment - are the exception, and
+    // the exception is the thing worth making somebody click.
+    registerAsset: category?.is_capital ?? false,
   }
 }
 
@@ -186,6 +197,7 @@ export default function TransactionForm({
                         // category is chosen, defaults included - otherwise a
                         // default of "Equipment" records a non-capital line.
                         isCapital: list[0]?.is_capital ?? false,
+                        registerAsset: list[0]?.is_capital ?? false,
                       },
                 ),
               }
@@ -223,6 +235,7 @@ export default function TransactionForm({
           ...line,
           categoryId: category.id,
           isCapital: category.is_capital,
+          registerAsset: category.is_capital,
         })),
       }))
     } catch {
@@ -466,7 +479,11 @@ export default function TransactionForm({
                   onChange={(e) => {
                     const category = categories.find((c) => c.id === e.target.value)
                     setCategoryTouched(true)
-                    setLine(index, { categoryId: e.target.value, isCapital: category?.is_capital ?? false })
+                    setLine(index, {
+                      categoryId: e.target.value,
+                      isCapital: category?.is_capital ?? false,
+                      registerAsset: category?.is_capital ?? false,
+                    })
                   }}
                 >
                   {categories.map((category) => (
@@ -537,6 +554,45 @@ export default function TransactionForm({
                 />
               </div>
             </div>
+
+            {/*
+              Only on capital lines, and that is not tidiness. Everything on the
+              asset register had its cost put on the balance sheet by a capital
+              line; offering the tick on an ordinary cost would let someone put
+              a desk in the P&L AND depreciate it, which counts it twice.
+            */}
+            {line.isCapital && (
+              <label
+                htmlFor={`bk-line-${line.uid}-asset`}
+                style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '0.5rem',
+                  margin: '0.75rem 0 0',
+                  padding: '0.625rem 0.75rem',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 6,
+                  background: 'var(--color-bg)',
+                  fontSize: 'var(--text-sm)',
+                  lineHeight: 1.5,
+                  cursor: 'pointer',
+                }}
+              >
+                <input
+                  id={`bk-line-${line.uid}-asset`}
+                  type="checkbox"
+                  checked={line.registerAsset}
+                  onChange={(e) => setLine(index, { registerAsset: e.target.checked })}
+                  style={{ marginTop: '0.2rem', flexShrink: 0 }}
+                />
+                <span>
+                  <strong>Put this one on the asset register.</strong> It starts an entry for you to
+                  finish off under Assets - how to spread the cost, and which tax allowances it
+                  qualifies for. Leave it ticked unless this is a deposit or a part payment towards
+                  something already on the register.
+                </span>
+              </label>
+            )}
 
             {vatWarning(line) && (
               <p style={{ margin: '0.5rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-warning, var(--color-text))' }}>

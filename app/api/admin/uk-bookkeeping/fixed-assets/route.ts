@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { listAccounts } from '@/modules/uk-bookkeeping/lib/accounts'
 import { toErrorResponse } from '@/modules/uk-bookkeeping/lib/errors'
-import { createFixedAsset, listFixedAssets } from '@/modules/uk-bookkeeping/lib/fixed-assets'
+import {
+  createFixedAsset,
+  listAssetDrafts,
+  listFixedAssets,
+} from '@/modules/uk-bookkeeping/lib/fixed-assets'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
 
 // The fixed asset register. The accounts list rides along because the form
@@ -13,14 +17,19 @@ export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams
 
   try {
-    const [assets, accounts] = await Promise.all([
+    // Drafts come back on their own list rather than mixed into the register.
+    // They are not assets yet - nothing is depreciated on them and they claim
+    // nothing - and a screen that showed them in the same table would be
+    // saying they were, which is the misunderstanding that costs the tax.
+    const [assets, drafts, accounts] = await Promise.all([
       listFixedAssets({
         includeDisposed: params.get('includeDisposed') !== 'false',
         includeArchived: params.get('includeArchived') === 'true',
       }),
+      listAssetDrafts(),
       listAccounts(),
     ])
-    return NextResponse.json({ assets, accounts })
+    return NextResponse.json({ assets, drafts, accounts })
   } catch (error) {
     return toErrorResponse(error)
   }

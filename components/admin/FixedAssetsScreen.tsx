@@ -33,13 +33,48 @@ const DEPRECIATION_METHODS = [
   { value: 'none', label: 'Do not depreciate' },
 ]
 
+// Which allowance an asset qualifies for is a judgement about the asset, and it
+// was previously a dropdown of six phrases you had to already understand to
+// choose between. Spelled out instead, one per line with the case for picking
+// it, because the cost of guessing wrong here is a tax return that is wrong -
+// and unlike most wrong answers in this module, nothing later on will catch it.
 const CA_POOLS = [
-  { value: 'aia', label: 'Annual investment allowance - the whole cost, up to the yearly cap' },
-  { value: 'full_expensing', label: 'Full expensing - the whole cost, brand new equipment only' },
-  { value: 'fya_special', label: '50% first year - new integral features and long-life assets' },
-  { value: 'main', label: 'Main pool - 18% a year' },
-  { value: 'special', label: 'Special rate pool - 6% a year, including cars' },
-  { value: 'none', label: 'No tax allowances at all' },
+  {
+    value: 'aia',
+    short: 'Annual investment allowance',
+    label: 'Annual investment allowance - the whole cost, this year',
+    when: 'Almost everything a small business buys: desks, chairs, computers, machinery, tools, vans. The whole cost comes off this year\u2019s profit, up to £1,000,000 a year across everything you buy - which is a good deal more than most businesses spend. If you are not sure, this is the one.',
+  },
+  {
+    value: 'full_expensing',
+    short: 'Full expensing',
+    label: 'Full expensing - the whole cost, brand new equipment only',
+    when: 'A limited company buying something nobody has owned before. Same whole-cost relief as the annual investment allowance but with no yearly cap, so it is only worth reaching for if you have used that cap up. Second-hand does not qualify, and neither do cars.',
+  },
+  {
+    value: 'fya_special',
+    short: '50% first year',
+    label: '50% first year allowance - new integral features and long-life assets',
+    when: 'A limited company buying brand new air conditioning, lifts, or electrical, heating and water systems built into a building. Half the cost comes off this year and the rest joins the special rate pool at 6% a year.',
+  },
+  {
+    value: 'main',
+    short: 'Main pool',
+    label: 'Main pool - 18% a year',
+    when: 'Ordinary equipment when you are not claiming one of the allowances above - usually because the yearly cap has gone, or because you would rather spread the relief. 18% of what is left, every year, for as long as it takes.',
+  },
+  {
+    value: 'special',
+    short: 'Special rate pool',
+    label: 'Special rate pool - 6% a year',
+    when: 'Cars, always, whatever they cost and however you bought them. Also integral features and anything expected to last 25 years or more. 6% of what is left, every year.',
+  },
+  {
+    value: 'none',
+    short: 'No allowances',
+    label: 'No tax allowances at all',
+    when: 'Land, and most buildings. Rare, and worth being sure about before you pick it - this is the option that claims nothing.',
+  },
 ]
 
 type Asset = {
@@ -57,6 +92,32 @@ type Asset = {
   accumulated_depreciation: string
   net_book_value: string
   archived: boolean
+}
+
+/**
+ * An asset the module raised itself off a ticked purchase line, which nobody
+ * has yet said how to depreciate or what allowances it qualifies for.
+ *
+ * It is deliberately not in the register table below. Nothing is depreciated on
+ * it and it claims nothing, and a screen that listed it alongside finished
+ * assets would be saying the opposite of that.
+ */
+type Draft = Asset & {
+  transaction_id: string | null
+  counterparty: string | null
+  line_description: string | null
+}
+
+type Finishing = {
+  id: string
+  description: string
+  reference: string
+  acquiredDate: string
+  cost: string
+  depreciationMethod: string
+  depreciationRate: string
+  residualValue: string
+  caPool: string
 }
 
 type Run = {
@@ -88,6 +149,8 @@ export default function FixedAssetsScreen({
   canRecord: boolean
 }) {
   const [assets, setAssets] = useState<Asset[]>([])
+  const [drafts, setDrafts] = useState<Draft[]>([])
+  const [finishing, setFinishing] = useState<Finishing | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState(EMPTY_DRAFT)
@@ -105,6 +168,7 @@ export default function FixedAssetsScreen({
     const data = await response.json()
     if (signal?.aborted) return
     setAssets(data.assets)
+    setDrafts(data.drafts ?? [])
   }, [])
 
   const loadRun = useCallback(
@@ -169,6 +233,183 @@ export default function FixedAssetsScreen({
           in the first year. Both come off the same entry, so you only tell it once.
         </p>
       </div>
+
+      {drafts.length > 0 && (
+        <div style={{ ...card, padding: '1.25rem', borderColor: 'var(--color-warning, var(--color-border))' }}>
+          <h2 style={{ margin: '0 0 0.5rem', fontSize: '1rem' }}>
+            {drafts.length === 1 ? 'One purchase is' : `${drafts.length} purchases are`} waiting to be
+            finished off
+          </h2>
+          <p style={{ margin: '0 0 1rem', fontSize: 'var(--text-sm)', lineHeight: 1.6 }}>
+            You ticked these as assets when you recorded them. Until each one is finished off it sits
+            here doing nothing: no cost spread over the years you use it for, and no capital
+            allowances - so the tax computation is short by it, and nothing else on any screen would
+            ever mention that.
+          </p>
+
+          {drafts.map((draft) => (
+            <div
+              key={draft.id}
+              style={{
+                border: '1px solid var(--color-border)',
+                borderRadius: 8,
+                padding: '0.875rem',
+                marginBottom: '0.75rem',
+              }}
+            >
+              <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'baseline' }}>
+                <strong style={{ fontSize: 'var(--text-sm)' }}>{draft.description}</strong>
+                <span style={muted}>
+                  <Money value={draft.cost} /> - bought {formatDay(draft.acquired_date)}
+                  {draft.counterparty ? ` from ${draft.counterparty}` : ''}
+                </span>
+              </div>
+
+              {finishing?.id !== draft.id && canRecord && (
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={() =>
+                      setFinishing({
+                        id: draft.id,
+                        description: draft.description,
+                        reference: draft.reference ?? '',
+                        acquiredDate: draft.acquired_date.slice(0, 10),
+                        cost: draft.cost,
+                        depreciationMethod: draft.depreciation_method,
+                        // A draft is stored with no rate, because nobody has
+                        // chosen one and inventing one is what this module does
+                        // not do. The form suggests the usual answer; it is
+                        // still a human who presses the button.
+                        depreciationRate:
+                          Number(draft.depreciation_rate) > 0 ? draft.depreciation_rate : '25',
+                        residualValue: draft.residual_value,
+                        caPool: draft.ca_pool,
+                      })
+                    }
+                  >
+                    Finish it off
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={busy}
+                    onClick={() => send(`/api/m/uk-bookkeeping/admin/fixed-assets/${draft.id}`, 'DELETE')}
+                  >
+                    Not an asset after all
+                  </button>
+                </div>
+              )}
+
+              {finishing?.id === draft.id && canRecord && (
+                <div style={{ marginTop: '0.875rem' }}>
+                  <div
+                    style={{
+                      display: 'grid',
+                      gap: '0.75rem',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                    }}
+                  >
+                    <Field label="What is it" id={`bk-fin-desc-${draft.id}`}>
+                      <input
+                        id={`bk-fin-desc-${draft.id}`}
+                        style={{ ...input, width: '100%' }}
+                        value={finishing.description}
+                        onChange={(event) => setFinishing({ ...finishing, description: event.target.value })}
+                      />
+                    </Field>
+                    <Field label="Reference" id={`bk-fin-ref-${draft.id}`}>
+                      <input
+                        id={`bk-fin-ref-${draft.id}`}
+                        style={{ ...input, width: '100%' }}
+                        value={finishing.reference}
+                        onChange={(event) => setFinishing({ ...finishing, reference: event.target.value })}
+                        placeholder="Serial number, registration"
+                      />
+                    </Field>
+                    <Field label="What it cost, before VAT" id={`bk-fin-cost-${draft.id}`}>
+                      <input
+                        id={`bk-fin-cost-${draft.id}`}
+                        inputMode="decimal"
+                        style={{ ...input, width: '100%' }}
+                        value={finishing.cost}
+                        onChange={(event) => setFinishing({ ...finishing, cost: event.target.value })}
+                      />
+                    </Field>
+                    <Field label="How to spread the cost" id={`bk-fin-method-${draft.id}`}>
+                      <select
+                        id={`bk-fin-method-${draft.id}`}
+                        style={{ ...input, width: '100%' }}
+                        value={finishing.depreciationMethod}
+                        onChange={(event) =>
+                          setFinishing({ ...finishing, depreciationMethod: event.target.value })
+                        }
+                      >
+                        {DEPRECIATION_METHODS.map((method) => (
+                          <option key={method.value} value={method.value}>
+                            {method.label}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Percent a year" id={`bk-fin-rate-${draft.id}`}>
+                      <input
+                        id={`bk-fin-rate-${draft.id}`}
+                        inputMode="decimal"
+                        style={{ ...input, width: '100%' }}
+                        value={finishing.depreciationRate}
+                        onChange={(event) =>
+                          setFinishing({ ...finishing, depreciationRate: event.target.value })
+                        }
+                      />
+                    </Field>
+                    <Field label="Worth at the end" id={`bk-fin-residual-${draft.id}`}>
+                      <input
+                        id={`bk-fin-residual-${draft.id}`}
+                        inputMode="decimal"
+                        style={{ ...input, width: '100%' }}
+                        value={finishing.residualValue}
+                        onChange={(event) =>
+                          setFinishing({ ...finishing, residualValue: event.target.value })
+                        }
+                      />
+                    </Field>
+                    <div style={{ gridColumn: '1 / -1' }}>
+                      <CaPoolChooser
+                        idPrefix={`bk-fin-${draft.id}`}
+                        value={finishing.caPool}
+                        onChange={(caPool) => setFinishing({ ...finishing, caPool })}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.875rem' }}>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={busy || !finishing.description.trim() || !finishing.cost}
+                      onClick={async () => {
+                        const ok = await send(
+                          `/api/m/uk-bookkeeping/admin/fixed-assets/${draft.id}`,
+                          'PATCH',
+                          { ...finishing, status: 'active' },
+                        )
+                        if (ok) setFinishing(null)
+                      }}
+                    >
+                      Put it on the register
+                    </button>
+                    <button type="button" className="btn" onClick={() => setFinishing(null)}>
+                      Not now
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
         {canRecord && (
@@ -247,26 +488,14 @@ export default function FixedAssetsScreen({
                 onChange={(event) => setDraft({ ...draft, residualValue: event.target.value })}
               />
             </Field>
-            <Field label="Tax allowances" id="bk-fa-pool" wide>
-              <select
-                id="bk-fa-pool"
-                style={{ ...input, width: '100%' }}
+            <div style={{ gridColumn: '1 / -1' }}>
+              <CaPoolChooser
+                idPrefix="bk-fa-new"
                 value={draft.caPool}
-                onChange={(event) => setDraft({ ...draft, caPool: event.target.value })}
-              >
-                {CA_POOLS.map((pool) => (
-                  <option key={pool.value} value={pool.value}>
-                    {pool.label}
-                  </option>
-                ))}
-              </select>
-            </Field>
+                onChange={(caPool) => setDraft({ ...draft, caPool })}
+              />
+            </div>
           </div>
-          <p style={{ ...muted, margin: '0.75rem 0' }}>
-            If you are not sure about the tax allowances, the annual investment allowance is the
-            right answer for most things most of the time. Cars are the big exception: they always
-            go in the special rate pool.
-          </p>
           <button
             type="button"
             className="btn btn-primary"
@@ -318,7 +547,7 @@ export default function FixedAssetsScreen({
                   <td style={tdRight}><Money value={asset.accumulated_depreciation} /></td>
                   <td style={tdRight}><Money value={asset.net_book_value} /></td>
                   <td style={{ ...td, ...muted }}>
-                    {CA_POOLS.find((pool) => pool.value === asset.ca_pool)?.label.split(' - ')[0] ?? asset.ca_pool}
+                    {CA_POOLS.find((pool) => pool.value === asset.ca_pool)?.short ?? asset.ca_pool}
                   </td>
                   <td style={{ ...td, whiteSpace: 'nowrap' }}>
                     {canRecord && !asset.disposed_date && (
@@ -466,6 +695,70 @@ export default function FixedAssetsScreen({
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * Which capital allowance the thing qualifies for, spelled out.
+ *
+ * Radio buttons rather than tickboxes, because exactly one of these can be true
+ * at a time: the browser then enforces the "only one" for us, arrow keys move
+ * between them, and a screen reader says which of how many is chosen. Six
+ * tickboxes with a rule about them would have to be policed in TypeScript and
+ * would still read as "pick as many as you like" to anybody not looking.
+ */
+function CaPoolChooser({
+  idPrefix,
+  value,
+  onChange,
+}: {
+  idPrefix: string
+  value: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <fieldset style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
+      <legend style={{ ...muted, padding: 0, marginBottom: '0.375rem' }}>
+        Tax allowances - pick the one that fits
+      </legend>
+      <div style={{ display: 'grid', gap: '0.5rem' }}>
+        {CA_POOLS.map((pool) => {
+          const chosen = value === pool.value
+          return (
+            <label
+              key={pool.value}
+              htmlFor={`${idPrefix}-${pool.value}`}
+              style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: '0.5rem',
+                padding: '0.625rem 0.75rem',
+                border: `1px solid ${chosen ? 'var(--color-primary)' : 'var(--color-border)'}`,
+                borderRadius: 8,
+                background: 'var(--color-bg)',
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="radio"
+                id={`${idPrefix}-${pool.value}`}
+                name={`${idPrefix}-ca-pool`}
+                value={pool.value}
+                checked={chosen}
+                onChange={() => onChange(pool.value)}
+                style={{ marginTop: '0.25rem', flexShrink: 0 }}
+              />
+              <span style={{ fontSize: 'var(--text-sm)' }}>
+                <strong>{pool.label}</strong>
+                <span style={{ display: 'block', marginTop: '0.125rem', ...muted, lineHeight: 1.5 }}>
+                  {pool.when}
+                </span>
+              </span>
+            </label>
+          )
+        })}
+      </div>
+    </fieldset>
   )
 }
 

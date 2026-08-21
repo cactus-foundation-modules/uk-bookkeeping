@@ -141,6 +141,12 @@ export type BkTransactionLineRow = {
   vat_amount: Money
   gross_amount: Money
   is_capital: boolean
+  /**
+   * "Put this on the asset register." Not the same thing as is_capital, which
+   * is an accounting treatment that follows the category: a stage payment on a
+   * building is capital and is not a separate asset.
+   */
+  register_asset: boolean
   locked_period_id: string | null
 }
 
@@ -562,6 +568,19 @@ export type BkAccountingPeriodRow = {
 export type DepreciationMethod = 'straight_line' | 'reducing_balance' | 'none'
 
 /**
+ * Where an asset is up to.
+ *
+ * A 'draft' is one the module raised itself, off a ticked purchase line, and
+ * which nobody has yet said how to depreciate or which allowances it qualifies
+ * for. It is inert until they do: no depreciation is charged on it and it
+ * claims nothing, because both of those are judgements about the asset and
+ * this module does not invent judgements. 'active' is a finished register
+ * entry, which is what every asset added by hand is from the moment it is
+ * saved.
+ */
+export type FixedAssetStatus = 'draft' | 'active'
+
+/**
  * Which capital allowances pool an asset's cost goes in.
  *
  * These are HMRC's categories, not this module's, and choosing between them is
@@ -597,7 +616,10 @@ export type BkFixedAssetRow = {
   reference: string | null
   acquired_date: Date
   cost: Money
+  status: FixedAssetStatus
   transaction_id: string | null
+  /** Which line of that purchase, so one receipt can raise two assets. */
+  transaction_line_position: number | null
   asset_account_id: string
   depreciation_account_id: string
   expense_account_id: string

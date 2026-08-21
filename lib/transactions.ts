@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db/prisma'
 import type { SessionUser } from '@/lib/auth/session'
 import { appendAudit } from './audit'
 import { BookkeepingError, NotFoundError } from './errors'
+import { removeAssetDraftsForTransaction, syncAssetDraftsForTransaction } from './fixed-assets'
 import { assertDatesNotInClosedPeriod, assertTransactionMutable } from './guards'
 import { formatMoney, toMoney } from './money'
 import type {
@@ -37,6 +38,13 @@ export type LineInput = {
   vatAmount: string
   grossAmount: string
   isCapital?: boolean
+  /**
+   * "Put this line on the asset register." One asset per ticked LINE: a receipt
+   * for a desk and a chair is two assets, so there is deliberately no such flag
+   * on the entry as a whole. Separate from isCapital, which is the accounting
+   * treatment and follows the category.
+   */
+  registerAsset?: boolean
 }
 
 export type TransactionInput = {
@@ -316,6 +324,11 @@ export async function createTransaction(
 
   const id = await prisma.$transaction(async (tx) => insertTransactionRows(tx, input, user))
 
+  // Ticked lines raise their draft assets here rather than inside the write
+  // above: an asset that fails to appear is a nag that never shows up, which is
+  // bad, and a receipt that fails to save because of it is worse.
+  await syncAssetDraftsForTransaction(id, user)
+
   await appendAudit({
     action: 'transaction.created',
     entityType: 'transaction',
@@ -399,13 +412,15 @@ async function insertLines(tx: TxClient, transactionId: string, lines: LineInput
     await tx.$executeRaw`
       INSERT INTO "bk_transaction_lines" (
         "transaction_id", "position", "category_id", "description", "vat_treatment",
-        "vat_rate_code", "vat_rate_percent", "net_amount", "vat_amount", "gross_amount", "is_capital"
+        "vat_rate_code", "vat_rate_percent", "net_amount", "vat_amount", "gross_amount", "is_capital",
+        "register_asset"
       ) VALUES (
         ${transactionId}, ${position}, ${line.categoryId}, ${line.description?.trim() ?? ''},
         ${line.vatTreatment}, ${line.vatRateCode},
         ${formatMoney(line.vatRatePercent)}::numeric, ${formatMoney(line.netAmount)}::numeric,
         ${formatMoney(line.vatAmount)}::numeric, ${formatMoney(line.grossAmount)}::numeric,
-        ${line.isCapital ?? false}
+        ${line.isCapital ?? false},
+        ${line.registerAsset ?? false}
       )
     `
   }
@@ -471,6 +486,12 @@ export async function updateTransaction(
     await insertLines(tx, id, input.lines)
   })
 
+  // Lines were replaced wholesale, so the ticks may have moved. Anything newly
+  // ticked raises a draft; anything unticked loses its draft, but never an
+  // asset that has already been finished off - that is a register entry now,
+  // and correcting the receipt it came from is not grounds for deleting it.
+  await syncAssetDraftsForTransaction(id, user)
+
   await appendAudit({
     action: 'transaction.updated',
     entityType: 'transaction',
@@ -513,6 +534,10 @@ export async function deleteTransaction(id: string, user: SessionUser | null): P
     )
   }
 
+  // The foreign key sets transaction_id to NULL, which is right for a finished
+  // asset and useless for a draft: without its purchase a draft has nothing to
+  // say where it came from.
+  await removeAssetDraftsForTransaction(id)
   await prisma.$executeRaw`DELETE FROM "bk_transactions" WHERE "id" = ${id}`
 
   await appendAudit({
@@ -548,6 +573,10 @@ export async function postDraft(id: string, user: SessionUser | null): Promise<T
     SET "status" = 'posted', "updated_by_user_id" = ${user?.id ?? null}, "updated_at" = NOW()
     WHERE "id" = ${id}
   `
+  // Now it is a record, its ticked lines can raise their assets. Not before:
+  // an import waiting for review is not something anybody has agreed happened.
+  await syncAssetDraftsForTransaction(id, user)
+
   await appendAudit({
     action: 'transaction.posted',
     entityType: 'transaction',

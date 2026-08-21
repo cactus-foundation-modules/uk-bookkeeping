@@ -18,6 +18,7 @@ type Line = {
   vat_amount: string
   gross_amount: string
   is_capital: boolean
+  register_asset: boolean
 }
 
 type Attachment = {
@@ -156,6 +157,10 @@ export default function TransactionDetail({
         // save, so a hardcoded false here silently stripped the capital flag
         // from every edited entry - and with it the SA103/CT600 grouping.
         isCapital: line.is_capital,
+        // Same trap, same reason: lines are replaced wholesale on save, so a
+        // hardcoded false here would untick the asset on every edit and quietly
+        // delete the draft it raised.
+        registerAsset: line.register_asset,
       })),
     }
     return (

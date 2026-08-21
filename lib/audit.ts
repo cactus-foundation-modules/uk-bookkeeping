@@ -59,6 +59,11 @@ export type AuditAction =
   | 'accounting_period.closed'
   | 'accounting_period.reopened'
   | 'fixed_asset.created'
+  // Raised by the module off a ticked purchase line, and finished off by a
+  // human afterwards. Two separate events because they are two separate acts:
+  // one is bookkeeping, the other is a judgement about tax.
+  | 'fixed_asset.raised_from_entry'
+  | 'fixed_asset.confirmed'
   | 'fixed_asset.updated'
   | 'fixed_asset.deleted'
   | 'fixed_asset.disposed'

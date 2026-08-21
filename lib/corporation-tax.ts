@@ -727,7 +727,11 @@ export async function computeCorporationTax(
   const assets = await prisma.$queryRaw<AssetForCa[]>`
     SELECT "id", "cost", "ca_pool", "acquired_date", "disposed_date", "disposal_proceeds"
     FROM "bk_fixed_assets"
-    WHERE "acquired_date" <= ${end}::date
+    -- Drafts claim nothing. One raised off a purchase line has an allowance
+    -- pool nobody has chosen yet, and letting the default stand in for a choice
+    -- would put an allowance on a tax return that nobody ever agreed to.
+    WHERE "status" = 'active'
+      AND "acquired_date" <= ${end}::date
     ORDER BY "acquired_date" ASC
   `
   const ca = computeCapitalAllowances({
