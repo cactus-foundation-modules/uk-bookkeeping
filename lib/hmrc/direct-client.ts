@@ -96,11 +96,15 @@ export class DirectHmrcClient implements HmrcClient {
     const { clientId, clientSecret } = this.credentials()
     const body = new URLSearchParams({ ...fields, client_id: clientId, client_secret: clientSecret })
 
-    // No Accept header, deliberately. HMRC's versioned media type
-    // (application/vnd.hmrc.1.0+json) belongs on API RESOURCES, and requesting a
-    // version an endpoint does not serve is answered with 406 Not Acceptable.
-    // /oauth/token is not a versioned resource and HMRC's own documented
-    // examples send content-type alone - so this sends exactly what they show.
+    // No Accept header, deliberately: HMRC's own documented curl examples for
+    // both the authorization_code exchange and the refresh send content-type
+    // alone, and /oauth/token is not a versioned API resource.
+    //
+    // Measured against the sandbox rather than assumed (sandbox.live.test.ts):
+    // sending the versioned media type here made NO difference - both shapes are
+    // answered identically. So this is a tidy-up rather than a fix. It is still
+    // worth doing, because quietly deviating from a published example is how
+    // something breaks later for a reason nobody can find.
     const response = await fetch(`${HMRC_HOSTS[environment].api}/oauth/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -396,7 +400,7 @@ export class DirectHmrcClient implements HmrcClient {
     const { clientId, clientSecret } = this.credentials()
     const response = await fetch(`${HMRC_HOSTS[environment].api}/oauth/token`, {
       method: 'POST',
-      // Same reasoning as the user token above: no Accept on /oauth/token.
+      // Same as the user token above: HMRC's documented shape, content-type alone.
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'client_credentials',

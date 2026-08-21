@@ -2,14 +2,20 @@ import type { HmrcEnvironment } from '../types'
 
 // Where HMRC lives, and the one string every install must register verbatim.
 
+// The API host is `service.HMRC.gov.uk`; the sign-in host is `tax.service.gov.uk`
+// with no `hmrc` in it. They are genuinely different shapes, which is exactly how
+// the wrong one gets written down - `test-api.service.gov.uk` does not resolve at
+// all, so every call would fail with a DNS error rather than anything that reads
+// like a configuration problem. `lib/hmrc/sandbox.live.test.ts` reaches all four
+// of these for real, which is how this was caught.
 export const HMRC_HOSTS: Record<HmrcEnvironment, { authorize: string; api: string }> = {
   sandbox: {
     authorize: 'https://test-www.tax.service.gov.uk',
-    api: 'https://test-api.service.gov.uk',
+    api: 'https://test-api.service.hmrc.gov.uk',
   },
   production: {
     authorize: 'https://www.tax.service.gov.uk',
-    api: 'https://api.service.gov.uk',
+    api: 'https://api.service.hmrc.gov.uk',
   },
 }
 

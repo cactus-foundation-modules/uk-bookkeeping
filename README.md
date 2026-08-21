@@ -76,6 +76,27 @@ Grant `bookkeeping.access` to whichever roles should see the section,
 who may finalise and file, and `bookkeeping.settings` to those who may change
 settings and the HMRC connection.
 
+## Testing against HMRC's sandbox
+
+`modules/uk-bookkeeping/lib/hmrc/sandbox.live.test.ts` probes HMRC's sandbox for
+real, gated on `RUN_HMRC_SANDBOX=1` so plain `npm test` never reaches the
+network:
+
+```bash
+RUN_HMRC_SANDBOX=1 npx vitest run modules/uk-bookkeeping/lib/hmrc/sandbox.live.test.ts
+```
+
+Tier one needs no credentials and proves what is ours to get wrong - that every
+path is a real resource, and that our Accept header names a version HMRC serve.
+An unauthenticated call to a real resource is answered 401; a path that does not
+exist is answered 404, and the suite asserts both, so a passing 401 means
+something. Tier two runs HMRC's fraud prevention header validator and needs
+`HMRC_CLIENT_ID` / `HMRC_CLIENT_SECRET` from a sandbox application.
+
+What neither tier can do is sign in as a Government Gateway test user, so
+obligations, submission and viewing a return are checked by hand - there is a
+step-by-step list on the wiki page.
+
 ## What it is not
 
 Not payroll, not stock, not invoicing your customers. Not the Flat Rate Scheme,
