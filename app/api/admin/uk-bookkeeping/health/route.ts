@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { appendAudit, verifyAuditChain } from '@/modules/uk-bookkeeping/lib/audit'
 import { checkTriggerHealth } from '@/modules/uk-bookkeeping/lib/health'
+import { ledgerHealth } from '@/modules/uk-bookkeeping/lib/ledger'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
 
 // Whether the guards that make a filed return unchangeable are still in place.
@@ -11,7 +12,10 @@ export async function GET() {
   const gate = await requireBookkeepingUser('bookkeeping.access')
   if (gate.error) return gate.error
 
-  const health = await checkTriggerHealth()
+  // Two different questions, one banner. "Are the guards still in place" and
+  // "do the books add up" are both things a site owner needs told without
+  // having to go and look, and neither is worth its own request.
+  const [health, ledger] = await Promise.all([checkTriggerHealth(), ledgerHealth()])
   if (!health.healthy) {
     await appendAudit({
       action: 'health.trigger-missing',
@@ -21,7 +25,7 @@ export async function GET() {
       user: gate.user,
     })
   }
-  return NextResponse.json(health)
+  return NextResponse.json({ ...health, ledger })
 }
 
 export async function POST() {

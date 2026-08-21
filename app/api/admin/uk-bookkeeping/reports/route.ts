@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { toErrorResponse } from '@/modules/uk-bookkeeping/lib/errors'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
 import {
+  balanceSheet,
   categorySummary,
   groupForTaxReturn,
   monthlyBreakdown,
@@ -27,9 +28,12 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const [summary, pl, monthly, exported] = await Promise.all([
+    const [summary, pl, bs, monthly, exported] = await Promise.all([
       categorySummary(from, to),
       profitAndLoss(from, to),
+      // As at the end of the range, so the two reports on the screen are the
+      // two halves of one set of accounts rather than two different dates.
+      balanceSheet(to),
       monthlyBreakdown(from, to),
       exportSummary(),
     ])
@@ -38,6 +42,7 @@ export async function GET(request: NextRequest) {
       to: to.toISOString().slice(0, 10),
       summary,
       profitAndLoss: pl,
+      balanceSheet: bs,
       monthly,
       taxGrouping: groupForTaxReturn(summary, pl.businessType),
       records: exported,

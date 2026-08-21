@@ -1,8 +1,6 @@
-import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { BookkeepingError, NotFoundError } from './errors'
-import { formatMoney, toMoney } from './money'
-import { INCREASES_ON_DEBIT, type AccountKind, type AccountSubtype, type BkAccountRow, type Money } from './types'
+import type { AccountKind, AccountSubtype, BkAccountRow } from './types'
 
 // The ledger accounts a journal can reach.
 //
@@ -61,6 +59,51 @@ export type AccountInput = {
   bankAccountId?: string | null
   personName?: string | null
   position?: number
+  /** Which line of the profit and loss account this prints on. */
+  reportGroup?: string | null
+  /** Which line of the balance sheet this prints on. */
+  bsGroup?: string | null
+  /** How much of what lands here the taxman will not allow, 0 to 100. */
+  disallowablePercent?: string
+}
+
+/**
+ * Where an account of this sort belongs on a balance sheet, when nobody says.
+ *
+ * Mirrors the backfill in 009_ledger_mapping.sql, and deliberately never
+ * returns null for a balance sheet account: one that prints nowhere is one the
+ * balance sheet is silently out by.
+ */
+export function defaultBsGroup(kind: AccountKind, subtype?: AccountSubtype): string | null {
+  if (kind === 'income' || kind === 'expense') return null
+  switch (subtype) {
+    case 'fixed_assets':
+    case 'depreciation':
+      return 'fixed_assets'
+    case 'intangibles':
+      return 'intangible_assets'
+    case 'stock':
+      return 'current_assets_stock'
+    case 'debtors':
+      return 'current_assets_debtors'
+    case 'bank':
+    case 'cash':
+      return 'current_assets_cash'
+    case 'vat_deferred':
+      return 'creditors_short'
+    case 'provisions':
+      return 'provisions'
+    case 'share_capital':
+      return 'share_capital'
+    case 'reserves':
+      return 'reserves'
+    default:
+      return kind === 'asset'
+        ? 'current_assets_debtors'
+        : kind === 'liability'
+          ? 'creditors_short'
+          : 'reserves'
+  }
 }
 
 function normaliseCode(input: string): string {
@@ -77,13 +120,28 @@ export async function createAccount(input: AccountInput): Promise<BkAccountRow> 
     throw new BookkeepingError('invalid', 'A director’s loan account needs to say whose it is.')
   }
 
+  // Defaulted rather than demanded. An owner adding "Subscriptions" should not
+  // have to answer a question about statutory formats to get on with their day,
+  // and the fallback puts it somewhere sensible and visible.
+  const reportGroup =
+    input.reportGroup === undefined
+      ? input.kind === 'income'
+        ? 'other-income'
+        : input.kind === 'expense'
+          ? 'admin-expenses'
+          : null
+      : input.reportGroup
+  const bsGroup = input.bsGroup === undefined ? defaultBsGroup(input.kind, input.subtype) : input.bsGroup
+
   const rows = await prisma.$queryRaw<BkAccountRow[]>`
     INSERT INTO "bk_accounts"
-      ("code", "name", "kind", "subtype", "category_id", "bank_account_id", "person_name", "position")
+      ("code", "name", "kind", "subtype", "category_id", "bank_account_id", "person_name",
+       "position", "report_group", "bs_group", "disallowable_percent")
     VALUES (
       ${code}, ${input.name.trim()}, ${input.kind}, ${input.subtype ?? 'other'},
       ${input.categoryId ?? null}, ${input.bankAccountId ?? null},
-      ${input.personName?.trim() || null}, ${input.position ?? 500}
+      ${input.personName?.trim() || null}, ${input.position ?? 500},
+      ${reportGroup}, ${bsGroup}, ${input.disallowablePercent ?? '0'}::numeric
     )
     RETURNING *
   `
@@ -118,6 +176,11 @@ export async function updateAccount(id: string, patch: AccountPatch): Promise<Bk
       "bank_account_id" = ${patch.bankAccountId === undefined ? current.bank_account_id : patch.bankAccountId},
       "person_name" = ${patch.personName === undefined ? current.person_name : (patch.personName?.trim() || null)},
       "position"    = ${patch.position ?? current.position},
+      "report_group" = ${patch.reportGroup === undefined ? current.report_group : patch.reportGroup},
+      "bs_group"     = ${patch.bsGroup === undefined ? current.bs_group : patch.bsGroup},
+      "disallowable_percent" = ${
+        patch.disallowablePercent ?? current.disallowable_percent.toFixed(2)
+      }::numeric,
       "archived"    = ${patch.archived ?? current.archived},
       "updated_at"  = NOW()
     WHERE "id" = ${id}
@@ -147,122 +210,17 @@ export async function deleteOrArchiveAccount(id: string): Promise<'deleted' | 'a
 // ---------------------------------------------------------------------------
 // Balances
 // ---------------------------------------------------------------------------
-
-export type AccountBalance = {
-  accountId: string
-  code: string
-  name: string
-  kind: AccountKind
-  subtype: AccountSubtype
-  debits: string
-  credits: string
-  /** Signed the way the account reads: positive means "more of what this account is". */
-  balance: string
-}
-
-/**
- * What every account holds, from the journals, as at a date.
- *
- * One statement. The sign convention lives in INCREASES_ON_DEBIT and is applied
- * once, here, rather than being repeated at every call site - which is how a
- * liability ends up displayed upside down on one screen and the right way up on
- * another.
- */
-export async function accountBalances(asAt?: string | null): Promise<AccountBalance[]> {
-  const asAtDate = asAt ? new Date(`${asAt.slice(0, 10)}T00:00:00.000Z`) : null
-
-  const rows = await prisma.$queryRaw<
-    {
-      id: string
-      code: string
-      name: string
-      kind: AccountKind
-      subtype: AccountSubtype
-      debits: Prisma.Decimal
-      credits: Prisma.Decimal
-    }[]
-  >`
-    SELECT a."id", a."code", a."name", a."kind", a."subtype",
-           COALESCE(sums."debits", 0)::numeric  AS debits,
-           COALESCE(sums."credits", 0)::numeric AS credits
-    FROM "bk_accounts" a
-    -- A lateral rather than a join and a GROUP BY: with the posted-only test in
-    -- a join condition, an account holding nothing but DRAFT lines matches a row
-    -- that then fails every WHERE written to keep the empty accounts, and the
-    -- account disappears from the list altogether rather than showing as nil.
-    LEFT JOIN LATERAL (
-      SELECT SUM(l."debit") AS debits, SUM(l."credit") AS credits
-      FROM "bk_journal_lines" l
-      JOIN "bk_journals" j ON j."id" = l."journal_id"
-      WHERE l."account_id" = a."id"
-        AND j."status" = 'posted'
-        AND (${asAtDate}::date IS NULL OR j."date" <= ${asAtDate}::date)
-    ) sums ON TRUE
-    ORDER BY a."position" ASC, a."name" ASC
-  `
-
-  return rows.map((row) => {
-    const debits = toMoney(row.debits)
-    const credits = toMoney(row.credits)
-    const balance = INCREASES_ON_DEBIT[row.kind] ? debits.minus(credits) : credits.minus(debits)
-    return {
-      accountId: row.id,
-      code: row.code,
-      name: row.name,
-      kind: row.kind,
-      subtype: row.subtype,
-      debits: formatMoney(debits),
-      credits: formatMoney(credits),
-      balance: formatMoney(balance),
-    }
-  })
-}
-
-/**
- * The trial balance: every account with a movement, and the two totals that
- * should agree. They always will, because the database refuses an unbalanced
- * posted journal - so a difference here means a guard has been interfered with,
- * which is worth showing rather than hiding.
- */
-export type TrialBalance = {
-  asAt: string | null
-  rows: { code: string; name: string; kind: AccountKind; debit: string; credit: string }[]
-  totalDebits: string
-  totalCredits: string
-  balanced: boolean
-}
-
-export async function trialBalance(asAt?: string | null): Promise<TrialBalance> {
-  const balances = await accountBalances(asAt)
-  let totalDebits: Money = toMoney('0.00')
-  let totalCredits: Money = toMoney('0.00')
-
-  const rows = balances
-    .filter((row) => !toMoney(row.debits).isZero() || !toMoney(row.credits).isZero())
-    .map((row) => {
-      // A trial balance shows each account's NET position on one side or the
-      // other, not its gross turnover on both. An account that took £900 in and
-      // paid £900 out belongs on neither side.
-      const net = toMoney(row.debits).minus(toMoney(row.credits))
-      const debit = net.isPositive() ? net : toMoney('0.00')
-      const credit = net.isNegative() ? net.negated() : toMoney('0.00')
-      totalDebits = totalDebits.plus(debit)
-      totalCredits = totalCredits.plus(credit)
-      return {
-        code: row.code,
-        name: row.name,
-        kind: row.kind,
-        debit: formatMoney(debit),
-        credit: formatMoney(credit),
-      }
-    })
-    .filter((row) => row.debit !== '0.00' || row.credit !== '0.00')
-
-  return {
-    asAt: asAt ?? null,
-    rows,
-    totalDebits: formatMoney(totalDebits),
-    totalCredits: formatMoney(totalCredits),
-    balanced: totalDebits.equals(totalCredits),
-  }
-}
+// These used to be worked out here, from the journals alone, which meant the
+// trial balance showed the year-end adjustments and nothing else. They now come
+// from lib/ledger.ts, which projects the cashbook into postings and unions it
+// with the journals, so there is one set of books and one answer. Re-exported
+// from here because that is where every caller already looks for them.
+export {
+  accountBalances,
+  trialBalance,
+  nominalLedger,
+  type AccountBalance,
+  type TrialBalance,
+  type NominalEntry,
+  type NominalLedger,
+} from './ledger'

@@ -26,6 +26,23 @@ export function toMoney(value: MoneyInput): Money {
   return new Prisma.Decimal(value)
 }
 
+/**
+ * A whole COUNT turned into a Decimal, for the places money has to be divided
+ * by one: days in a period, associated companies plus one, a pool percentage.
+ *
+ * Deliberately separate from toMoney, which refuses numbers outright. The
+ * refusal is there because a caller holding a money value as a number has
+ * already lost the precision this module is about - but a day count is an
+ * integer that never had any precision to lose, and forcing it through a string
+ * at every call site only makes the arithmetic harder to read.
+ */
+export function countToDecimal(value: number): Money {
+  if (!Number.isInteger(value)) {
+    throw new Error(`countToDecimal expects a whole number, got ${value}`)
+  }
+  return new Prisma.Decimal(value)
+}
+
 /** True if the string is a plain decimal we are willing to treat as money. */
 export function isMoneyString(value: unknown): value is string {
   return typeof value === 'string' && /^-?\d{1,10}(\.\d{1,2})?$/.test(value.trim())

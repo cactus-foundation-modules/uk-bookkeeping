@@ -1,8 +1,8 @@
 {
   "name": "uk-bookkeeping",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "tablePrefix": "bk_",
-  "description": "UK bookkeeping with Making Tax Digital VAT returns. Records income and expenses with evidence, works the nine VAT boxes out from those records, and files them with HMRC.",
+  "description": "UK bookkeeping with double-entry accounts, Making Tax Digital VAT returns and corporation tax. Records income and expenses with evidence, keeps one set of books behind them, and produces profit and loss accounts, balance sheets, VAT returns and a company tax computation from those records.",
   "permissions": [
     "bookkeeping.access",
     "bookkeeping.record",
@@ -32,6 +32,11 @@
     "functional"
   ],
   "teardown": [
+    "bk_ct_adjustments",
+    "bk_ct_computations",
+    "bk_ct_rates",
+    "bk_depreciation_charges",
+    "bk_fixed_assets",
     "bk_hmrc_api_calls",
     "bk_hmrc_oauth_states",
     "bk_hmrc_connection",
@@ -39,6 +44,7 @@
     "bk_period_snapshot_lines",
     "bk_period_snapshots",
     "bk_attachments",
+    "bk_accounting_periods",
     "bk_journal_lines",
     "bk_journals",
     "bk_reconciliations",

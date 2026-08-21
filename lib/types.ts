@@ -273,6 +273,7 @@ export type AccountSubtype =
   | 'cash'
   | 'director_loan'
   | 'vat_control'
+  | 'vat_deferred'
   | 'debtors'
   | 'creditors'
   | 'fixed_assets'
@@ -281,6 +282,42 @@ export type AccountSubtype =
   | 'reserves'
   | 'suspense'
   | 'profit_and_loss'
+  | 'stock'
+  | 'intangibles'
+  | 'provisions'
+
+/**
+ * Which line of the profit and loss account an account prints on.
+ *
+ * Plain strings rather than a closed union in the database, for the same reason
+ * bk_categories keeps sa103_box as text: these are groupings on forms that HMRC
+ * renumbers, and a renumbering should be an edit and not a release. The union
+ * here is what the module ships knowing about.
+ */
+export type ReportGroup =
+  | 'turnover'
+  | 'other-income'
+  | 'non-trade-income'
+  | 'property-income'
+  | 'cost-of-sales'
+  | 'staff-costs'
+  | 'admin-expenses'
+  | 'depreciation'
+  | 'finance-costs'
+  | 'tax'
+
+/** Which line of the balance sheet an account prints on. */
+export type BalanceSheetGroup =
+  | 'fixed_assets'
+  | 'intangible_assets'
+  | 'current_assets_stock'
+  | 'current_assets_debtors'
+  | 'current_assets_cash'
+  | 'creditors_short'
+  | 'creditors_long'
+  | 'provisions'
+  | 'share_capital'
+  | 'reserves'
 
 export type JournalStatus = 'draft' | 'posted'
 
@@ -317,6 +354,12 @@ export type BkAccountRow = {
   category_id: string | null
   bank_account_id: string | null
   person_name: string | null
+  /** Which profit and loss line. NULL on balance sheet accounts. */
+  report_group: string | null
+  /** Which balance sheet line. NULL on profit and loss accounts. */
+  bs_group: string | null
+  /** How much of what lands here the taxman disallows, as a percentage. */
+  disallowable_percent: Money
   position: number
   archived: boolean
   is_system: boolean
@@ -490,4 +533,188 @@ export type SnapshotLine = {
   netAmount: string
   vatAmount: string
   boxes: string[]
+}
+
+// ---------------------------------------------------------------------------
+// Financial years
+// ---------------------------------------------------------------------------
+
+export type AccountingPeriodStatus = 'open' | 'closed'
+
+export type BkAccountingPeriodRow = {
+  id: string
+  name: string
+  start_date: Date
+  end_date: Date
+  status: AccountingPeriodStatus
+  close_journal_id: string | null
+  closed_at: Date | null
+  closed_by_user_id: string | null
+  notes: string | null
+  created_at: Date
+  updated_at: Date
+}
+
+// ---------------------------------------------------------------------------
+// Fixed assets
+// ---------------------------------------------------------------------------
+
+export type DepreciationMethod = 'straight_line' | 'reducing_balance' | 'none'
+
+/**
+ * Which capital allowances pool an asset's cost goes in.
+ *
+ * These are HMRC's categories, not this module's, and choosing between them is
+ * a judgement about the asset rather than about the bookkeeping - which is why
+ * it is a field on the asset and not something the module works out.
+ */
+export type CapitalAllowancePool =
+  | 'aia' // annual investment allowance: 100%, up to the yearly cap
+  | 'full_expensing' // 100% first year allowance, new main-rate plant, companies
+  | 'fya_special' // 50% first year allowance, new special rate plant
+  | 'main' // main pool, 18% a year
+  | 'special' // special rate pool, 6% a year
+  | 'none' // no allowances
+
+export const DEPRECIATION_METHOD_LABELS: Record<DepreciationMethod, string> = {
+  straight_line: 'Same amount every year',
+  reducing_balance: 'A percentage of what is left each year',
+  none: 'Do not depreciate',
+}
+
+export const CA_POOL_LABELS: Record<CapitalAllowancePool, string> = {
+  aia: 'Annual investment allowance (the whole cost, up to the yearly cap)',
+  full_expensing: 'Full expensing (the whole cost, new equipment only)',
+  fya_special: '50% first year allowance (new integral features and long-life assets)',
+  main: 'Main pool (18% a year)',
+  special: 'Special rate pool (6% a year - cars, integral features, long-life assets)',
+  none: 'No tax allowances',
+}
+
+export type BkFixedAssetRow = {
+  id: string
+  description: string
+  reference: string | null
+  acquired_date: Date
+  cost: Money
+  transaction_id: string | null
+  asset_account_id: string
+  depreciation_account_id: string
+  expense_account_id: string
+  depreciation_method: DepreciationMethod
+  depreciation_rate: Money
+  residual_value: Money
+  ca_pool: CapitalAllowancePool
+  disposed_date: Date | null
+  disposal_proceeds: Money | null
+  disposal_transaction_id: string | null
+  notes: string | null
+  archived: boolean
+  created_by_user_id: string | null
+  created_at: Date
+  updated_at: Date
+}
+
+export type BkDepreciationChargeRow = {
+  id: string
+  asset_id: string
+  period_start: Date
+  period_end: Date
+  amount: Money
+  journal_id: string
+  created_at: Date
+}
+
+// ---------------------------------------------------------------------------
+// Corporation tax
+// ---------------------------------------------------------------------------
+
+export type CtComputationStatus = 'draft' | 'final'
+
+export type CtAdjustmentKind =
+  | 'add_back'
+  | 'deduction'
+  | 'capital_allowance'
+  | 'balancing_charge'
+  | 'non_trade_income'
+  | 'property_income'
+  | 'other_income'
+  | 'chargeable_gain'
+  | 'loss_bf'
+  | 'loss_cy'
+  | 'group_relief'
+  | 'qualifying_donations'
+  | 'management_expenses'
+  | 'franked_investment_income'
+
+export const CT_ADJUSTMENT_LABELS: Record<CtAdjustmentKind, string> = {
+  add_back: 'Cost the taxman will not allow',
+  deduction: 'Extra deduction not in the accounts',
+  capital_allowance: 'Extra capital allowances claimed',
+  balancing_charge: 'Balancing charge',
+  non_trade_income: 'Bank interest and other non-trading income',
+  property_income: 'Income from property',
+  other_income: 'Other income',
+  chargeable_gain: 'Gain on selling an asset',
+  loss_bf: 'Trading losses brought forward, used',
+  loss_cy: 'This period’s loss set against other profits',
+  group_relief: 'Group relief claimed',
+  qualifying_donations: 'Charitable donations',
+  management_expenses: 'Management expenses',
+  franked_investment_income: 'Dividends received from other companies',
+}
+
+export type BkCtRateRow = {
+  financial_year: number
+  main_rate: Money
+  small_profits_rate: Money | null
+  lower_limit: Money | null
+  upper_limit: Money | null
+  mr_numerator: number | null
+  mr_denominator: number | null
+  aia_limit: Money
+  main_pool_wda: Money
+  special_pool_wda: Money
+  small_pool_limit: Money
+  full_expensing_rate: Money | null
+  fya_special_rate: Money | null
+  notes: string | null
+  updated_at: Date
+}
+
+export type BkCtComputationRow = {
+  id: string
+  accounting_period_id: string
+  start_date: Date
+  end_date: Date
+  status: CtComputationStatus
+  associated_companies: number
+  main_pool_bf: Money
+  special_pool_bf: Money
+  losses_bf: Money
+  claim_aia: boolean
+  claim_full_expensing: boolean
+  computation: unknown
+  boxes: unknown
+  tax_due: Money | null
+  main_pool_cf: Money | null
+  special_pool_cf: Money | null
+  losses_cf: Money | null
+  finalised_at: Date | null
+  finalised_by_user_id: string | null
+  created_by_user_id: string | null
+  created_at: Date
+  updated_at: Date
+}
+
+export type BkCtAdjustmentRow = {
+  id: string
+  computation_id: string
+  position: number
+  kind: CtAdjustmentKind
+  label: string
+  amount: Money
+  note: string | null
+  created_at: Date
+  updated_at: Date
 }

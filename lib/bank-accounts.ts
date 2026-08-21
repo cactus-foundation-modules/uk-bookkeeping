@@ -83,13 +83,51 @@ export async function createBankAccount(input: BankAccountInput): Promise<BkBank
     )
     RETURNING *
   `
-  return rows[0]!
+  const account = rows[0]!
+  await ensureLedgerAccount(account)
+  return account
+}
+
+/**
+ * Every real bank account gets a ledger account of its own.
+ *
+ * Without one, the ledger has nowhere to post the money side of an entry paid
+ * out of it, and it falls back to the default current account - which balances,
+ * but tells the owner their second card was never used. Created here so a bank
+ * account added today behaves like the ones 009_ledger_mapping.sql set up.
+ *
+ * The code carries a hash of the row id, so two accounts a human has both
+ * called "Current account" cannot collide and quietly leave the second without
+ * anywhere to post.
+ */
+async function ensureLedgerAccount(account: BkBankAccountRow): Promise<void> {
+  const slug = account.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 20)
+  await prisma.$executeRaw`
+    INSERT INTO "bk_accounts"
+      ("code", "name", "kind", "subtype", "bs_group", "bank_account_id", "position", "is_system")
+    SELECT ${`bank-${slug || 'account'}-`} || substr(md5(${account.id}), 1, 6),
+           ${account.name}, 'asset',
+           ${account.kind === 'cash' ? 'cash' : 'bank'}, 'current_assets_cash',
+           ${account.id}, ${200 + account.position}, TRUE
+    WHERE NOT EXISTS (
+      SELECT 1 FROM "bk_accounts" a WHERE a."bank_account_id" = ${account.id}
+    )
+    ON CONFLICT ("code") DO NOTHING
+  `
 }
 
 export type BankAccountPatch = Partial<BankAccountInput> & { archived?: boolean }
 
 export async function updateBankAccount(id: string, patch: BankAccountPatch): Promise<BkBankAccountRow> {
   const current = await requireBankAccount(id)
+  // Renaming the bank account renames the ledger account with it, so the trial
+  // balance does not carry on calling it whatever it was called in March.
+  if (patch.name !== undefined && patch.name.trim() && patch.name.trim() !== current.name) {
+    await prisma.$executeRaw`
+      UPDATE "bk_accounts" SET "name" = ${patch.name.trim()}, "updated_at" = NOW()
+      WHERE "bank_account_id" = ${id} AND "is_system" = TRUE
+    `
+  }
   if (patch.name !== undefined || patch.openingBalance !== undefined) {
     validate({ ...current, name: patch.name ?? current.name, openingBalance: patch.openingBalance })
   }

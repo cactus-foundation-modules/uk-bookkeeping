@@ -193,8 +193,11 @@ const TABS = [
   { key: 'journals', label: 'Journals' },
   { key: 'reconcile', label: 'Reconcile' },
   { key: 'director-loan', label: 'Director’s loan' },
+  { key: 'assets', label: 'Assets' },
   { key: 'vat', label: 'VAT returns' },
   { key: 'reports', label: 'Reports' },
+  { key: 'year-end', label: 'Year end' },
+  { key: 'corporation-tax', label: 'Corporation tax' },
   { key: 'import', label: 'Import' },
 ]
 

@@ -4,7 +4,9 @@ import {
   FinalisedRecordError,
   LockedRecordError,
   NotFoundError,
+  PeriodStateError,
 } from './errors'
+import type { BkAccountingPeriodRow } from './types'
 
 // Layer two of the three that keep a filed return unchangeable. Layer one is the
 // UI (no controls, a padlock, and a "post a correction" button instead); layer
@@ -52,6 +54,13 @@ export async function assertDatesNotInClosedPeriod(
 ): Promise<void> {
   const row = await findClosedPeriodForDates(taxPoint, settled)
   if (row) throw new BackdatedIntoClosedPeriodError(row)
+  // A closed financial year bites here too, and for the same reason: the
+  // accounts for it have been drawn up and the profit taken to reserves, so
+  // slipping another entry into it would restate a set of accounts that has
+  // already been signed off and possibly filed. Same layer, same reasoning
+  // about restores, so it lives behind the same call rather than being a second
+  // thing every caller has to remember.
+  await assertNotInClosedYear(taxPoint, settled)
 }
 
 /** The closed period these dates would land in, if any. Used to offer the correction route. */
@@ -80,4 +89,35 @@ export async function findCurrentOpenPeriod(): Promise<{ id: string; start_date:
     ORDER BY "start_date" ASC LIMIT 1
   `
   return rows[0] ?? null
+}
+
+/** The closed year a date falls in, if there is one. */
+export async function findClosedYearFor(date: Date): Promise<BkAccountingPeriodRow | null> {
+  const rows = await prisma.$queryRaw<BkAccountingPeriodRow[]>`
+    SELECT * FROM "bk_accounting_periods"
+    WHERE "status" = 'closed' AND ${date}::date BETWEEN "start_date" AND "end_date"
+    LIMIT 1
+  `
+  return rows[0] ?? null
+}
+
+/**
+ * Refuse to touch a closed year.
+ *
+ * APPLICATION LAYER ONLY, and it must stay that way for the same reason
+ * assertDatesNotInClosedPeriod in lib/guards.ts does: lib/backup/restore.ts
+ * truncates and re-inserts every row, closed years included, so a rule of this
+ * shape written as a BEFORE INSERT trigger would reject most of a restore and
+ * only ever fail during an actual disaster recovery.
+ */
+export async function assertNotInClosedYear(...dates: (Date | null | undefined)[]): Promise<void> {
+  for (const date of dates) {
+    if (!date) continue
+    const year = await findClosedYearFor(date)
+    if (year) {
+      throw new PeriodStateError(
+        `That date falls in ${year.name}, which has been closed off. Reopen the year first if it really belongs there, or date it in the current one.`,
+      )
+    }
+  }
 }

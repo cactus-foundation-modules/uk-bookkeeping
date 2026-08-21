@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import type { SessionUser } from '@/lib/auth/session'
+import { assertNotInClosedYear } from './guards'
 import { appendAudit } from './audit'
 import { BookkeepingError, LockedRecordError, NotFoundError } from './errors'
 import { formatMoney, formatPounds, toMoney } from './money'
@@ -277,6 +278,9 @@ export async function createJournal(input: JournalInput, user: SessionUser | nul
   const lines = checkLines(input.lines, status === 'posted')
   await checkAccountsExist(lines.map((line) => line.accountId))
   const date = parseDate(input.date, 'The journal date')
+  // A closed financial year has had its accounts drawn up and its profit taken
+  // to reserves. Another journal dated inside it would restate them.
+  await assertNotInClosedYear(date)
 
   const id = await prisma.$transaction(async (tx) => {
     const [created] = await tx.$queryRaw<{ id: string }[]>`
@@ -315,6 +319,9 @@ export async function updateJournal(
   const lines = checkLines(input.lines, status === 'posted')
   await checkAccountsExist(lines.map((line) => line.accountId))
   const date = parseDate(input.date, 'The journal date')
+  // Both dates: one stops a journal being moved INTO a closed year, the other
+  // stops one being dragged OUT of it, which would restate it just as surely.
+  await assertNotInClosedYear(date, before.date)
 
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`
@@ -361,6 +368,7 @@ export async function updateJournal(
 export async function deleteJournal(id: string, user: SessionUser | null): Promise<void> {
   const journal = await assertJournalMutable(id)
   const before = await requireJournal(id)
+  await assertNotInClosedYear(before.date)
 
   const [reversal] = await prisma.$queryRaw<{ id: string }[]>`
     SELECT "id" FROM "bk_journals" WHERE "reverses_journal_id" = ${id} LIMIT 1
