@@ -104,11 +104,15 @@ async function findCandidateEntries(lines: MatchableLine[]): Promise<CandidateEn
            COALESCE(SUM(l."gross_amount"), 0)::numeric AS gross
     FROM "bk_transactions" t
     JOIN "bk_transaction_lines" l ON l."transaction_id" = t."id"
+    -- Every day count is cast to int. Prisma sends a JavaScript number as int8,
+    -- and Postgres has "date - integer" but no "date - bigint" - so without the
+    -- cast this whole query fails at the database with a type error, which is
+    -- exactly what it did the first time a statement was imported.
     WHERE (
-        t."tax_point_date" BETWEEN ${dates[0]}::date - ${DATE_WINDOW_DAYS}
-                              AND ${dates[dates.length - 1]}::date + ${DATE_WINDOW_DAYS}
-        OR t."settled_date" BETWEEN ${dates[0]}::date - ${DATE_WINDOW_DAYS}
-                               AND ${dates[dates.length - 1]}::date + ${DATE_WINDOW_DAYS}
+        t."tax_point_date" BETWEEN ${dates[0]}::date - ${DATE_WINDOW_DAYS}::int
+                              AND ${dates[dates.length - 1]}::date + ${DATE_WINDOW_DAYS}::int
+        OR t."settled_date" BETWEEN ${dates[0]}::date - ${DATE_WINDOW_DAYS}::int
+                               AND ${dates[dates.length - 1]}::date + ${DATE_WINDOW_DAYS}::int
       )
       -- Not already fully accounted for by some other statement line.
       AND COALESCE((
