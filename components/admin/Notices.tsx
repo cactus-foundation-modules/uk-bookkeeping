@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
+import { TabStrip } from '@/components/admin/TabStrip'
 
 // The banners, and the tab strip.
 //
@@ -205,36 +206,23 @@ const TABS = [
  * One sidebar link, tabs on the page. Links are built from useAdminPath rather
  * than a hardcoded /cactus-admin/, because the admin path is whatever the owner
  * renamed it to.
+ *
+ * Core's TabStrip, same as every other module: eleven tabs do not fit a narrow
+ * window, and wrapping them onto a second row pushed the page down and left the
+ * strip looking like two half-finished ones. It scrolls sideways instead.
  */
 export function BookkeepingNav({ active }: { active: string }) {
   const adminPath = useAdminPath()
   return (
-    <nav
-      style={{
-        display: 'flex',
-        gap: '0.25rem',
-        borderBottom: '1px solid var(--color-border)',
-        marginBottom: '1.25rem',
-        flexWrap: 'wrap',
-      }}
-    >
-      {TABS.map((tab) => (
-        <a
-          key={tab.key}
-          href={`/${adminPath}/m/uk-bookkeeping/${tab.key}`}
-          style={{
-            padding: '0.5rem 0.875rem',
-            textDecoration: 'none',
-            color: active === tab.key ? 'var(--color-text)' : 'var(--color-text-muted, var(--color-text))',
-            borderBottom:
-              active === tab.key ? '2px solid var(--color-primary, var(--color-text))' : '2px solid transparent',
-            fontWeight: active === tab.key ? 600 : 400,
-          }}
-        >
-          {tab.label}
-        </a>
-      ))}
-    </nav>
+    <TabStrip
+      style={{ marginBottom: '1.25rem' }}
+      items={TABS.map((tab) => ({
+        key: tab.key,
+        label: tab.label,
+        href: `/${adminPath}/m/uk-bookkeeping/${tab.key}`,
+        active: active === tab.key,
+      }))}
+    />
   )
 }
 
