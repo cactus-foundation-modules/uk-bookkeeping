@@ -23,6 +23,14 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
     return NextResponse.redirect(attachment.url)
   }
 
+  // Headers only carry latin-1, so an accented or Unicode upload name would
+  // make the Response constructor throw - inside the catch below, telling the
+  // owner a perfectly healthy file "could not be read from storage". ASCII
+  // fallback in `filename`, the real name percent-encoded in `filename*`.
+  const asciiName =
+    attachment.filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_').trim() || 'attachment'
+  const utf8Name = encodeURIComponent(attachment.filename)
+
   try {
     const bytes = await downloadMedia(
       attachment.media_provider as MediaProviderType,
@@ -32,7 +40,7 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
     return new Response(new Uint8Array(bytes), {
       headers: {
         'Content-Type': attachment.mime_type,
-        'Content-Disposition': `attachment; filename="${attachment.filename.replace(/"/g, '')}"`,
+        'Content-Disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${utf8Name}`,
         'Cache-Control': 'private, no-store',
       },
     })

@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db/prisma'
 import type { SessionUser } from '@/lib/auth/session'
 import { appendAudit } from './audit'
 import { BookkeepingError, NotFoundError } from './errors'
-import { assertDateNotInClosedPeriod, assertTransactionMutable } from './guards'
+import { assertDatesNotInClosedPeriod, assertTransactionMutable } from './guards'
 import { formatMoney, toMoney } from './money'
 import type {
   BkAttachmentRow,
@@ -89,6 +89,16 @@ function validateLine(line: LineInput, index: number): void {
   const net = toMoney(line.netAmount)
   const vat = toMoney(line.vatAmount)
   const gross = toMoney(line.grossAmount)
+  // NUMERIC(10,2) holds eight digits before the point. Refuse beyond it here,
+  // as a sentence naming the line, rather than letting Postgres overflow with a
+  // raw numeric error mid-save.
+  const LARGEST = new Prisma.Decimal('99999999.99')
+  if (net.abs().greaterThan(LARGEST) || vat.abs().greaterThan(LARGEST) || gross.abs().greaterThan(LARGEST)) {
+    throw new BookkeepingError(
+      'invalid',
+      `Line ${index + 1} is larger than these books can hold (amounts run to 99,999,999.99).`,
+    )
+  }
   if (!gross.equals(net.plus(vat))) {
     throw new BookkeepingError(
       'invalid',
@@ -283,9 +293,15 @@ export async function createTransaction(
 
   // A draft is not a record yet - it is an imported row waiting for a human - so
   // it is allowed to sit anywhere while it is reviewed.
+  //
+  // The guard covers adjustments too: a correction exists to land on the OPEN
+  // return, and dating one inside a filed period would park its VAT in a period
+  // that is never recomputed - the correction would silently never be filed.
+  // Only an opening balance may sit in a closed period; it is outside the scope
+  // of VAT and contributes to no box.
   const status = input.status ?? 'posted'
-  if (status === 'posted' && input.entryType !== 'adjustment') {
-    await assertDateNotInClosedPeriod(taxPoint)
+  if (status === 'posted' && (input.entryType ?? 'normal') !== 'opening_balance') {
+    await assertDatesNotInClosedPeriod(taxPoint, settled)
   }
 
   if (input.correctsTransactionId) {
@@ -295,25 +311,7 @@ export async function createTransaction(
     if (!target) throw new NotFoundError('The entry this correction points at')
   }
 
-  const id = await prisma.$transaction(async (tx) => {
-    const [created] = await tx.$queryRaw<{ id: string }[]>`
-      INSERT INTO "bk_transactions" (
-        "entry_type", "direction", "tax_point_date", "settled_date", "counterparty",
-        "description", "reference", "status", "source", "source_ref", "import_batch_id",
-        "corrects_transaction_id", "correction_reason", "created_by_user_id", "updated_by_user_id"
-      ) VALUES (
-        ${input.entryType ?? 'normal'}, ${input.direction}, ${taxPoint}::date, ${settled}::date,
-        ${input.counterparty.trim()}, ${input.description?.trim() ?? ''}, ${input.reference?.trim() || null},
-        ${status}, ${input.source ?? 'manual'}, ${input.sourceRef ?? null}, ${input.importBatchId ?? null},
-        ${input.correctsTransactionId ?? null}, ${input.correctionReason?.trim() ?? null},
-        ${user?.id ?? null}, ${user?.id ?? null}
-      )
-      RETURNING "id"
-    `
-    const transactionId = created!.id
-    await insertLines(tx, transactionId, input.lines)
-    return transactionId
-  })
+  const id = await prisma.$transaction(async (tx) => insertTransactionRows(tx, input, user))
 
   await appendAudit({
     action: 'transaction.created',
@@ -328,6 +326,38 @@ export async function createTransaction(
 }
 
 type TxClient = Omit<typeof prisma, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+
+/**
+ * The bare insert - header plus lines - on a transaction handle the CALLER
+ * owns. Exists so the importer can put a whole batch inside one transaction
+ * (createTransaction opens its own, and transactions do not nest) while both
+ * paths share one INSERT and one set of validation.
+ */
+export async function insertTransactionRows(
+  tx: TxClient,
+  input: TransactionInput,
+  user: SessionUser | null,
+): Promise<string> {
+  const taxPoint = parseDate(input.taxPointDate, 'The invoice or receipt date')
+  const settled = input.settledDate ? parseDate(input.settledDate, 'The date it was paid') : null
+  const [created] = await tx.$queryRaw<{ id: string }[]>`
+    INSERT INTO "bk_transactions" (
+      "entry_type", "direction", "tax_point_date", "settled_date", "counterparty",
+      "description", "reference", "status", "source", "source_ref", "import_batch_id",
+      "corrects_transaction_id", "correction_reason", "created_by_user_id", "updated_by_user_id"
+    ) VALUES (
+      ${input.entryType ?? 'normal'}, ${input.direction}, ${taxPoint}::date, ${settled}::date,
+      ${input.counterparty.trim()}, ${input.description?.trim() ?? ''}, ${input.reference?.trim() || null},
+      ${input.status ?? 'posted'}, ${input.source ?? 'manual'}, ${input.sourceRef ?? null}, ${input.importBatchId ?? null},
+      ${input.correctsTransactionId ?? null}, ${input.correctionReason?.trim() ?? null},
+      ${user?.id ?? null}, ${user?.id ?? null}
+    )
+    RETURNING "id"
+  `
+  const transactionId = created!.id
+  await insertLines(tx, transactionId, input.lines)
+  return transactionId
+}
 
 async function insertLines(tx: TxClient, transactionId: string, lines: LineInput[]): Promise<void> {
   for (const [position, line] of lines.entries()) {
@@ -360,14 +390,32 @@ export async function updateTransaction(
   const taxPoint = parseDate(input.taxPointDate, 'The invoice or receipt date')
   const settled = input.settledDate ? parseDate(input.settledDate, 'The date it was paid') : null
   const status = input.status ?? before.status
-  if (status === 'posted' && input.entryType !== 'adjustment') {
-    await assertDateNotInClosedPeriod(taxPoint)
+  const entryType = input.entryType ?? before.entry_type
+  if (status === 'posted' && entryType !== 'opening_balance') {
+    await assertDatesNotInClosedPeriod(taxPoint, settled)
+  }
+
+  // The CHECK constraint ties entry_type and corrects_transaction_id together:
+  // an adjustment must point at something, anything else must not. Writing one
+  // without the other turned a legitimate type change into a raw constraint 500.
+  const correctsId =
+    entryType === 'adjustment'
+      ? (input.correctsTransactionId ?? before.corrects_transaction_id)
+      : null
+  if (entryType === 'adjustment' && !correctsId) {
+    throw new BookkeepingError('invalid', 'A correction has to say which entry it puts right.')
+  }
+  if (correctsId && correctsId !== before.corrects_transaction_id) {
+    const [target] = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "bk_transactions" WHERE "id" = ${correctsId} LIMIT 1
+    `
+    if (!target) throw new NotFoundError('The entry this correction points at')
   }
 
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`
       UPDATE "bk_transactions" SET
-        "entry_type"        = ${input.entryType ?? before.entry_type},
+        "entry_type"        = ${entryType},
         "direction"         = ${input.direction},
         "tax_point_date"    = ${taxPoint}::date,
         "settled_date"      = ${settled}::date,
@@ -375,7 +423,8 @@ export async function updateTransaction(
         "description"       = ${input.description?.trim() ?? ''},
         "reference"         = ${input.reference?.trim() || null},
         "status"            = ${status},
-        "correction_reason" = ${input.correctionReason?.trim() ?? before.correction_reason},
+        "corrects_transaction_id" = ${correctsId},
+        "correction_reason" = ${entryType === 'adjustment' ? (input.correctionReason?.trim() ?? before.correction_reason) : null},
         "updated_by_user_id"= ${user?.id ?? null},
         "updated_at"        = NOW()
       WHERE "id" = ${id}
@@ -455,7 +504,9 @@ export async function postDraft(id: string, user: SessionUser | null): Promise<T
   if (transaction.status !== 'draft') {
     throw new BookkeepingError('invalid', 'That entry has already been posted.')
   }
-  await assertDateNotInClosedPeriod(transaction.tax_point_date)
+  if (transaction.entry_type !== 'opening_balance') {
+    await assertDatesNotInClosedPeriod(transaction.tax_point_date, transaction.settled_date)
+  }
 
   await prisma.$executeRaw`
     UPDATE "bk_transactions"
@@ -470,6 +521,68 @@ export async function postDraft(id: string, user: SessionUser | null): Promise<T
     user,
   })
   return (await getTransaction(id))!
+}
+
+/**
+ * Post or bin a batch of import drafts in one action, so reviewing forty bank
+ * lines is not forty separate clicks. Per-row outcomes, not all-or-nothing: one
+ * draft whose date has since landed in a closed period should not strand the
+ * other thirty-nine.
+ */
+export type BulkOutcome = { done: number; failed: { id: string; error: string }[] }
+
+export async function bulkPostDrafts(ids: string[], user: SessionUser | null): Promise<BulkOutcome> {
+  const outcome: BulkOutcome = { done: 0, failed: [] }
+  for (const id of ids) {
+    try {
+      await postDraft(id, user)
+      outcome.done += 1
+    } catch (error) {
+      outcome.failed.push({
+        id,
+        error: error instanceof Error ? error.message : 'Could not be posted.',
+      })
+    }
+  }
+  return outcome
+}
+
+export async function bulkDeleteDrafts(ids: string[], user: SessionUser | null): Promise<BulkOutcome> {
+  const outcome: BulkOutcome = { done: 0, failed: [] }
+  for (const id of ids) {
+    try {
+      const [row] = await prisma.$queryRaw<{ status: string }[]>`
+        SELECT "status" FROM "bk_transactions" WHERE "id" = ${id} LIMIT 1
+      `
+      // Bulk delete is a review tool for imported drafts and nothing else - a
+      // posted record wants deleting one at a time, with its own confirm.
+      if (!row || row.status !== 'draft') {
+        outcome.failed.push({ id, error: 'Only entries still waiting for review can be removed in bulk.' })
+        continue
+      }
+      await deleteTransaction(id, user)
+      outcome.done += 1
+    } catch (error) {
+      outcome.failed.push({
+        id,
+        error: error instanceof Error ? error.message : 'Could not be removed.',
+      })
+    }
+  }
+  return outcome
+}
+
+/** Counterparties this site has dealt with before, most used first. Feeds the form's suggestions. */
+export async function listKnownCounterparties(limit = 200): Promise<string[]> {
+  const rows = await prisma.$queryRaw<{ counterparty: string }[]>`
+    SELECT MIN(t."counterparty") AS counterparty
+    FROM "bk_transactions" t
+    WHERE t."status" = 'posted'
+    GROUP BY lower(t."counterparty")
+    ORDER BY COUNT(*) DESC, MIN(t."counterparty") ASC
+    LIMIT ${Math.min(Math.max(limit, 1), 500)}
+  `
+  return rows.map((r) => r.counterparty)
 }
 
 /**

@@ -45,6 +45,40 @@ const input: React.CSSProperties = {
 
 const PAGE = 50
 
+const stickyHeader: React.CSSProperties = {
+  position: 'sticky',
+  top: 0,
+  background: 'var(--color-bg)',
+  zIndex: 1,
+}
+
+const money: React.CSSProperties = {
+  padding: '0.5rem 0.75rem',
+  textAlign: 'right',
+  whiteSpace: 'nowrap',
+  fontVariantNumeric: 'tabular-nums',
+}
+
+/** Placeholder rows while the first page loads, so the layout does not jump. */
+function LoadingRows() {
+  return (
+    <div className="card" style={{ padding: '0.75rem' }} aria-hidden="true">
+      {[0, 1, 2, 3, 4].map((i) => (
+        <div
+          key={i}
+          style={{
+            height: '1.25rem',
+            margin: '0.5rem 0',
+            borderRadius: 6,
+            background: 'var(--color-surface)',
+            opacity: 1 - i * 0.15,
+          }}
+        />
+      ))}
+    </div>
+  )
+}
+
 export default function TransactionsScreen({
   environment,
   canRecord,
@@ -56,7 +90,11 @@ export default function TransactionsScreen({
   const health = useTriggerHealth()
   const [list, setList] = useState<List | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [offset, setOffset] = useState(0)
+  const [categories, setCategories] = useState<{ id: string; name: string }[]>([])
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [bulkBusy, setBulkBusy] = useState(false)
   const [filters, setFilters] = useState({
     from: '',
     to: '',
@@ -65,30 +103,129 @@ export default function TransactionsScreen({
     status: '',
     locked: '',
     hasEvidence: '',
+    categoryId: '',
   })
-
-  const load = useCallback(async () => {
-    const query = new URLSearchParams()
-    for (const [key, value] of Object.entries(filters)) {
-      if (value) query.set(key, value)
-    }
-    query.set('limit', String(PAGE))
-    query.set('offset', String(offset))
-
-    const response = await fetch(`/api/m/uk-bookkeeping/admin/transactions?${query.toString()}`)
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}))
-      setError(payload.error ?? 'The entries could not be loaded.')
-      return
-    }
-    setError(null)
-    setList(await response.json())
-  }, [filters, offset])
+  // The text filter waits for the typing to pause rather than querying on every
+  // keystroke; the abort below keeps it correct, this keeps it polite. The input
+  // binds to this, and the debounce feeds it into the filter that queries.
+  const [counterpartyInput, setCounterpartyInput] = useState('')
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setOffset(0)
+      setFilters((prev) =>
+        prev.counterparty === counterpartyInput ? prev : { ...prev, counterparty: counterpartyInput },
+      )
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [counterpartyInput])
 
   useEffect(() => {
+    fetch('/api/m/uk-bookkeeping/admin/categories')
+      .then((r) => (r.ok ? r.json() : { categories: [] }))
+      .then((data) => setCategories(data.categories ?? []))
+      .catch(() => setCategories([]))
+  }, [])
+
+  // Filters can arrive in the URL - the import screen links to ?status=draft -
+  // read once on mount, before the first paint the user can act on.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if ([...params.keys()].length === 0) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-off URL read on mount
+    setFilters((prev) => ({
+      from: params.get('from') ?? prev.from,
+      to: params.get('to') ?? prev.to,
+      direction: params.get('direction') ?? prev.direction,
+      counterparty: params.get('counterparty') ?? prev.counterparty,
+      status: params.get('status') ?? prev.status,
+      locked: params.get('locked') ?? prev.locked,
+      hasEvidence: params.get('hasEvidence') ?? prev.hasEvidence,
+      categoryId: params.get('categoryId') ?? prev.categoryId,
+    }))
+    const counterparty = params.get('counterparty')
+    if (counterparty) setCounterpartyInput(counterparty)
+  }, [])
+
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      const query = new URLSearchParams()
+      for (const [key, value] of Object.entries(filters)) {
+        if (value) query.set(key, value)
+      }
+      query.set('limit', String(PAGE))
+      query.set('offset', String(offset))
+
+      try {
+        const response = await fetch(`/api/m/uk-bookkeeping/admin/transactions?${query.toString()}`, {
+          signal,
+        })
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}))
+          setError(payload.error ?? 'The entries could not be loaded.')
+          return
+        }
+        const data = await response.json()
+        if (signal?.aborted) return
+        setError(null)
+        setList(data)
+        setSelected(new Set())
+      } catch (err) {
+        // The abort is ours - typing in a filter cancels the fetch it outran.
+        if (err instanceof DOMException && err.name === 'AbortError') return
+        setError('The entries could not be loaded. Check the connection and try again.')
+      }
+    },
+    [filters, offset],
+  )
+
+  useEffect(() => {
+    // Aborting the stale request on every filter change means a slow response
+    // can never land after a fast one and put the wrong rows under the inputs.
+    const controller = new AbortController()
     // eslint-disable-next-line react-hooks/set-state-in-effect -- delegating to an async helper; every setState is after an await
-    load()
+    load(controller.signal)
+    return () => controller.abort()
   }, [load])
+
+  // Reviewing an import in bulk: only offered while the list is filtered to
+  // drafts, so a stray tick can never post or delete a real record.
+  const draftMode = canRecord && filters.status === 'draft'
+
+  async function bulk(action: 'post' | 'delete') {
+    if (selected.size === 0) return
+    if (
+      action === 'delete' &&
+      !window.confirm(`Remove ${selected.size} draft entr${selected.size === 1 ? 'y' : 'ies'}? They have not been recorded, so nothing else changes.`)
+    ) {
+      return
+    }
+    setBulkBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/transactions/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ids: [...selected] }),
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        setError(payload.error ?? 'That did not work.')
+        return
+      }
+      const verb = action === 'post' ? 'recorded' : 'removed'
+      setNotice(
+        payload.failed?.length
+          ? `${payload.done} ${verb}. ${payload.failed.length} could not be: ${payload.failed[0].error}`
+          : `${payload.done} entr${payload.done === 1 ? 'y' : 'ies'} ${verb}.`,
+      )
+      await load()
+    } catch {
+      setError('That did not reach the server. Check the connection and try again.')
+    } finally {
+      setBulkBusy(false)
+    }
+  }
 
   return (
     <div>
@@ -96,53 +233,71 @@ export default function TransactionsScreen({
       <SandboxBanner environment={environment} />
       <TriggerHealthNotice health={health} />
       <ErrorNotice message={error} />
+      {notice && (
+        <div
+          className="card"
+          role="status"
+          style={{ padding: '0.75rem 1rem', marginBottom: '1rem', background: 'var(--color-surface)' }}
+        >
+          {notice}
+        </div>
+      )}
 
       <div
         className="card"
         style={{ padding: '0.875rem', marginBottom: '1rem', display: 'flex', gap: '0.625rem', flexWrap: 'wrap', alignItems: 'flex-end' }}
       >
         <div>
-          <div style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>From</div>
-          <input type="date" style={input} value={filters.from} onChange={(e) => { setOffset(0); setFilters({ ...filters, from: e.target.value }) }} />
+          <label htmlFor="bk-f-from" style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)' }}>From</label>
+          <input id="bk-f-from" type="date" style={input} value={filters.from} onChange={(e) => { setOffset(0); setFilters({ ...filters, from: e.target.value }) }} />
         </div>
         <div>
-          <div style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>To</div>
-          <input type="date" style={input} value={filters.to} onChange={(e) => { setOffset(0); setFilters({ ...filters, to: e.target.value }) }} />
+          <label htmlFor="bk-f-to" style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)' }}>To</label>
+          <input id="bk-f-to" type="date" style={input} value={filters.to} onChange={(e) => { setOffset(0); setFilters({ ...filters, to: e.target.value }) }} />
         </div>
         <div>
-          <div style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>In or out</div>
-          <select style={input} value={filters.direction} onChange={(e) => { setOffset(0); setFilters({ ...filters, direction: e.target.value }) }}>
+          <label htmlFor="bk-f-direction" style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)' }}>In or out</label>
+          <select id="bk-f-direction" style={input} value={filters.direction} onChange={(e) => { setOffset(0); setFilters({ ...filters, direction: e.target.value }) }}>
             <option value="">Both</option>
             <option value="income">Money in</option>
             <option value="expense">Money out</option>
           </select>
         </div>
         <div>
-          <div style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>Who with</div>
-          <input style={input} value={filters.counterparty} placeholder="Any" onChange={(e) => { setOffset(0); setFilters({ ...filters, counterparty: e.target.value }) }} />
+          <label htmlFor="bk-f-counterparty" style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)' }}>Who with</label>
+          <input id="bk-f-counterparty" style={input} value={counterpartyInput} placeholder="Any" onChange={(e) => setCounterpartyInput(e.target.value)} />
         </div>
         <div>
-          <div style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>State</div>
-          <select style={input} value={filters.status} onChange={(e) => { setOffset(0); setFilters({ ...filters, status: e.target.value }) }}>
+          <label htmlFor="bk-f-status" style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)' }}>State</label>
+          <select id="bk-f-status" style={input} value={filters.status} onChange={(e) => { setOffset(0); setFilters({ ...filters, status: e.target.value }) }}>
             <option value="">All</option>
             <option value="posted">Recorded</option>
             <option value="draft">Waiting for review</option>
           </select>
         </div>
         <div>
-          <div style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>Filed</div>
-          <select style={input} value={filters.locked} onChange={(e) => { setOffset(0); setFilters({ ...filters, locked: e.target.value }) }}>
+          <label htmlFor="bk-f-locked" style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)' }}>Filed</label>
+          <select id="bk-f-locked" style={input} value={filters.locked} onChange={(e) => { setOffset(0); setFilters({ ...filters, locked: e.target.value }) }}>
             <option value="">All</option>
             <option value="1">On a filed return</option>
             <option value="0">Not filed yet</option>
           </select>
         </div>
         <div>
-          <div style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>Evidence</div>
-          <select style={input} value={filters.hasEvidence} onChange={(e) => { setOffset(0); setFilters({ ...filters, hasEvidence: e.target.value }) }}>
+          <label htmlFor="bk-f-evidence" style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)' }}>Evidence</label>
+          <select id="bk-f-evidence" style={input} value={filters.hasEvidence} onChange={(e) => { setOffset(0); setFilters({ ...filters, hasEvidence: e.target.value }) }}>
             <option value="">All</option>
             <option value="1">Has a receipt</option>
             <option value="0">No receipt</option>
+          </select>
+        </div>
+        <div>
+          <label htmlFor="bk-f-category" style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)' }}>Category</label>
+          <select id="bk-f-category" style={input} value={filters.categoryId} onChange={(e) => { setOffset(0); setFilters({ ...filters, categoryId: e.target.value }) }}>
+            <option value="">All</option>
+            {categories.map((category) => (
+              <option key={category.id} value={category.id}>{category.name}</option>
+            ))}
           </select>
         </div>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem' }}>
@@ -162,6 +317,8 @@ export default function TransactionsScreen({
         </div>
       </div>
 
+      {!list && !error && <LoadingRows />}
+
       {list && list.rows.length === 0 && (
         <EmptyState title="Nothing recorded yet.">
           <p style={{ margin: '0 0 0.75rem' }}>
@@ -176,24 +333,88 @@ export default function TransactionsScreen({
         </EmptyState>
       )}
 
+      {draftMode && list && list.rows.length > 0 && (
+        <div
+          className="card"
+          style={{
+            padding: '0.625rem 0.875rem',
+            marginBottom: '1rem',
+            display: 'flex',
+            gap: '0.5rem',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+          }}
+        >
+          <span style={{ fontSize: 'var(--text-sm)' }}>
+            {selected.size} of {list.rows.length} ticked
+          </span>
+          <span style={{ flex: 1 }} />
+          <button
+            className="btn btn-sm btn-primary"
+            disabled={bulkBusy || selected.size === 0}
+            onClick={() => bulk('post')}
+          >
+            {bulkBusy ? 'Working…' : `Record ${selected.size || ''}`.trim()}
+          </button>
+          <button
+            className="btn btn-sm"
+            disabled={bulkBusy || selected.size === 0}
+            onClick={() => bulk('delete')}
+          >
+            Remove
+          </button>
+        </div>
+      )}
+
       {list && list.rows.length > 0 && (
         <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
             <thead>
               <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--color-border)' }}>
-                <th style={{ padding: '0.625rem 0.75rem' }}>Date</th>
-                <th style={{ padding: '0.625rem 0.75rem' }}>Who with</th>
-                <th style={{ padding: '0.625rem 0.75rem' }}>What for</th>
-                <th style={{ padding: '0.625rem 0.75rem', textAlign: 'right' }}>Before VAT</th>
-                <th style={{ padding: '0.625rem 0.75rem', textAlign: 'right' }}>VAT</th>
-                <th style={{ padding: '0.625rem 0.75rem', textAlign: 'right' }}>Total</th>
-                <th style={{ padding: '0.625rem 0.75rem' }}>📎</th>
-                <th style={{ padding: '0.625rem 0.75rem' }}>🔒</th>
+                {draftMode && (
+                  <th style={{ ...stickyHeader, padding: '0.625rem 0.75rem', width: '2rem' }}>
+                    <input
+                      type="checkbox"
+                      aria-label="Tick every entry on this page"
+                      checked={selected.size > 0 && selected.size === list.rows.length}
+                      onChange={(e) =>
+                        setSelected(e.target.checked ? new Set(list.rows.map((r) => r.id)) : new Set())
+                      }
+                    />
+                  </th>
+                )}
+                <th style={{ ...stickyHeader, padding: '0.625rem 0.75rem' }}>Date</th>
+                <th style={{ ...stickyHeader, padding: '0.625rem 0.75rem' }}>Who with</th>
+                <th style={{ ...stickyHeader, padding: '0.625rem 0.75rem' }}>What for</th>
+                <th style={{ ...stickyHeader, padding: '0.625rem 0.75rem', textAlign: 'right' }}>Before VAT</th>
+                <th style={{ ...stickyHeader, padding: '0.625rem 0.75rem', textAlign: 'right' }}>VAT</th>
+                <th style={{ ...stickyHeader, padding: '0.625rem 0.75rem', textAlign: 'right' }}>Total</th>
+                <th style={{ ...stickyHeader, padding: '0.625rem 0.75rem' }}>
+                  <span role="img" aria-label="Evidence">📎</span>
+                </th>
+                <th style={{ ...stickyHeader, padding: '0.625rem 0.75rem' }}>
+                  <span role="img" aria-label="Locked">🔒</span>
+                </th>
               </tr>
             </thead>
             <tbody>
               {list.rows.map((row) => (
                 <tr key={row.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                  {draftMode && (
+                    <td style={{ padding: '0.5rem 0.75rem' }}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Tick the entry for ${row.counterparty}`}
+                        checked={selected.has(row.id)}
+                        onChange={(e) => {
+                          const next = new Set(selected)
+                          if (e.target.checked) next.add(row.id)
+                          else next.delete(row.id)
+                          setSelected(next)
+                        }}
+                      />
+                    </td>
+                  )}
                   <td style={{ padding: '0.5rem 0.75rem', whiteSpace: 'nowrap' }}>
                     {formatDate(row.tax_point_date)}
                   </td>
@@ -209,12 +430,12 @@ export default function TransactionsScreen({
                     )}
                   </td>
                   <td style={{ padding: '0.5rem 0.75rem' }}>{row.description || row.reference || '—'}</td>
-                  <td style={{ padding: '0.5rem 0.75rem', textAlign: 'right' }}>
+                  <td style={money}>
                     {row.direction === 'income' ? '' : '-'}
                     {poundsFromString(row.net_total)}
                   </td>
-                  <td style={{ padding: '0.5rem 0.75rem', textAlign: 'right' }}>{poundsFromString(row.vat_total)}</td>
-                  <td style={{ padding: '0.5rem 0.75rem', textAlign: 'right' }}>{poundsFromString(row.gross_total)}</td>
+                  <td style={money}>{poundsFromString(row.vat_total)}</td>
+                  <td style={money}>{poundsFromString(row.gross_total)}</td>
                   <td style={{ padding: '0.5rem 0.75rem' }}>{row.attachment_count > 0 ? row.attachment_count : ''}</td>
                   <td style={{ padding: '0.5rem 0.75rem' }}>{row.locked_period_id ? '🔒' : ''}</td>
                 </tr>
@@ -222,7 +443,7 @@ export default function TransactionsScreen({
             </tbody>
             <tfoot>
               <tr>
-                <td colSpan={3} style={{ padding: '0.625rem 0.75rem', fontWeight: 600 }}>
+                <td colSpan={draftMode ? 4 : 3} style={{ padding: '0.625rem 0.75rem', fontWeight: 600 }}>
                   {list.total} entr{list.total === 1 ? 'y' : 'ies'}
                 </td>
                 <td style={{ padding: '0.625rem 0.75rem', textAlign: 'right', fontWeight: 600 }}>

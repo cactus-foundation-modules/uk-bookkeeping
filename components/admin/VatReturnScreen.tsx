@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
 import { hmrcFetch } from '@/modules/uk-bookkeeping/lib/hmrc/fraud-client'
 import { BookkeepingNav, ErrorNotice, PeriodStatusBadge, SandboxBanner } from './Notices'
@@ -81,14 +81,27 @@ export default function VatReturnScreen({
   const [busy, setBusy] = useState(false)
   const [expanded, setExpanded] = useState<number | null>(null)
   const [duplicate, setDuplicate] = useState(false)
+  const [uncertain, setUncertain] = useState(false)
+  const [declaring, setDeclaring] = useState(false)
+  const declarationRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    // The declaration is the legal moment of the page: when it opens, the
+    // keyboard lands on it rather than staying somewhere off-screen.
+    if (declaring) declarationRef.current?.focus()
+  }, [declaring])
 
   const load = useCallback(async () => {
-    const response = await fetch(`/api/m/uk-bookkeeping/admin/periods/${id}`)
-    if (!response.ok) {
-      setError('That VAT period could not be found.')
-      return
+    try {
+      const response = await fetch(`/api/m/uk-bookkeeping/admin/periods/${id}`)
+      if (!response.ok) {
+        setError('That VAT period could not be found.')
+        return
+      }
+      setDetail(await response.json())
+    } catch {
+      setError('This VAT period could not be loaded. Check the connection and reload the page.')
     }
-    setDetail(await response.json())
   }, [id])
 
   useEffect(() => {
@@ -109,26 +122,43 @@ export default function VatReturnScreen({
   const { period, boxes } = detail
   const empty = detail.lines.length === 0
 
-  async function act(path: string, method: 'POST' | 'DELETE', body?: Record<string, unknown>) {
+  async function act(
+    path: string,
+    method: 'POST' | 'DELETE',
+    body?: Record<string, unknown>,
+    networkErrorMessage?: string,
+  ) {
     setBusy(true)
     setError(null)
     setNotice(null)
-    const response =
-      method === 'POST' && body !== undefined
-        ? await hmrcFetch(path, body)
-        : await fetch(path, { method })
+    try {
+      const response =
+        method === 'POST' && body !== undefined
+          ? await hmrcFetch(path, body)
+          : await fetch(path, { method })
 
-    const payload = await response.json().catch(() => ({}))
-    setBusy(false)
+      const payload = await response.json().catch(() => ({}))
 
-    if (!response.ok) {
-      setError(payload.error ?? 'That did not work.')
-      setDuplicate(payload.hmrcCode === 'DUPLICATE_SUBMISSION')
+      if (!response.ok) {
+        setError(payload.error ?? 'That did not work.')
+        setDuplicate(payload.hmrcCode === 'DUPLICATE_SUBMISSION')
+        return null
+      }
+      setDuplicate(false)
+      await load()
+      return payload
+    } catch {
+      // A connection that drops mid-call must not leave every button disabled
+      // with no explanation - least of all on this page.
+      setError(
+        networkErrorMessage ??
+          'That did not reach the server. Check the connection and try again.',
+      )
+      if (networkErrorMessage) setUncertain(true)
       return null
+    } finally {
+      setBusy(false)
     }
-    setDuplicate(false)
-    await load()
-    return payload
   }
 
   return (
@@ -139,6 +169,7 @@ export default function VatReturnScreen({
       {notice && (
         <div
           className="card"
+          role="status"
           style={{ padding: '0.75rem 1rem', marginBottom: '1rem', background: 'var(--color-surface)' }}
         >
           {notice}
@@ -160,14 +191,24 @@ export default function VatReturnScreen({
         </span>
       </div>
 
-      {duplicate && canSubmit && (
+      {(duplicate || uncertain) && canSubmit && (
         <div
           className="card"
           style={{ padding: '0.875rem 1rem', marginBottom: '1rem', background: 'var(--color-surface)' }}
         >
-          <strong>HMRC says this period has already been filed.</strong> That usually means an earlier
-          attempt reached them and the answer never reached us. We can ask HMRC what they are holding
-          and, if it matches your figures exactly, tidy the record up here. Nothing is sent again.
+          {duplicate ? (
+            <>
+              <strong>HMRC says this period has already been filed.</strong> That usually means an
+              earlier attempt reached them and the answer never reached us.
+            </>
+          ) : (
+            <>
+              <strong>It is not certain whether the return reached HMRC.</strong> The connection
+              dropped while they were being called.
+            </>
+          )}{' '}
+          We can ask HMRC what they are holding and, if it matches your figures exactly, tidy the
+          record up here. Nothing is sent again.
           <div style={{ marginTop: '0.5rem' }}>
             <button
               className="btn btn-sm btn-primary"
@@ -178,6 +219,7 @@ export default function VatReturnScreen({
                   'POST',
                   {},
                 )
+                if (result) setUncertain(false)
                 if (result && result.reconciled === false) {
                   setNotice(
                     'HMRC is holding a return for this period, but its figures are not the same as yours. Nothing has been changed here. This one needs a conversation with HMRC rather than another button.',
@@ -274,6 +316,7 @@ export default function VatReturnScreen({
                       whiteSpace: 'nowrap',
                       fontWeight: number === 5 ? 700 : 400,
                       verticalAlign: 'top',
+                      fontVariantNumeric: 'tabular-nums',
                     }}
                   >
                     {poundsFromString(boxes[key] ?? '0.00')}
@@ -349,6 +392,55 @@ export default function VatReturnScreen({
         </div>
       )}
 
+      {declaring && period.status === 'finalised' && (
+        <div
+          className="card"
+          role="alertdialog"
+          aria-label="Declaration before sending to HMRC"
+          ref={declarationRef}
+          tabIndex={-1}
+          style={{
+            padding: '1.25rem',
+            marginBottom: '1rem',
+            maxWidth: 640,
+            border: '1px solid var(--color-border)',
+          }}
+        >
+          <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Before this is sent</h3>
+          {/* HMRC's MTD guidance requires this declaration to be shown and
+              affirmed immediately before submission. It is the legal moment of
+              the whole page, so it gets a real dialog, not a browser confirm. */}
+          <p style={{ margin: '0 0 0.75rem' }}>
+            When you submit this VAT information you are making a legal declaration that the
+            information is true and complete. A false declaration can result in prosecution.
+          </p>
+          <p style={{ margin: '0 0 1rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+            The nine figures above, exactly as frozen when this return was finalised, will be filed
+            against your VAT registration{environment === 'sandbox' ? ' on HMRC’s practice service' : ''}.
+          </p>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <button
+              className="btn btn-primary"
+              disabled={busy}
+              onClick={async () => {
+                setDeclaring(false)
+                await act(
+                  `/api/m/uk-bookkeeping/admin/periods/${period.id}/submit`,
+                  'POST',
+                  {},
+                  'The connection dropped while HMRC was being called, so it is not certain whether the return arrived. Do NOT try again yet - use “Check with HMRC” first, which asks them what they are holding without sending anything.',
+                )
+              }}
+            >
+              I agree - submit the return
+            </button>
+            <button className="btn" disabled={busy} onClick={() => setDeclaring(false)}>
+              Not yet
+            </button>
+          </div>
+        </div>
+      )}
+
       {canSubmit && period.status !== 'submitted' && (
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
           {period.status === 'open' && (
@@ -366,9 +458,7 @@ export default function VatReturnScreen({
                 className="btn btn-primary"
                 disabled={busy || !period.period_key}
                 title={period.period_key ? undefined : 'Refresh your obligations from HMRC first'}
-                onClick={() =>
-                  act(`/api/m/uk-bookkeeping/admin/periods/${period.id}/submit`, 'POST', {})
-                }
+                onClick={() => setDeclaring(true)}
               >
                 Send this to HMRC
               </button>

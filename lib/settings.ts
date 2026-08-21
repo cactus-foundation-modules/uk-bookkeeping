@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
+import { BookkeepingError } from './errors'
 import type { BkSettingsRow } from './types'
 
 // The singleton settings row. Seeded by 001_initial.sql, but read defensively
@@ -77,14 +78,66 @@ export function isValidVrn(input: string | null | undefined): boolean {
   return !!input && /^\d{9}$/.test(input)
 }
 
+/** A plain non-negative amount, or a refusal in a sentence rather than a raw ::numeric error. */
+function checkAmountSetting(value: string | undefined, name: string): void {
+  if (value === undefined) return
+  if (!/^\d{1,10}(\.\d{1,2})?$/.test(value.trim())) {
+    throw new BookkeepingError('invalid', `${name} needs to be a plain amount, like 10000.00.`)
+  }
+}
+
+/** A date string Postgres will accept, or a refusal that names the field. */
+function checkDateSetting(value: string | null | undefined, name: string): void {
+  if (value === undefined || value === null || value === '') return
+  if (Number.isNaN(new Date(`${value.slice(0, 10)}T00:00:00.000Z`).getTime())) {
+    throw new BookkeepingError('invalid', `${name} is not a date we can read.`)
+  }
+}
+
 export async function updateSettings(patch: SettingsPatch): Promise<BkSettingsRow> {
   const current = await getSettings()
 
+  checkAmountSetting(patch.errorThresholdFixed, 'The fixed error threshold')
+  checkAmountSetting(patch.errorThresholdCap, 'The error threshold cap')
+  checkDateSetting(patch.vatRegisteredFrom, 'The VAT registration date')
+  checkDateSetting(patch.firstPeriodStart, 'The first period start date')
+  if (patch.errorThresholdPercent !== undefined) {
+    checkAmountSetting(patch.errorThresholdPercent, 'The error threshold percentage')
+    const percent = Number(patch.errorThresholdPercent)
+    if (percent < 0 || percent > 100) {
+      throw new BookkeepingError('invalid', 'The error threshold percentage sits between 0 and 100.')
+    }
+  }
+
   // Changing the scheme restates every future return, so record when it
-  // happened. periods.ts refuses the change while an open period already holds
+  // happened. The change is refused while an open period already holds
   // transactions - the changeover adjustment is a judgement call, and getting it
-  // wrong gets it wrong on a filed return.
+  // wrong gets it wrong on a filed return. Open periods that are still empty
+  // move to the new scheme with the setting, so the next return computed is the
+  // one the owner just chose.
   const schemeChanged = patch.scheme !== undefined && patch.scheme !== current.scheme
+  if (schemeChanged) {
+    const [busy] = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT p."id" FROM "bk_vat_periods" p
+      WHERE p."status" = 'open' AND EXISTS (
+        SELECT 1 FROM "bk_transactions" t
+        WHERE t."status" = 'posted' AND (
+          (p."scheme" = 'accrual'
+            AND t."tax_point_date" BETWEEN p."start_date" AND p."end_date")
+          OR (p."scheme" = 'cash' AND t."settled_date" IS NOT NULL
+            AND t."settled_date" BETWEEN p."start_date" AND p."end_date")
+        )
+      )
+      LIMIT 1
+    `
+    if (busy) {
+      throw new BookkeepingError(
+        'scheme_change_blocked',
+        'There are already entries recorded in an open VAT period, so the scheme cannot simply be flipped - the changeover needs those entries dealt with first. File the open period, then change scheme.',
+        409,
+      )
+    }
+  }
 
   await prisma.$executeRaw`
     UPDATE "bk_settings" SET
@@ -119,5 +172,11 @@ export async function updateSettings(patch: SettingsPatch): Promise<BkSettingsRo
       "updated_at"              = NOW()
     WHERE "id" = 'singleton'
   `
+  if (schemeChanged) {
+    await prisma.$executeRaw`
+      UPDATE "bk_vat_periods" SET "scheme" = ${patch.scheme}, "updated_at" = NOW()
+      WHERE "status" = 'open'
+    `
+  }
   return getSettings()
 }

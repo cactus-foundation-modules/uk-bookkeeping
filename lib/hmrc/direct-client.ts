@@ -355,13 +355,28 @@ export class DirectHmrcClient implements HmrcClient {
         statusCode: response.status,
         durationMs: Date.now() - startedAt,
         correlationId: response.headers.get('X-CorrelationId'),
+        errorCode: response.ok ? null : `HTTP_${response.status}`,
+        errorBody: response.ok ? null : safeJson(text),
       })
+
+      // A refusal is not a verdict. Reporting a 400 or a 500 as "nothing is
+      // wrong" would tell the owner their headers passed a check that never
+      // ran - a misconfigured client secret would read as a clean bill.
+      if (!response.ok) {
+        return {
+          code: 'UNAVAILABLE',
+          message: `HMRC refused the check (HTTP ${response.status}). The check did not run, so this says nothing about your headers - it usually means the site's HMRC credentials want looking at.`,
+          specVersion: null,
+          errors: [],
+          warnings: [],
+        }
+      }
 
       const parsed = FraudHeaderVerdictSchema.safeParse(safeJson(text))
       if (!parsed.success) {
         return {
           code: 'UNAVAILABLE',
-          message: 'HMRC answered in a way we did not recognise. Nothing is wrong with your records.',
+          message: 'HMRC answered in a way we did not recognise, so the check is inconclusive. Try again in a moment.',
           specVersion: null,
           errors: [],
           warnings: [],

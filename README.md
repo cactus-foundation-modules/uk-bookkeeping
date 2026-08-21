@@ -10,21 +10,31 @@ module exists in this shape, and what the digital links requirement asks for.
 
 ## What it does
 
+- **Overview.** Where the VAT stands right now, when the next return is due and
+  how many days remain, this month's money in and out, what is waiting for
+  review, and the latest entries - each figure linking to the screen it can be
+  acted on.
 - **Records.** Entries with a date, a counterparty and one or more lines, so a
   single receipt can split across categories and VAT rates. A UK chart of
-  categories is seeded and can be extended.
+  categories is seeded and can be extended. The form suggests counterparties the
+  site has seen before and pre-picks the category their entries usually land in.
 - **Evidence.** Receipts and invoices attached to an entry, stored through the
   site's own media provider and never tidied away by the media clean-up.
 - **VAT returns.** Periods, the nine boxes computed in one SQL statement,
   each expandable to the exact entries behind it, and a frozen snapshot of both
-  the figures and the workings at the moment you finalise.
+  the figures and the workings at the moment you finalise. HMRC's declaration is
+  shown and affirmed before anything is sent, and the periods screen can show
+  what HMRC says is owed and paid, beside your own figures.
 - **HMRC.** OAuth to the Government Gateway, obligations, liabilities, payments,
   and submission with the fraud prevention headers HMRC requires. Absent
   credentials, everything except filing still works.
-- **Reports.** Category summary, profit and loss, a grouping for SA103 or CT600,
-  and a full export of everything as spreadsheet files.
+- **Reports.** Category summary, profit and loss, a month-by-month view, a
+  grouping for SA103 or CT600, and a full export of everything as spreadsheet
+  files - entries, lines, evidence, periods, the frozen figures and workings of
+  every filed return, the HMRC call log, and the history log.
 - **Bank import.** CSV statements land as drafts for review; nothing imported
-  reaches a VAT box until a human has said what it was for.
+  reaches a VAT box until a human has said what it was for. A reviewed batch can
+  be recorded or removed in one go.
 
 ## Once a return is filed, it locks
 

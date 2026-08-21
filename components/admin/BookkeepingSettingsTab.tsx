@@ -93,14 +93,18 @@ export function BookkeepingSettingsTab() {
   const [checking, setChecking] = useState(false)
 
   const load = useCallback(async () => {
-    const response = await fetch('/api/m/uk-bookkeeping/admin/settings')
-    if (!response.ok) {
-      setError('The bookkeeping settings could not be loaded.')
-      return
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/settings')
+      if (!response.ok) {
+        setError('The bookkeeping settings could not be loaded.')
+        return
+      }
+      const payload: Payload = await response.json()
+      setData(payload)
+      setSettings(payload.settings)
+    } catch {
+      setError('The bookkeeping settings could not be loaded. Check the connection and reload the page.')
     }
-    const payload: Payload = await response.json()
-    setData(payload)
-    setSettings(payload.settings)
   }, [])
 
   useEffect(() => {
@@ -118,53 +122,78 @@ export function BookkeepingSettingsTab() {
   async function save() {
     if (!settings) return
     setError(null)
-    const response = await fetch('/api/m/uk-bookkeeping/admin/settings', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings),
-    })
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}))
-      setError(payload.error ?? 'Those settings could not be saved.')
-      return
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+      })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        setError(payload.error ?? 'Those settings could not be saved.')
+        return
+      }
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+      load()
+    } catch {
+      setError('The save did not reach the server. Check the connection and try again.')
     }
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2000)
-    load()
   }
 
   async function connect() {
     setError(null)
-    const response = await fetch('/api/m/uk-bookkeeping/admin/hmrc/connect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ returnTo: window.location.href }),
-    })
-    const payload = await response.json().catch(() => ({}))
-    if (!response.ok) {
-      setError(payload.error ?? 'The connection could not be started.')
-      return
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/hmrc/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // A path, not the full href: the server only trusts a same-site path
+        // through the OAuth round trip, and quite right too.
+        body: JSON.stringify({ returnTo: `${window.location.pathname}${window.location.search}` }),
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        setError(payload.error ?? 'The connection could not be started.')
+        return
+      }
+      window.location.href = payload.url
+    } catch {
+      setError('HMRC could not be reached to start the connection. Check the connection and try again.')
     }
-    window.location.href = payload.url
   }
 
   async function checkHeaders() {
     setChecking(true)
     setVerdict(null)
-    const response = await hmrcFetch('/api/m/uk-bookkeeping/admin/hmrc/check-headers', {})
-    const payload = await response.json().catch(() => null)
-    setChecking(false)
-    if (!response.ok || !payload) {
-      setError(payload?.error ?? 'HMRC could not be asked to check the details just now.')
-      return
+    try {
+      const response = await hmrcFetch('/api/m/uk-bookkeeping/admin/hmrc/check-headers', {})
+      const payload = await response.json().catch(() => null)
+      if (!response.ok || !payload) {
+        setError(payload?.error ?? 'HMRC could not be asked to check the details just now.')
+        return
+      }
+      setVerdict(payload)
+    } catch {
+      setError('HMRC could not be asked to check the details just now. Try again in a moment.')
+    } finally {
+      setChecking(false)
     }
-    setVerdict(payload)
   }
 
   async function disconnect() {
     if (!window.confirm('Disconnect from HMRC? Your records stay exactly as they are.')) return
-    await fetch('/api/m/uk-bookkeeping/admin/hmrc/status', { method: 'DELETE' })
-    load()
+    setError(null)
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/hmrc/status', { method: 'DELETE' })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        setError(payload.error ?? 'The disconnect did not go through.')
+        return
+      }
+      load()
+    } catch {
+      setError('The disconnect did not reach the server. Check the connection and try again.')
+    }
   }
 
   const { hmrc } = data

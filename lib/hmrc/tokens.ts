@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db/prisma'
 import { encryptSecret, isEncryptionKeyUsable, tryDecryptSecret } from '@/lib/crypto/secrets'
 import type { SessionUser } from '@/lib/auth/session'
 import { appendAudit } from '../audit'
-import { HmrcReauthRequiredError } from '../errors'
+import { HmrcApiError, HmrcReauthRequiredError } from '../errors'
 import type { BkHmrcConnectionRow, HmrcEnvironment } from '../types'
 import type { HmrcClient, HmrcTokens } from './client'
 
@@ -45,10 +45,13 @@ export async function storeTokens(input: {
     )
   }
   const accessExpires = new Date(Date.now() + input.tokens.expiresIn * 1000)
-  // HMRC's refresh tokens run about eighteen months. Recorded so the settings
-  // panel can say when the owner will next be asked to reconnect, rather than it
-  // arriving as a surprise the week a return is due.
-  const refreshExpires = new Date(Date.now() + 18 * 30 * 24 * 60 * 60 * 1000)
+  // HMRC's refresh tokens run eighteen calendar months - not eighteen lots of
+  // thirty days, which is a week short and would nag the owner to reconnect
+  // early. Recorded so the settings panel can say when the owner will next be
+  // asked to reconnect, rather than it arriving as a surprise the week a return
+  // is due.
+  const refreshExpires = new Date()
+  refreshExpires.setUTCMonth(refreshExpires.getUTCMonth() + 18)
 
   await prisma.$executeRaw`
     UPDATE "bk_hmrc_connection" SET
@@ -128,6 +131,29 @@ export async function getAccessToken(client: HmrcClient): Promise<{
   try {
     tokens = await client.refresh({ refreshToken, environment: connection.environment })
   } catch (error) {
+    // Before declaring the connection dead, look again: HMRC's refresh tokens
+    // are single-use, so the commonest "failure" is losing a race - another
+    // request refreshed with this same token a moment ago and stored a
+    // perfectly good replacement. That is not an expiry.
+    const fresh = await getConnection()
+    const winnerMoved =
+      (fresh.last_refresh_at?.getTime() ?? 0) !== (seen?.getTime() ?? 0)
+    if (winnerMoved) {
+      const freshToken = tryDecryptSecret(fresh.access_token_encrypted)
+      if (freshToken && (fresh.access_token_expires_at?.getTime() ?? 0) > Date.now()) {
+        return { accessToken: freshToken, environment: fresh.environment, vrn: fresh.vrn }
+      }
+    }
+    // A timeout or an HMRC outage is transient: the stored refresh token is
+    // very likely still good, so surface the error without burning the
+    // connection to 'expired' and marching the owner back through the
+    // Government Gateway for nothing.
+    if (
+      error instanceof HmrcApiError &&
+      (error.httpStatus >= 500 || error.httpStatus === 429)
+    ) {
+      throw error
+    }
     const message = error instanceof Error ? error.message : 'Refresh failed'
     await markExpired(message)
     await appendAudit({
@@ -140,6 +166,11 @@ export async function getAccessToken(client: HmrcClient): Promise<{
     throw new HmrcReauthRequiredError(message)
   }
 
+  // The comparison truncates BOTH sides to milliseconds. The column is a bare
+  // TIMESTAMPTZ (microseconds); the value in hand round-tripped through a JS
+  // Date (milliseconds). Compared raw they are almost never equal, which made
+  // every refresh look like a lost race: the rotated token was thrown away, the
+  // stale one returned, and the connection died at every expiry.
   const written = await prisma.$executeRaw`
     UPDATE "bk_hmrc_connection" SET
       "access_token_encrypted"   = ${encryptSecret(tokens.accessToken)},
@@ -150,7 +181,8 @@ export async function getAccessToken(client: HmrcClient): Promise<{
       "last_refresh_error"       = NULL,
       "updated_at"               = NOW()
     WHERE "id" = 'singleton'
-      AND ("last_refresh_at" IS NOT DISTINCT FROM ${seen})
+      AND (date_trunc('milliseconds', "last_refresh_at")
+           IS NOT DISTINCT FROM date_trunc('milliseconds', ${seen}::timestamptz))
   `
 
   if (written === 0) {

@@ -103,6 +103,9 @@ export type BoxComputation = {
   lines: SnapshotLine[]
 }
 
+/** The slice of the client these queries need - satisfied by prisma and by a $transaction handle. */
+export type QueryDb = Pick<typeof prisma, '$queryRaw' | '$executeRaw'>
+
 type TotalsRow = {
   box1: Prisma.Decimal
   box2: Prisma.Decimal
@@ -122,8 +125,9 @@ export async function computeVatTotals(
   start: Date,
   end: Date,
   scheme: VatScheme,
+  db: QueryDb = prisma,
 ): Promise<TotalsRow> {
-  const rows = await prisma.$queryRaw<TotalsRow[]>`
+  const rows = await db.$queryRaw<TotalsRow[]>`
     WITH in_period AS (
       SELECT l."net_amount", l."vat_amount", ${CLASSIFY}
       FROM "bk_transaction_lines" l
@@ -172,8 +176,9 @@ export async function computeVatWorkings(
   start: Date,
   end: Date,
   scheme: VatScheme,
+  db: QueryDb = prisma,
 ): Promise<SnapshotLine[]> {
-  const rows = await prisma.$queryRaw<WorkingRow[]>`
+  const rows = await db.$queryRaw<WorkingRow[]>`
     SELECT l."transaction_id", l."id" AS line_id, t."direction",
            l."vat_treatment", l."vat_rate_code", l."net_amount", l."vat_amount",
            ${CLASSIFY}
@@ -242,9 +247,10 @@ export async function computeVatReturn(
   end: Date,
   scheme: VatScheme,
   rounding: BoxRounding,
+  db: QueryDb = prisma,
 ): Promise<BoxComputation> {
-  const totals = await computeVatTotals(start, end, scheme)
-  const lines = await computeVatWorkings(start, end, scheme)
+  const totals = await computeVatTotals(start, end, scheme, db)
+  const lines = await computeVatWorkings(start, end, scheme, db)
   return {
     boxes: assembleBoxes(totals, rounding),
     unrounded: {

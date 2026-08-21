@@ -14,12 +14,22 @@ export function poundsFromString(value: string | null | undefined): string {
   return `${negative ? '-' : ''}£${grouped}.${fraction.padEnd(2, '0').slice(0, 2)}`
 }
 
-/** Adding two decimal strings without ever making a float of either. */
+/**
+ * Adding two decimal strings without ever making a float of either.
+ *
+ * Tolerant of anything a human has typed - "1,000", "£12.50", "12a" - because it
+ * runs on every keystroke while an amount field is mid-edit. Non-digits are
+ * stripped rather than thrown on; a BigInt SyntaxError here would crash the form
+ * during render and take the half-typed entry with it.
+ */
 export function addStrings(a: string, b: string): string {
   const toPence = (value: string): bigint => {
-    const negative = value.startsWith('-')
-    const [whole = '0', fraction = '00'] = value.replace('-', '').split('.')
-    const pence = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0').slice(0, 2))
+    const cleaned = (value || '0').replace(/[^0-9.-]/g, '')
+    const negative = cleaned.startsWith('-')
+    const [whole = '', fraction = ''] = cleaned.replace(/-/g, '').split('.')
+    const wholeDigits = whole.replace(/\D/g, '') || '0'
+    const fractionDigits = (fraction.replace(/\D/g, '').padEnd(2, '0') || '00').slice(0, 2)
+    const pence = BigInt(wholeDigits) * 100n + BigInt(fractionDigits)
     return negative ? -pence : pence
   }
   const total = toPence(a) + toPence(b)
@@ -32,7 +42,15 @@ export function formatDate(value: string | Date | null | undefined): string {
   if (!value) return '—'
   const date = value instanceof Date ? value : new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
-  return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+  // Server dates are date-only values serialised at UTC midnight. Rendered in
+  // the viewer's local zone they would slip a day early anywhere west of
+  // Greenwich, so they are rendered back at UTC - the date IS the value.
+  return date.toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'UTC',
+  })
 }
 
 export function toDateInput(value: string | Date | null | undefined): string {
@@ -41,6 +59,14 @@ export function toDateInput(value: string | Date | null | undefined): string {
   return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10)
 }
 
+/**
+ * Today as the person filling the form understands it - their wall clock, not
+ * UTC. toISOString() would hand a UK owner yesterday's date between midnight
+ * and 1am all summer.
+ */
 export function today(): string {
-  return new Date().toISOString().slice(0, 10)
+  const now = new Date()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${now.getFullYear()}-${month}-${day}`
 }

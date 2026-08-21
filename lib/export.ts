@@ -9,15 +9,43 @@ import { formatMoney } from './money'
 // This is what makes the uninstall decision workable: the module's teardown list
 // drops its tables, so "export first" has to be a real option and not a promise.
 // It is also the six-year answer - a business that stops using this software
-// still has to be able to produce its records.
+// still has to be able to produce its records. Which is why the frozen filed
+// figures (snapshots and their workings) and the HMRC call log are export kinds
+// too, not just the live tables: they are exactly the records the module says it
+// keeps as evidence.
 //
 // Streamed, not buffered. Every module route goes through the one core
 // dispatcher pinned at maxDuration = 60, and six years of records assembled into
 // a single string first would be both slower and heavier than it needs to be.
+//
+// Paged by KEY, not by offset. Each page is its own statement (PgBouncer,
+// autocommit), so OFFSET paging over a table someone is writing to shifts the
+// pages under the reader and silently drops or doubles rows - in the one file
+// whose whole point is completeness. A `WHERE key > last` cursor cannot skip or
+// repeat an existing row whatever happens alongside it.
 
 const CHUNK = 500
 
-export type ExportKind = 'transactions' | 'lines' | 'attachments' | 'periods' | 'audit'
+export type ExportKind =
+  | 'transactions'
+  | 'lines'
+  | 'attachments'
+  | 'periods'
+  | 'snapshots'
+  | 'snapshot-lines'
+  | 'hmrc-calls'
+  | 'audit'
+
+export const EXPORT_KINDS: ExportKind[] = [
+  'transactions',
+  'lines',
+  'attachments',
+  'periods',
+  'snapshots',
+  'snapshot-lines',
+  'hmrc-calls',
+  'audit',
+]
 
 const HEADERS: Record<ExportKind, string[]> = {
   transactions: [
@@ -37,77 +65,127 @@ const HEADERS: Record<ExportKind, string[]> = {
     'id', 'period_key', 'start_date', 'end_date', 'due_date', 'status', 'scheme',
     'submitted_at', 'submitted_externally', 'hmrc_form_bundle_number', 'hmrc_receipt_id',
   ],
+  snapshots: [
+    'id', 'period_id', 'kind', 'scheme', 'boxes', 'boxes_unrounded', 'vrn', 'created_at',
+    'chain_index', 'prev_hash', 'row_hash',
+  ],
+  'snapshot-lines': [
+    'id', 'snapshot_id', 'transaction_id', 'line_id', 'direction', 'vat_treatment',
+    'vat_rate_code', 'net_amount', 'vat_amount', 'boxes',
+  ],
+  'hmrc-calls': [
+    'id', 'at', 'environment', 'method', 'path', 'status_code', 'duration_ms',
+    'correlation_id', 'receipt_id', 'error_code', 'fraud_headers',
+  ],
   audit: ['chain_index', 'at', 'action', 'entity_type', 'entity_id', 'summary', 'actor_email', 'row_hash'],
 }
 
-async function* pageRows(kind: ExportKind): AsyncGenerator<unknown[][]> {
-  let offset = 0
-  for (;;) {
-    const rows = await fetchPage(kind, offset)
-    if (rows.length === 0) return
-    yield rows
-    offset += CHUNK
-    if (rows.length < CHUNK) return
+function cell(value: unknown): unknown {
+  if (value instanceof Prisma.Decimal) return formatMoney(value)
+  if (typeof value === 'bigint') return value.toString()
+  if (value !== null && typeof value === 'object' && !(value instanceof Date)) {
+    return JSON.stringify(value)
   }
+  return value
 }
 
-async function fetchPage(kind: ExportKind, offset: number): Promise<unknown[][]> {
+function toRows(kind: ExportKind, rows: Record<string, unknown>[]): unknown[][] {
+  return rows.map((r) => HEADERS[kind].map((h) => cell(r[h])))
+}
+
+type Page = { rows: Record<string, unknown>[]; next: string | bigint | null }
+
+async function fetchPage(kind: ExportKind, cursor: string | bigint | null): Promise<Page> {
   switch (kind) {
     case 'transactions': {
+      const after = (cursor as string | null) ?? ''
       const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
         SELECT "id", "entry_type", "direction", "tax_point_date", "settled_date", "counterparty",
                "description", "reference", "status", "source", "corrects_transaction_id",
                "correction_reason", "finalised_period_id", "locked_period_id", "created_at"
-        FROM "bk_transactions" ORDER BY "tax_point_date" ASC, "id" ASC
-        LIMIT ${CHUNK} OFFSET ${offset}
+        FROM "bk_transactions" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
       `
-      return rows.map((r) => HEADERS.transactions.map((h) => r[h]))
+      return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }
     }
     case 'lines': {
+      const after = (cursor as string | null) ?? ''
       const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
         SELECT l."id", l."transaction_id", l."position", c."code" AS category_code,
                c."name" AS category_name, l."description", l."vat_treatment", l."vat_rate_code",
                l."vat_rate_percent", l."net_amount", l."vat_amount", l."gross_amount", l."is_capital"
         FROM "bk_transaction_lines" l
         JOIN "bk_categories" c ON c."id" = l."category_id"
-        ORDER BY l."transaction_id" ASC, l."position" ASC
-        LIMIT ${CHUNK} OFFSET ${offset}
+        WHERE l."id" > ${after} ORDER BY l."id" ASC LIMIT ${CHUNK}
       `
-      return rows.map((r) =>
-        HEADERS.lines.map((h) =>
-          r[h] instanceof Prisma.Decimal ? formatMoney(r[h] as Prisma.Decimal) : r[h],
-        ),
-      )
+      return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }
     }
     case 'attachments': {
+      const after = (cursor as string | null) ?? ''
       const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
         SELECT "id", "transaction_id", "name", "filename", "mime_type", "size", "sha256",
                "url", "created_at"
-        FROM "bk_attachments" ORDER BY "created_at" ASC
-        LIMIT ${CHUNK} OFFSET ${offset}
+        FROM "bk_attachments" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
       `
-      return rows.map((r) => HEADERS.attachments.map((h) => r[h]))
+      return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }
     }
     case 'periods': {
+      const after = (cursor as string | null) ?? ''
       const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
         SELECT "id", "period_key", "start_date", "end_date", "due_date", "status", "scheme",
                "submitted_at", "submitted_externally", "hmrc_form_bundle_number", "hmrc_receipt_id"
-        FROM "bk_vat_periods" ORDER BY "start_date" ASC
-        LIMIT ${CHUNK} OFFSET ${offset}
+        FROM "bk_vat_periods" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
       `
-      return rows.map((r) => HEADERS.periods.map((h) => r[h]))
+      return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }
+    }
+    case 'snapshots': {
+      const after = (cursor as bigint | null) ?? -1n
+      const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+        SELECT "id", "period_id", "kind", "scheme", "boxes", "boxes_unrounded", "vrn",
+               "created_at", "chain_index", "prev_hash", "row_hash"
+        FROM "bk_period_snapshots" WHERE "chain_index" > ${after}
+        ORDER BY "chain_index" ASC LIMIT ${CHUNK}
+      `
+      return { rows, next: (rows.at(-1)?.chain_index as bigint | undefined) ?? null }
+    }
+    case 'snapshot-lines': {
+      const after = (cursor as string | null) ?? ''
+      const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+        SELECT "id", "snapshot_id", "transaction_id", "line_id", "direction", "vat_treatment",
+               "vat_rate_code", "net_amount", "vat_amount", "boxes"
+        FROM "bk_period_snapshot_lines" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
+      `
+      return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }
+    }
+    case 'hmrc-calls': {
+      const after = (cursor as string | null) ?? ''
+      const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+        SELECT "id", "at", "environment", "method", "path", "status_code", "duration_ms",
+               "correlation_id", "receipt_id", "error_code", "fraud_headers"
+        FROM "bk_hmrc_api_calls" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
+      `
+      return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }
     }
     case 'audit': {
+      const after = (cursor as bigint | null) ?? -1n
       const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
         SELECT "chain_index", "at", "action", "entity_type", "entity_id", "summary",
                "actor_email", "row_hash"
-        FROM "bk_audit_log" ORDER BY "chain_index" ASC
-        LIMIT ${CHUNK} OFFSET ${offset}
+        FROM "bk_audit_log" WHERE "chain_index" > ${after}
+        ORDER BY "chain_index" ASC LIMIT ${CHUNK}
       `
-      return rows.map((r) =>
-        HEADERS.audit.map((h) => (typeof r[h] === 'bigint' ? (r[h] as bigint).toString() : r[h])),
-      )
+      return { rows, next: (rows.at(-1)?.chain_index as bigint | undefined) ?? null }
     }
+  }
+}
+
+async function* pageRows(kind: ExportKind): AsyncGenerator<unknown[][]> {
+  let cursor: string | bigint | null = null
+  for (;;) {
+    const page = await fetchPage(kind, cursor)
+    if (page.rows.length === 0) return
+    yield toRows(kind, page.rows)
+    if (page.rows.length < CHUNK || page.next === null) return
+    cursor = page.next
   }
 }
 
@@ -166,16 +244,20 @@ export async function exportSummary(): Promise<ExportBundle> {
       attachments: bigint
       periods: bigint
       snapshots: bigint
+      snapshot_lines: bigint
+      hmrc_calls: bigint
       audit: bigint
     }[]
   >`
     SELECT
-      (SELECT COUNT(*) FROM "bk_transactions")::bigint      AS transactions,
-      (SELECT COUNT(*) FROM "bk_transaction_lines")::bigint AS lines,
-      (SELECT COUNT(*) FROM "bk_attachments")::bigint       AS attachments,
-      (SELECT COUNT(*) FROM "bk_vat_periods")::bigint       AS periods,
-      (SELECT COUNT(*) FROM "bk_period_snapshots")::bigint  AS snapshots,
-      (SELECT COUNT(*) FROM "bk_audit_log")::bigint         AS audit
+      (SELECT COUNT(*) FROM "bk_transactions")::bigint          AS transactions,
+      (SELECT COUNT(*) FROM "bk_transaction_lines")::bigint     AS lines,
+      (SELECT COUNT(*) FROM "bk_attachments")::bigint           AS attachments,
+      (SELECT COUNT(*) FROM "bk_vat_periods")::bigint           AS periods,
+      (SELECT COUNT(*) FROM "bk_period_snapshots")::bigint      AS snapshots,
+      (SELECT COUNT(*) FROM "bk_period_snapshot_lines")::bigint AS snapshot_lines,
+      (SELECT COUNT(*) FROM "bk_hmrc_api_calls")::bigint        AS hmrc_calls,
+      (SELECT COUNT(*) FROM "bk_audit_log")::bigint             AS audit
   `
 
   return {
@@ -188,6 +270,8 @@ export async function exportSummary(): Promise<ExportBundle> {
       attachments: Number(counts?.attachments ?? 0n),
       periods: Number(counts?.periods ?? 0n),
       snapshots: Number(counts?.snapshots ?? 0n),
+      snapshotLines: Number(counts?.snapshot_lines ?? 0n),
+      hmrcCalls: Number(counts?.hmrc_calls ?? 0n),
       audit: Number(counts?.audit ?? 0n),
     },
   }

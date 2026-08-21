@@ -120,7 +120,9 @@ export function toErrorResponse(error: unknown): Response {
   // A trigger firing looks like a plain database error, so translate the one
   // message a site owner could otherwise meet raw.
   const message = error instanceof Error ? error.message : ''
-  if (/submitted VAT return|append-only/i.test(message)) {
+  if (
+    /submitted VAT return|append-only|has been submitted to HMRC|cannot be rewritten/i.test(message)
+  ) {
     return Response.json({ error: message, code: 'locked' }, { status: 409 })
   }
   return Response.json(

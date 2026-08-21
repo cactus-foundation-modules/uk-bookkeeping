@@ -2,10 +2,22 @@
 // the parsing half has to cope with whatever a bank exported at four in the
 // morning, which a general-purpose library would not do any better.
 
-/** One field, quoted only when it has to be, with the doubling rule applied. */
+/**
+ * One field, quoted only when it has to be, with the doubling rule applied.
+ *
+ * A cell that starts with =, +, @ or a tab is prefixed with an apostrophe so a
+ * spreadsheet reads it as text rather than as a formula. A counterparty typed
+ * as "=HYPERLINK(...)" - or arriving that way off a bank statement - must not
+ * execute in Excel when the owner opens their own export. A leading minus is
+ * only escaped when the cell is not simply a negative amount, because negative
+ * money must stay a number.
+ */
 export function csvCell(value: unknown): string {
   if (value === null || value === undefined) return ''
-  const text = value instanceof Date ? value.toISOString().slice(0, 10) : String(value)
+  let text = value instanceof Date ? value.toISOString().slice(0, 10) : String(value)
+  const formulaRisk =
+    /^[=+@\t]/.test(text) || (text.startsWith('-') && !/^-\d+(\.\d+)?$/.test(text))
+  if (formulaRisk) text = `'${text}`
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 

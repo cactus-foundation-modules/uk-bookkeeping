@@ -17,6 +17,7 @@ type Line = {
   net_amount: string
   vat_amount: string
   gross_amount: string
+  is_capital: boolean
 }
 
 type Attachment = {
@@ -62,12 +63,16 @@ export default function TransactionDetail({
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
-    const response = await fetch(`/api/m/uk-bookkeeping/admin/transactions/${id}`)
-    if (!response.ok) {
-      setError('That entry could not be found.')
-      return
+    try {
+      const response = await fetch(`/api/m/uk-bookkeeping/admin/transactions/${id}`)
+      if (!response.ok) {
+        setError('That entry could not be found.')
+        return
+      }
+      setTransaction(await response.json())
+    } catch {
+      setError('That entry could not be loaded. Check the connection and reload the page.')
     }
-    setTransaction(await response.json())
   }, [id])
 
   useEffect(() => {
@@ -91,28 +96,36 @@ export default function TransactionDetail({
   async function remove() {
     if (!transaction) return
     if (!window.confirm('Delete this entry? This cannot be undone.')) return
-    const response = await fetch(`/api/m/uk-bookkeeping/admin/transactions/${transaction.id}`, {
-      method: 'DELETE',
-    })
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}))
-      setError(payload.error ?? 'That could not be deleted.')
-      return
+    try {
+      const response = await fetch(`/api/m/uk-bookkeeping/admin/transactions/${transaction.id}`, {
+        method: 'DELETE',
+      })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        setError(payload.error ?? 'That could not be deleted.')
+        return
+      }
+      window.location.href = `/${adminPath}/m/uk-bookkeeping/transactions`
+    } catch {
+      setError('The delete did not reach the server. Check the connection and try again.')
     }
-    window.location.href = `/${adminPath}/m/uk-bookkeeping/transactions`
   }
 
   async function post() {
     if (!transaction) return
-    const response = await fetch(`/api/m/uk-bookkeeping/admin/transactions/${transaction.id}/post`, {
-      method: 'POST',
-    })
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}))
-      setError(payload.error ?? 'That could not be posted.')
-      return
+    try {
+      const response = await fetch(`/api/m/uk-bookkeeping/admin/transactions/${transaction.id}/post`, {
+        method: 'POST',
+      })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        setError(payload.error ?? 'That could not be posted.')
+        return
+      }
+      load()
+    } catch {
+      setError('That did not reach the server. Check the connection and try again.')
     }
-    load()
   }
 
   if (editing) {
@@ -136,7 +149,10 @@ export default function TransactionDetail({
         netAmount: line.net_amount,
         vatAmount: line.vat_amount,
         grossAmount: line.gross_amount,
-        isCapital: false,
+        // The stored flag, not false: the server replaces lines wholesale on
+        // save, so a hardcoded false here silently stripped the capital flag
+        // from every edited entry - and with it the SA103/CT600 grouping.
+        isCapital: line.is_capital,
       })),
     }
     return (

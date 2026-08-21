@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db/prisma'
 import { getSiteUrl } from '@/lib/config/env'
 import { sendTemplateEmail } from '@/lib/email'
 import type { SessionUser } from '@/lib/auth/session'
+import { getSessionCreatedAt } from '@/lib/auth/session-core'
 import { appendAudit, getChainHead } from '../audit'
 import {
   BookkeepingError,
@@ -12,7 +13,6 @@ import {
 import { formatPounds } from '../money'
 import {
   compareWithFinalisedSnapshot,
-  computePeriod,
   describeNetVat,
   lockPeriodRecords,
   requirePeriod,
@@ -21,7 +21,7 @@ import {
 } from '../periods'
 import { getSettings } from '../settings'
 import { boxesMatch } from '../vat-boxes'
-import type { BkVatPeriodRow, VatBoxes } from '../types'
+import type { BkVatPeriodRow, SnapshotLine, VatBoxes } from '../types'
 import type { HmrcCallContext, HmrcClient, VatObligation } from './client'
 import { DirectHmrcClient } from './direct-client'
 import { isHmrcConfigured } from './endpoints'
@@ -43,6 +43,24 @@ export type CallInputs = {
   user: SessionUser | null
 }
 
+/**
+ * When this admin's session actually began - the moment the second factor was
+ * completed. HMRC's Gov-Client-Multi-Factor header wants the timestamp of the
+ * real MFA event; stamping "now" on every call would declare an MFA completion
+ * every minute of the day, which is exactly the implausible pattern their
+ * transaction-monitoring flags during production approval.
+ */
+async function sessionMultiFactorTime(request: Request): Promise<Date | null> {
+  const cookie = request.headers.get('cookie') ?? ''
+  const match = /(?:^|;\s*)cactus_session=([^;]+)/.exec(cookie)
+  if (!match) return null
+  try {
+    return await getSessionCreatedAt(decodeURIComponent(match[1]!))
+  } catch {
+    return null
+  }
+}
+
 /** Token, environment and the assembled fraud bag, ready for one call. */
 export async function buildCallContext(
   client: HmrcClient,
@@ -57,6 +75,7 @@ export async function buildCallContext(
     // by an emailed one-time code. Both are genuinely a second factor, and HMRC
     // asks that one be declared where it happened.
     usedMultiFactor: true,
+    multiFactorAt: (await sessionMultiFactorTime(inputs.request)) ?? undefined,
   })
   return { accessToken, environment, fraudHeaders, actorUserId: inputs.user?.id ?? null, vrn }
 }
@@ -175,7 +194,7 @@ async function applyObligation(
     return 'matched'
   }
 
-  await prisma.$executeRaw`
+  const inserted = await prisma.$executeRaw`
     INSERT INTO "bk_vat_periods"
       ("period_key", "start_date", "end_date", "due_date", "scheme", "source", "obligation_status", "vrn")
     VALUES (
@@ -184,7 +203,7 @@ async function applyObligation(
     )
     ON CONFLICT ("start_date", "end_date") DO NOTHING
   `
-  return 'created'
+  return inserted > 0 ? 'created' : 'skipped'
 }
 
 // Both endpoints require a date range, refuse anything before MTD existed, and
@@ -223,6 +242,7 @@ export async function checkFraudHeaders(inputs: CallInputs) {
     bag: inputs.fraudBag,
     user: inputs.user,
     usedMultiFactor: true,
+    multiFactorAt: (await sessionMultiFactorTime(inputs.request)) ?? undefined,
   })
   return client.validateFraudHeaders(
     { environment: settings.hmrc_environment, fraudHeaders },
@@ -279,6 +299,11 @@ export async function submitPeriod(
   }
 
   const boxes = comparison.frozen
+  // The workings are cut HERE, before the network call, while they provably
+  // match the frozen boxes. Recomputing them after HMRC has accepted would let
+  // a mid-call edit put workings in the submitted snapshot that disagree with
+  // the figures actually sent.
+  const workings = comparison.computation
   const client = getHmrcClient()
   const ctx = await buildCallContext(client, inputs)
   const vrn = period.vrn ?? (await requireVrn())
@@ -297,7 +322,7 @@ export async function submitPeriod(
       { vrn, periodKey: period.period_key, boxes },
       ctx,
     )
-    await recordSubmission(period, boxes, receipt, inputs.user)
+    await recordSubmission(period, boxes, workings, receipt, inputs.user)
   } catch (error) {
     if (error instanceof HmrcApiError && error.hmrcCode === 'DUPLICATE_SUBMISSION') {
       // Do NOT roll the period back to open. HMRC may well hold exactly the
@@ -334,6 +359,7 @@ export async function submitPeriod(
 async function recordSubmission(
   period: BkVatPeriodRow,
   boxes: VatBoxes,
+  workings: { unrounded: Record<string, string>; lines: SnapshotLine[] },
   receipt: {
     processingDate: string
     paymentIndicator: string | null
@@ -345,40 +371,78 @@ async function recordSubmission(
   },
   user: SessionUser | null,
 ): Promise<void> {
-  const computed = await computePeriod(period)
   const settings = await getSettings()
 
-  await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`
-      UPDATE "bk_vat_periods" SET
-        "hmrc_processing_date"    = ${new Date(receipt.processingDate)},
-        "hmrc_form_bundle_number" = ${receipt.formBundleNumber},
-        "hmrc_charge_ref_number"  = ${receipt.chargeRefNumber},
-        "hmrc_payment_indicator"  = ${receipt.paymentIndicator},
-        "hmrc_receipt_id"         = ${receipt.receiptId},
-        "hmrc_receipt_timestamp"  = ${receipt.receiptTimestamp},
-        "hmrc_correlation_id"     = ${receipt.correlationId},
-        "submitted_at"            = NOW(),
-        "submitted_by_user_id"    = ${user?.id ?? null},
-        "updated_at"              = NOW()
-      WHERE "id" = ${period.id}
-    `
-    await writeSnapshot(tx, {
-      periodId: period.id,
-      kind: 'submitted',
-      scheme: period.scheme,
-      boxes,
-      unrounded: computed.unrounded,
-      lines: computed.lines,
-      vrn: period.vrn ?? settings.vrn,
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Guarded, not unconditional: the HMRC call took as long as it took, and
+      // in that window the period may have been reopened (unfinalise) or marked
+      // submitted elsewhere. 'finalised' is the expected state; 'open' means an
+      // unfinalise raced the submission - the return is filed regardless, so
+      // the record completes rather than leaving a filed return unlocked.
+      const claimed = await tx.$executeRaw`
+        UPDATE "bk_vat_periods" SET
+          "hmrc_processing_date"    = ${new Date(receipt.processingDate)},
+          "hmrc_form_bundle_number" = ${receipt.formBundleNumber},
+          "hmrc_charge_ref_number"  = ${receipt.chargeRefNumber},
+          "hmrc_payment_indicator"  = ${receipt.paymentIndicator},
+          "hmrc_receipt_id"         = ${receipt.receiptId},
+          "hmrc_receipt_timestamp"  = ${receipt.receiptTimestamp},
+          "hmrc_correlation_id"     = ${receipt.correlationId},
+          "submitted_at"            = NOW(),
+          "submitted_by_user_id"    = ${user?.id ?? null},
+          "updated_at"              = NOW()
+        WHERE "id" = ${period.id} AND "status" IN ('finalised', 'open')
+      `
+      if (claimed === 0) {
+        throw new PeriodStateError(
+          'This period was recorded as submitted by something else while HMRC was being called.',
+        )
+      }
+      await writeSnapshot(tx, {
+        periodId: period.id,
+        kind: 'submitted',
+        scheme: period.scheme,
+        boxes,
+        unrounded: workings.unrounded,
+        lines: workings.lines,
+        vrn: period.vrn ?? settings.vrn,
+        user,
+      })
+
+      await lockPeriodRecords(tx, period)
+      await tx.$executeRaw`
+        UPDATE "bk_vat_periods" SET "status" = 'submitted', "updated_at" = NOW()
+        WHERE "id" = ${period.id} AND "status" <> 'submitted'
+      `
+    })
+  } catch (error) {
+    // HMRC HAS the return whatever just happened locally. The receipt is legal
+    // evidence and must not evaporate with the rollback, so it goes into the
+    // append-only audit log before the error surfaces. "Check with HMRC"
+    // (reconcile) completes the local record from here.
+    await appendAudit({
+      action: 'period.submitted',
+      entityType: 'vat_period',
+      entityId: period.id,
+      summary: `HMRC accepted the VAT return for ${toDateOnly(period.start_date)} to ${toDateOnly(period.end_date)}, but recording it locally failed - receipt preserved here`,
+      detail: {
+        boxes,
+        formBundleNumber: receipt.formBundleNumber,
+        receiptId: receipt.receiptId,
+        chargeRefNumber: receipt.chargeRefNumber,
+        correlationId: receipt.correlationId,
+        processingDate: receipt.processingDate,
+        recordingError: error instanceof Error ? error.message : String(error),
+      },
       user,
     })
-
-    await lockPeriodRecords(tx, period.id)
-    await tx.$executeRaw`
-      UPDATE "bk_vat_periods" SET "status" = 'submitted', "updated_at" = NOW() WHERE "id" = ${period.id}
-    `
-  })
+    throw new BookkeepingError(
+      'receipt_not_recorded',
+      'HMRC accepted the return, but saving the receipt here hit a problem. Nothing is lost: the receipt is preserved in the audit log. Use "Check with HMRC" on this period to complete the record.',
+      500,
+    )
+  }
 
   await appendAudit({
     action: 'period.submitted',
@@ -441,6 +505,14 @@ export async function reconcileWithHmrc(
 ): Promise<{ reconciled: boolean; theirs: VatBoxes | null }> {
   const period = await requirePeriod(periodId)
   if (period.status === 'submitted') return { reconciled: true, theirs: null }
+  if (period.status !== 'finalised') {
+    // An open period must never slide into 'submitted' through this door: the
+    // finalised snapshot is what the comparison below proves against, and an
+    // unfinalised period's old snapshot no longer speaks for its rows.
+    throw new PeriodStateError(
+      'Finalise this return first, so there is a frozen set of figures to check against HMRC.',
+    )
+  }
   if (!period.period_key) {
     throw new PeriodStateError('There is no HMRC period to check this against.')
   }
@@ -463,6 +535,7 @@ export async function reconcileWithHmrc(
   await recordSubmission(
     period,
     comparison.frozen,
+    comparison.computation,
     {
       processingDate: new Date().toISOString(),
       paymentIndicator: null,

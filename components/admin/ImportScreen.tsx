@@ -49,6 +49,7 @@ export default function ImportScreen({
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [done, setDone] = useState<{ created: number } | null>(null)
+  const [dragging, setDragging] = useState(false)
 
   useEffect(() => {
     fetch('/api/m/uk-bookkeeping/admin/import')
@@ -67,50 +68,65 @@ export default function ImportScreen({
     body.append('file', file)
     if (preset) body.append('preset', preset)
 
-    const response = await fetch('/api/m/uk-bookkeeping/admin/import', { method: 'POST', body })
-    const payload = await response.json().catch(() => ({}))
-    setBusy(false)
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/import', { method: 'POST', body })
+      const payload = await response.json().catch(() => ({}))
 
-    if (!response.ok) {
-      setError(payload.error ?? 'That file could not be read.')
+      if (!response.ok) {
+        setError(payload.error ?? 'That file could not be read.')
+        setPreview(null)
+        return
+      }
+      setPreview(payload)
+      // Everything that can be imported starts ticked, except the ones that look
+      // like a second copy of something already recorded.
+      setChosen(
+        new Set(
+          payload.rows
+            .filter((row: Row) => !row.error && !row.duplicateOfId)
+            .map((row: Row) => row.index),
+        ),
+      )
+    } catch {
+      setError('The file did not reach the server. Check the connection and try again.')
       setPreview(null)
-      return
+    } finally {
+      setBusy(false)
+      // Clear the input so choosing the SAME file again - a re-export under the
+      // same name after fixing the CSV - fires a change event instead of the
+      // button appearing dead.
+      if (fileInput.current) fileInput.current.value = ''
     }
-    setPreview(payload)
-    // Everything that can be imported starts ticked, except the ones that look
-    // like a second copy of something already recorded.
-    setChosen(
-      new Set(
-        payload.rows
-          .filter((row: Row) => !row.error && !row.duplicateOfId)
-          .map((row: Row) => row.index),
-      ),
-    )
   }
 
   async function commit() {
     if (!preview) return
     setBusy(true)
     setError(null)
-    const response = await fetch('/api/m/uk-bookkeeping/admin/import', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        filename,
-        preset: preset || null,
-        mapping: preview.mapping,
-        rows: preview.rows,
-        include: [...chosen],
-      }),
-    })
-    const payload = await response.json().catch(() => ({}))
-    setBusy(false)
-    if (!response.ok) {
-      setError(payload.error ?? 'Those could not be imported.')
-      return
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/import', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename,
+          preset: preset || null,
+          mapping: preview.mapping,
+          rows: preview.rows,
+          include: [...chosen],
+        }),
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        setError(payload.error ?? 'Those could not be imported.')
+        return
+      }
+      setDone({ created: payload.created })
+      setPreview(null)
+    } catch {
+      setError('The import did not reach the server. Check the connection and try again - nothing has been brought in.')
+    } finally {
+      setBusy(false)
     }
-    setDone({ created: payload.created })
-    setPreview(null)
   }
 
   return (
@@ -120,7 +136,7 @@ export default function ImportScreen({
       <ErrorNotice message={error} />
 
       {done && (
-        <div className="card" style={{ padding: '0.875rem 1rem', marginBottom: '1rem' }}>
+        <div className="card" role="status" style={{ padding: '0.875rem 1rem', marginBottom: '1rem' }}>
           <strong>{done.created} entr{done.created === 1 ? 'y' : 'ies'} brought in.</strong> They are
           waiting for review - none of them counts towards a VAT return until you have been through
           them and said what each one was for.{' '}
@@ -128,14 +144,39 @@ export default function ImportScreen({
         </div>
       )}
 
-      <div className="card" style={{ padding: '1.25rem', marginBottom: '1rem', maxWidth: 720 }}>
+      <div
+        className="card"
+        style={{
+          padding: '1.25rem',
+          marginBottom: '1rem',
+          maxWidth: 720,
+          border: dragging
+            ? '2px dashed var(--color-primary, var(--color-border))'
+            : undefined,
+        }}
+        onDragOver={(e) => {
+          if (!canRecord) return
+          e.preventDefault()
+          setDragging(true)
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => {
+          if (!canRecord) return
+          e.preventDefault()
+          setDragging(false)
+          const file = e.dataTransfer.files?.[0]
+          if (file) readFile(file)
+        }}
+      >
         <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Import a bank statement</h3>
         <p style={{ margin: '0 0 1rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
-          Download a CSV from your bank and drop it in. Nothing becomes a record until you have
-          reviewed it, so there is no harm in trying it and seeing what happens.
+          Download a CSV from your bank and drop it anywhere on this card, or choose it below.
+          Nothing becomes a record until you have reviewed it, so there is no harm in trying it and
+          seeing what happens.
         </p>
         <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
           <select
+            aria-label="Which bank the file came from"
             value={preset}
             onChange={(e) => setPreset(e.target.value)}
             style={{
@@ -208,6 +249,7 @@ export default function ImportScreen({
                     <td style={{ padding: '0.5rem 0.75rem' }}>
                       <input
                         type="checkbox"
+                        aria-label={`Bring in the ${row.date} entry for ${row.counterparty || 'an unnamed counterparty'}`}
                         disabled={!!row.error}
                         checked={chosen.has(row.index)}
                         onChange={(e) => {

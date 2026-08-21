@@ -125,6 +125,60 @@ export async function profitAndLoss(from: Date, to: Date): Promise<ProfitAndLoss
   }
 }
 
+export type MonthlyRow = {
+  /** First day of the month, YYYY-MM-DD. */
+  month: string
+  income: string
+  expenses: string
+  profit: string
+  vat: string
+  entries: number
+}
+
+/**
+ * Month-by-month trading picture for the range. One statement. Trading rows
+ * only, matching the profit and loss - drawings and capital do not belong in a
+ * month's trading, and the VAT column is the month's net VAT position (charged
+ * minus reclaimable) rather than a pile of unrelated pennies.
+ */
+export async function monthlyBreakdown(from: Date, to: Date): Promise<MonthlyRow[]> {
+  const rows = await prisma.$queryRaw<
+    {
+      month: Date
+      income: Prisma.Decimal
+      expenses: Prisma.Decimal
+      vat: Prisma.Decimal
+      entries: bigint
+    }[]
+  >`
+    SELECT
+      date_trunc('month', t."tax_point_date")::date AS month,
+      COALESCE(SUM(l."net_amount") FILTER (
+        WHERE t."direction" = 'income' AND c."is_trading" AND NOT l."is_capital"), 0)::numeric AS income,
+      COALESCE(SUM(l."net_amount") FILTER (
+        WHERE t."direction" = 'expense' AND c."is_trading" AND NOT l."is_capital"), 0)::numeric AS expenses,
+      COALESCE(SUM(
+        CASE WHEN t."direction" = 'income' THEN l."vat_amount" ELSE -l."vat_amount" END
+      ), 0)::numeric AS vat,
+      COUNT(DISTINCT t."id")::bigint AS entries
+    FROM "bk_transaction_lines" l
+    JOIN "bk_transactions" t ON t."id" = l."transaction_id"
+    JOIN "bk_categories" c ON c."id" = l."category_id"
+    WHERE t."status" = 'posted'
+      AND t."tax_point_date" BETWEEN ${from}::date AND ${to}::date
+    GROUP BY 1
+    ORDER BY 1 ASC
+  `
+  return rows.map((r) => ({
+    month: r.month.toISOString().slice(0, 10),
+    income: formatMoney(r.income),
+    expenses: formatMoney(r.expenses),
+    profit: formatMoney(r.income.minus(r.expenses)),
+    vat: formatMoney(r.vat),
+    entries: Number(r.entries),
+  }))
+}
+
 export type GroupedTotal = { key: string; label: string; net: string }
 
 /** SA103F box totals for a sole trader, or the coarse CT600 grouping for a company. */

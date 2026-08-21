@@ -188,6 +188,7 @@ export function PeriodStatusBadge({
 }
 
 const TABS = [
+  { key: 'overview', label: 'Overview' },
   { key: 'transactions', label: 'Entries' },
   { key: 'vat', label: 'VAT returns' },
   { key: 'reports', label: 'Reports' },

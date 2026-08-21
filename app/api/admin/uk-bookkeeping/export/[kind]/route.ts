@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { csvExportResponse, exportSummary, type ExportKind } from '@/modules/uk-bookkeeping/lib/export'
+import {
+  csvExportResponse,
+  EXPORT_KINDS,
+  exportSummary,
+  type ExportKind,
+} from '@/modules/uk-bookkeeping/lib/export'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
 
-const KINDS: ExportKind[] = ['transactions', 'lines', 'attachments', 'periods', 'audit']
+const KINDS: ExportKind[] = EXPORT_KINDS
 
 // Everything out, in a form somebody else can read. Streamed rather than
 // assembled in memory, so six years of records still comes back inside the

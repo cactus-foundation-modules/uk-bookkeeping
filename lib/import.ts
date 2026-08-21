@@ -4,8 +4,8 @@ import type { SessionUser } from '@/lib/auth/session'
 import { appendAudit } from './audit'
 import { BookkeepingError } from './errors'
 import { parseCsv } from './csv'
-import { formatMoney, toMoney } from './money'
-import { createTransaction, suggestCategoryForCounterparty } from './transactions'
+import { formatMoney, isMoneyString, toMoney } from './money'
+import { insertTransactionRows, suggestCategoryForCounterparty } from './transactions'
 import { getCategoryByCode } from './categories'
 import type { Direction } from './types'
 
@@ -161,7 +161,18 @@ export function parseImportDate(value: string, format: ColumnMapping['dateFormat
 function buildDate(year: number, month: number, day: number): Date | null {
   if (!year || !month || !day || month > 12 || day > 31) return null
   const date = new Date(Date.UTC(year, month - 1, day))
-  return Number.isNaN(date.getTime()) ? null : date
+  if (Number.isNaN(date.getTime())) return null
+  // Date.UTC rolls an impossible date over - 30 Feb becomes 2 March - which
+  // would turn a transposed statement date into a plausibly wrong record
+  // instead of a per-row error the reviewer can see.
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null
+  }
+  return date
 }
 
 /** Strips a currency symbol, thousands separators and a parenthesised minus. */
@@ -348,64 +359,100 @@ export type CommitImportInput = {
   include: number[]
 }
 
+/**
+ * The commit body arrives from the browser, and the browser is not trusted with
+ * the schema: every field that reaches an INSERT is checked here first, so a
+ * doctored row becomes a sentence naming itself rather than a raw constraint
+ * violation from Postgres.
+ */
+function checkCommitRow(row: PreparedRow, categoryIds: Set<string>): void {
+  const where = `Row ${row.index + 2}`
+  if (row.direction !== 'income' && row.direction !== 'expense') {
+    throw new BookkeepingError('invalid', `${where}: the direction is not one we recognise.`)
+  }
+  if (!isMoneyString(row.gross) || toMoney(row.gross).isNegative()) {
+    throw new BookkeepingError('invalid', `${where}: the amount is not one we can record.`)
+  }
+  if (toMoney(row.gross).greaterThan(new Prisma.Decimal('99999999.99'))) {
+    throw new BookkeepingError('invalid', `${where}: the amount is larger than these books can hold.`)
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(row.date) || !row.counterparty.trim()) {
+    throw new BookkeepingError('invalid', `${where}: the date or description has gone missing.`)
+  }
+  if (row.categoryId && !categoryIds.has(row.categoryId)) {
+    throw new BookkeepingError('invalid', `${where}: that category does not exist.`)
+  }
+}
+
 export async function commitImport(
   input: CommitImportInput,
   user: SessionUser | null,
 ): Promise<{ batchId: string; created: number; skipped: number }> {
   const chosen = new Set(input.include)
-  const usable = input.rows.filter((row) => chosen.has(row.index) && !row.error)
+  const usable = input.rows.filter((row) => chosen.has(row.index) && !row.error && row.categoryId)
 
-  const [batch] = await prisma.$queryRaw<{ id: string }[]>`
-    INSERT INTO "bk_import_batches"
-      ("filename", "preset", "row_count", "duplicate_count", "mapping", "created_by_user_id")
-    VALUES (
-      ${input.filename}, ${input.preset ?? null}, ${input.rows.length},
-      ${input.rows.filter((r) => r.duplicateOfId).length},
-      ${JSON.stringify(input.mapping)}::jsonb, ${user?.id ?? null}
-    )
-    RETURNING "id"
-  `
-  const batchId = batch!.id
+  const categories = await prisma.$queryRaw<{ id: string }[]>`SELECT "id" FROM "bk_categories"`
+  const categoryIds = new Set(categories.map((c) => c.id))
+  for (const row of usable) checkCommitRow(row, categoryIds)
 
-  let created = 0
-  for (const row of usable) {
-    if (!row.categoryId) continue
-    const gross = toMoney(row.gross)
-    await createTransaction(
-      {
-        direction: row.direction,
-        taxPointDate: row.date,
-        settledDate: row.date,
-        counterparty: row.counterparty,
-        description: '',
-        reference: row.reference,
-        // Draft, always. Nothing imported is a record until a human says so.
-        status: 'draft',
-        source: 'import',
-        sourceRef: `${batchId}:${row.index}`,
-        importBatchId: batchId,
-        lines: [
-          {
-            categoryId: row.categoryId,
-            // Zero rated by default: a bank line does not know what VAT was on
-            // it, and inventing VAT here would be inventing a box 1 figure.
-            vatTreatment: 'domestic',
-            vatRateCode: 'zero',
-            vatRatePercent: '0.00',
-            netAmount: formatMoney(gross),
-            vatAmount: '0.00',
-            grossAmount: formatMoney(gross),
-          },
-        ],
-      },
-      user,
-    )
-    created += 1
-  }
+  // One transaction for the batch row and every draft. A failure halfway
+  // through must not leave a batch record claiming zero rows over a pile of
+  // half-created drafts.
+  const { batchId, created } = await prisma.$transaction(async (tx) => {
+    const [batch] = await tx.$queryRaw<{ id: string }[]>`
+      INSERT INTO "bk_import_batches"
+        ("filename", "preset", "row_count", "duplicate_count", "mapping", "created_by_user_id")
+      VALUES (
+        ${input.filename}, ${input.preset ?? null}, ${input.rows.length},
+        ${input.rows.filter((r) => r.duplicateOfId).length},
+        ${JSON.stringify(input.mapping)}::jsonb, ${user?.id ?? null}
+      )
+      RETURNING "id"
+    `
+    const id = batch!.id
 
-  await prisma.$executeRaw`
-    UPDATE "bk_import_batches" SET "created_count" = ${created} WHERE "id" = ${batchId}
-  `
+    let count = 0
+    for (const row of usable) {
+      const gross = toMoney(row.gross)
+      await insertTransactionRows(
+        tx,
+        {
+          direction: row.direction,
+          taxPointDate: row.date,
+          settledDate: row.date,
+          counterparty: row.counterparty,
+          description: '',
+          reference: row.reference,
+          // Draft, always. Nothing imported is a record until a human says so.
+          status: 'draft',
+          source: 'import',
+          sourceRef: `${id}:${row.index}`,
+          importBatchId: id,
+          lines: [
+            {
+              categoryId: row.categoryId!,
+              // Zero rated by default: a bank line does not know what VAT was on
+              // it, and inventing VAT here would be inventing a box 1 figure.
+              vatTreatment: 'domestic',
+              vatRateCode: 'zero',
+              vatRatePercent: '0.00',
+              netAmount: formatMoney(gross),
+              vatAmount: '0.00',
+              grossAmount: formatMoney(gross),
+            },
+          ],
+        },
+        user,
+      )
+      count += 1
+    }
+
+    await tx.$executeRaw`
+      UPDATE "bk_import_batches" SET "created_count" = ${count} WHERE "id" = ${id}
+    `
+    return { batchId: id, created: count }
+  })
+
   await appendAudit({
     action: 'import.created',
     entityType: 'import_batch',

@@ -29,11 +29,18 @@ export async function POST(request: NextRequest) {
   const settings = await getSettings()
   const environment = settings.hmrc_environment
 
+  // Only a same-site path may ride through the OAuth round trip. An absolute
+  // URL here would let a crafted connect request bounce the admin to another
+  // site the moment they finish signing in at the Government Gateway - the
+  // classic post-OAuth phishing redirect.
+  const rawReturnTo = typeof body.returnTo === 'string' ? body.returnTo : null
+  const returnTo = rawReturnTo && /^\/(?!\/)[^\\]*$/.test(rawReturnTo) ? rawReturnTo : null
+
   try {
     const state = await createOauthState({
       userId: gate.user.id,
       environment,
-      returnTo: typeof body.returnTo === 'string' ? body.returnTo : null,
+      returnTo,
     })
     const client = new DirectHmrcClient(getSiteUrl())
     return NextResponse.json({ url: client.authorizationUrl({ state, environment }), environment })

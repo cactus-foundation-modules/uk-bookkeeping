@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { toErrorResponse } from '@/modules/uk-bookkeeping/lib/errors'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
-import { categorySummary, groupForTaxReturn, profitAndLoss } from '@/modules/uk-bookkeeping/lib/reports'
+import {
+  categorySummary,
+  groupForTaxReturn,
+  monthlyBreakdown,
+  profitAndLoss,
+} from '@/modules/uk-bookkeeping/lib/reports'
 import { exportSummary } from '@/modules/uk-bookkeeping/lib/export'
 
 function parseRange(query: URLSearchParams): { from: Date; to: Date } {
@@ -22,9 +27,10 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const [summary, pl, exported] = await Promise.all([
+    const [summary, pl, monthly, exported] = await Promise.all([
       categorySummary(from, to),
       profitAndLoss(from, to),
+      monthlyBreakdown(from, to),
       exportSummary(),
     ])
     return NextResponse.json({
@@ -32,6 +38,7 @@ export async function GET(request: NextRequest) {
       to: to.toISOString().slice(0, 10),
       summary,
       profitAndLoss: pl,
+      monthly,
       taxGrouping: groupForTaxReturn(summary, pl.businessType),
       records: exported,
     })

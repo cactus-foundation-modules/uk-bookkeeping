@@ -15,6 +15,8 @@ import { addStrings, poundsFromString, toDateInput, today } from './format'
 type Category = { id: string; name: string; direction: string; is_capital: boolean; archived: boolean }
 
 type Line = {
+  /** Client-side identity for React keys and input ids. Never sent to the server. */
+  uid?: string
   categoryId: string
   description: string
   vatTreatment: string
@@ -24,6 +26,14 @@ type Line = {
   vatAmount: string
   grossAmount: string
   isCapital: boolean
+}
+
+// Keys must survive a mid-list removal: keyed by index, deleting line two hands
+// line three's focus and cursor to whatever now sits at index one.
+let lineUidCounter = 0
+const nextLineUid = () => {
+  lineUidCounter += 1
+  return `line-${lineUidCounter}`
 }
 
 const RATE_PERCENTS: Record<string, string> = {
@@ -68,9 +78,10 @@ const label: React.CSSProperties = {
   color: 'var(--color-text-muted, var(--color-text))',
 }
 
-function emptyLine(categoryId: string): Line {
+function emptyLine(category: Pick<Category, 'id' | 'is_capital'> | null): Line {
   return {
-    categoryId,
+    uid: nextLineUid(),
+    categoryId: category?.id ?? '',
     description: '',
     vatTreatment: 'domestic',
     vatRateCode: 'standard',
@@ -78,7 +89,7 @@ function emptyLine(categoryId: string): Line {
     netAmount: '0.00',
     vatAmount: '0.00',
     grossAmount: '0.00',
-    isCapital: false,
+    isCapital: category?.is_capital ?? false,
   }
 }
 
@@ -131,9 +142,13 @@ export default function TransactionForm({
   const [categories, setCategories] = useState<Category[]>([])
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [knownCounterparties, setKnownCounterparties] = useState<string[]>([])
+  // Once a human has chosen a category, the counterparty suggestion keeps its
+  // hands off - a guess must never overwrite a decision.
+  const [categoryTouched, setCategoryTouched] = useState(!!initial)
 
-  const [value, setValue] = useState<TransactionFormValue>(
-    initial ?? {
+  const [value, setValue] = useState<TransactionFormValue>(() => {
+    const base = initial ?? {
       entryType: correcting ? 'adjustment' : 'normal',
       direction: 'expense',
       taxPointDate: today(),
@@ -143,9 +158,10 @@ export default function TransactionForm({
       reference: '',
       correctsTransactionId: correcting?.id ?? null,
       correctionReason: '',
-      lines: [emptyLine('')],
-    },
-  )
+      lines: [emptyLine(null)],
+    }
+    return { ...base, lines: base.lines.map((line) => ({ ...line, uid: line.uid ?? nextLineUid() })) }
+  })
 
   useEffect(() => {
     fetch('/api/m/uk-bookkeeping/admin/categories')
@@ -158,7 +174,16 @@ export default function TransactionForm({
             ? {
                 ...prev,
                 lines: prev.lines.map((line) =>
-                  line.categoryId ? line : { ...line, categoryId: list[0]?.id ?? '' },
+                  line.categoryId
+                    ? line
+                    : {
+                        ...line,
+                        categoryId: list[0]?.id ?? '',
+                        // The capital flag rides with the category everywhere a
+                        // category is chosen, defaults included - otherwise a
+                        // default of "Equipment" records a non-capital line.
+                        isCapital: list[0]?.is_capital ?? false,
+                      },
                 ),
               }
             : prev,
@@ -166,6 +191,41 @@ export default function TransactionForm({
       })
       .catch(() => setError('The category list could not be loaded.'))
   }, [])
+
+  useEffect(() => {
+    fetch('/api/m/uk-bookkeeping/admin/transactions/suggest')
+      .then((r) => (r.ok ? r.json() : { counterparties: [] }))
+      .then((data) => setKnownCounterparties(data.counterparties ?? []))
+      .catch(() => setKnownCounterparties([]))
+  }, [])
+
+  /**
+   * When the counterparty is one this site has seen before, pre-pick the
+   * category their entries usually get filed under. Suggestion only: it fills
+   * the select, it never overrides a choice already made.
+   */
+  async function suggestCategory(counterparty: string) {
+    if (categoryTouched || !counterparty.trim()) return
+    try {
+      const response = await fetch(
+        `/api/m/uk-bookkeeping/admin/transactions/suggest?counterparty=${encodeURIComponent(counterparty.trim())}`,
+      )
+      if (!response.ok) return
+      const data = await response.json()
+      const category = categories.find((c) => c.id === data.categoryId)
+      if (!category) return
+      setValue((prev) => ({
+        ...prev,
+        lines: prev.lines.map((line) => ({
+          ...line,
+          categoryId: category.id,
+          isCapital: category.is_capital,
+        })),
+      }))
+    } catch {
+      // A failed suggestion is no suggestion. Nothing to say.
+    }
+  }
 
   const totals = useMemo(
     () =>
@@ -240,33 +300,46 @@ export default function TransactionForm({
       reference: value.reference || null,
       correctsTransactionId: value.correctsTransactionId ?? null,
       correctionReason: value.correctionReason || null,
-      lines: value.lines,
+      lines: value.lines.map(({ uid: _uid, ...line }) => line),
     }
 
-    const response = await fetch(
-      value.id
-        ? `/api/m/uk-bookkeeping/admin/transactions/${value.id}`
-        : '/api/m/uk-bookkeeping/admin/transactions',
-      {
-        method: value.id ? 'PUT' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      },
-    )
+    try {
+      const response = await fetch(
+        value.id
+          ? `/api/m/uk-bookkeeping/admin/transactions/${value.id}`
+          : '/api/m/uk-bookkeeping/admin/transactions',
+        {
+          method: value.id ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      )
 
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}))
-      setError(payload.error ?? 'That could not be saved.')
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        setError(payload.error ?? 'That could not be saved.')
+        setSaving(false)
+        return
+      }
+
+      const saved = await response.json()
+      window.location.href = `/${adminPath}/m/uk-bookkeeping/transactions/${saved.id}`
+    } catch {
+      // A dropped connection must not leave "Saving…" disabled forever with no
+      // explanation - nothing typed has been lost, so say so.
+      setError('The save did not reach the server. Check the connection and try again - everything typed is still here.')
       setSaving(false)
-      return
     }
-
-    const saved = await response.json()
-    window.location.href = `/${adminPath}/m/uk-bookkeeping/transactions/${saved.id}`
   }
 
   return (
-    <div style={{ maxWidth: 960 }}>
+    <form
+      style={{ maxWidth: 960 }}
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (!saving) save()
+      }}
+    >
       <ErrorNotice message={error} />
 
       {correcting && (
@@ -321,8 +394,15 @@ export default function TransactionForm({
               style={input}
               value={value.counterparty}
               placeholder="Supplier or customer"
+              list="bk-counterparty-suggestions"
               onChange={(e) => setValue({ ...value, counterparty: e.target.value })}
+              onBlur={(e) => suggestCategory(e.target.value)}
             />
+            <datalist id="bk-counterparty-suggestions">
+              {knownCounterparties.map((name) => (
+                <option key={name} value={name} />
+              ))}
+            </datalist>
           </div>
           <div>
             <label style={label} htmlFor="bk-reference">Their invoice number</label>
@@ -365,7 +445,7 @@ export default function TransactionForm({
 
         {value.lines.map((line, index) => (
           <div
-            key={index}
+            key={line.uid ?? index}
             style={{
               border: '1px solid var(--color-border)',
               borderRadius: 8,
@@ -375,12 +455,14 @@ export default function TransactionForm({
           >
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.75rem' }}>
               <div>
-                <label style={label}>Category</label>
+                <label style={label} htmlFor={`bk-line-${line.uid}-category`}>Category</label>
                 <select
+                  id={`bk-line-${line.uid}-category`}
                   style={input}
                   value={line.categoryId}
                   onChange={(e) => {
                     const category = categories.find((c) => c.id === e.target.value)
+                    setCategoryTouched(true)
                     setLine(index, { categoryId: e.target.value, isCapital: category?.is_capital ?? false })
                   }}
                 >
@@ -392,8 +474,13 @@ export default function TransactionForm({
                 </select>
               </div>
               <div>
-                <label style={label}>VAT rate</label>
-                <select style={input} value={line.vatRateCode} onChange={(e) => changeRate(index, e.target.value)}>
+                <label style={label} htmlFor={`bk-line-${line.uid}-rate`}>VAT rate</label>
+                <select
+                  id={`bk-line-${line.uid}-rate`}
+                  style={input}
+                  value={line.vatRateCode}
+                  onChange={(e) => changeRate(index, e.target.value)}
+                >
                   {Object.entries(RATE_LABELS).map(([code, text]) => (
                     <option key={code} value={code}>
                       {text}
@@ -402,8 +489,9 @@ export default function TransactionForm({
                 </select>
               </div>
               <div>
-                <label style={label}>VAT treatment</label>
+                <label style={label} htmlFor={`bk-line-${line.uid}-treatment`}>VAT treatment</label>
                 <select
+                  id={`bk-line-${line.uid}-treatment`}
                   style={input}
                   value={line.vatTreatment}
                   onChange={(e) => setLine(index, { vatTreatment: e.target.value })}
@@ -416,8 +504,9 @@ export default function TransactionForm({
                 </select>
               </div>
               <div>
-                <label style={label}>Total including VAT</label>
+                <label style={label} htmlFor={`bk-line-${line.uid}-gross`}>Total including VAT</label>
                 <input
+                  id={`bk-line-${line.uid}-gross`}
                   style={input}
                   inputMode="decimal"
                   value={line.grossAmount}
@@ -425,8 +514,9 @@ export default function TransactionForm({
                 />
               </div>
               <div>
-                <label style={label}>Before VAT</label>
+                <label style={label} htmlFor={`bk-line-${line.uid}-net`}>Before VAT</label>
                 <input
+                  id={`bk-line-${line.uid}-net`}
                   style={input}
                   inputMode="decimal"
                   value={line.netAmount}
@@ -434,8 +524,9 @@ export default function TransactionForm({
                 />
               </div>
               <div>
-                <label style={label}>VAT</label>
+                <label style={label} htmlFor={`bk-line-${line.uid}-vat`}>VAT</label>
                 <input
+                  id={`bk-line-${line.uid}-vat`}
                   style={input}
                   inputMode="decimal"
                   value={line.vatAmount}
@@ -469,7 +560,7 @@ export default function TransactionForm({
           type="button"
           className="btn btn-sm"
           onClick={() =>
-            setValue({ ...value, lines: [...value.lines, emptyLine(categories[0]?.id ?? '')] })
+            setValue({ ...value, lines: [...value.lines, emptyLine(categories[0] ?? null)] })
           }
         >
           Add another line
@@ -491,9 +582,9 @@ export default function TransactionForm({
         </div>
       </div>
 
-      <button type="button" className="btn btn-primary" onClick={save} disabled={saving}>
+      <button type="submit" className="btn btn-primary" disabled={saving}>
         {saving ? 'Saving…' : value.id ? 'Save changes' : 'Record this'}
       </button>
-    </div>
+    </form>
   )
 }

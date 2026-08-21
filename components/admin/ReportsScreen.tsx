@@ -15,10 +15,20 @@ type SummaryRow = {
   entries: number
 }
 
+type MonthlyRow = {
+  month: string
+  income: string
+  expenses: string
+  profit: string
+  vat: string
+  entries: number
+}
+
 type Report = {
   from: string
   to: string
   summary: SummaryRow[]
+  monthly: MonthlyRow[]
   profitAndLoss: {
     income: SummaryRow[]
     expenses: SummaryRow[]
@@ -49,33 +59,58 @@ const EXPORTS = [
   ['lines', 'Entry lines'],
   ['attachments', 'Evidence list'],
   ['periods', 'VAT periods'],
+  ['snapshots', 'Filed figures (frozen)'],
+  ['snapshot-lines', 'Filed workings'],
+  ['hmrc-calls', 'HMRC call log'],
   ['audit', 'History log'],
 ]
 
 function startOfYear(): string {
-  return `${new Date().getUTCFullYear()}-01-01`
+  return `${new Date().getFullYear()}-01-01`
+}
+
+/** Local wall-clock today, not UTC - a UK owner at half past midnight in summer is not still on yesterday. */
+function localToday(): string {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
 }
 
 export default function ReportsScreen({ environment }: { environment: string }) {
-  const [range, setRange] = useState({ from: startOfYear(), to: new Date().toISOString().slice(0, 10) })
+  const [range, setRange] = useState({ from: startOfYear(), to: localToday() })
   const [report, setReport] = useState<Report | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const load = useCallback(async () => {
-    const query = new URLSearchParams(range)
-    const response = await fetch(`/api/m/uk-bookkeeping/admin/reports?${query.toString()}`)
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}))
-      setError(payload.error ?? 'The report could not be worked out.')
-      return
-    }
-    setError(null)
-    setReport(await response.json())
-  }, [range])
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      const query = new URLSearchParams(range)
+      try {
+        const response = await fetch(`/api/m/uk-bookkeeping/admin/reports?${query.toString()}`, {
+          signal,
+        })
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}))
+          setError(payload.error ?? 'The report could not be worked out.')
+          return
+        }
+        const data = await response.json()
+        if (signal?.aborted) return
+        setError(null)
+        setReport(data)
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return
+        setError('The report could not be loaded. Check the connection and try again.')
+      }
+    },
+    [range],
+  )
 
   useEffect(() => {
+    // Abort the stale request when the range changes, so a slow answer cannot
+    // land after a fast one and show figures for dates the inputs no longer say.
+    const controller = new AbortController()
     // eslint-disable-next-line react-hooks/set-state-in-effect -- delegating to an async helper; every setState is after an await
-    load()
+    load(controller.signal)
+    return () => controller.abort()
   }, [load])
 
   const rows = (list: SummaryRow[]) =>
@@ -96,12 +131,12 @@ export default function ReportsScreen({ environment }: { environment: string }) 
 
       <div className="card" style={{ padding: '0.875rem', marginBottom: '1rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <div>
-          <div style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>From</div>
-          <input type="date" style={input} value={range.from} onChange={(e) => setRange({ ...range, from: e.target.value })} />
+          <label htmlFor="bk-r-from" style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)' }}>From</label>
+          <input id="bk-r-from" type="date" style={input} value={range.from} onChange={(e) => setRange({ ...range, from: e.target.value })} />
         </div>
         <div>
-          <div style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>To</div>
-          <input type="date" style={input} value={range.to} onChange={(e) => setRange({ ...range, to: e.target.value })} />
+          <label htmlFor="bk-r-to" style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)' }}>To</label>
+          <input id="bk-r-to" type="date" style={input} value={range.to} onChange={(e) => setRange({ ...range, to: e.target.value })} />
         </div>
       </div>
 
@@ -157,6 +192,56 @@ export default function ReportsScreen({ environment }: { environment: string }) 
               </tfoot>
             </table>
           </div>
+
+          {report.monthly.length > 1 && (
+            <div className="card" style={{ padding: 0, marginBottom: '1rem', overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
+                <thead>
+                  <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--color-border)' }}>
+                    <th style={{ padding: '0.625rem 0.75rem' }}>Month by month</th>
+                    <th style={{ padding: '0.625rem 0.75rem', textAlign: 'right' }}>In</th>
+                    <th style={{ padding: '0.625rem 0.75rem', textAlign: 'right' }}>Out</th>
+                    <th style={{ padding: '0.625rem 0.75rem', textAlign: 'right' }}>Profit</th>
+                    <th style={{ padding: '0.625rem 0.75rem', textAlign: 'right' }}>VAT position</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {report.monthly.map((row) => (
+                    <tr key={row.month} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                      <td style={{ padding: '0.5rem 0.75rem', whiteSpace: 'nowrap' }}>
+                        {new Date(`${row.month}T00:00:00.000Z`).toLocaleDateString('en-GB', {
+                          month: 'long',
+                          year: 'numeric',
+                          timeZone: 'UTC',
+                        })}
+                      </td>
+                      <td style={{ padding: '0.5rem 0.75rem', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                        {poundsFromString(row.income)}
+                      </td>
+                      <td style={{ padding: '0.5rem 0.75rem', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                        {poundsFromString(row.expenses)}
+                      </td>
+                      <td
+                        style={{
+                          padding: '0.5rem 0.75rem',
+                          textAlign: 'right',
+                          fontVariantNumeric: 'tabular-nums',
+                          color: row.profit.startsWith('-')
+                            ? 'var(--color-danger, var(--color-text))'
+                            : 'var(--color-text)',
+                        }}
+                      >
+                        {poundsFromString(row.profit)}
+                      </td>
+                      <td style={{ padding: '0.5rem 0.75rem', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                        {poundsFromString(row.vat)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           {report.taxGrouping.length > 0 && (
             <div className="card" style={{ padding: '1.25rem', marginBottom: '1rem', maxWidth: 640 }}>

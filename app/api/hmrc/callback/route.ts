@@ -57,6 +57,25 @@ export async function GET(request: NextRequest) {
     return fail('different-user', adminPath)
   }
 
+  // Where to land afterwards, worked out BEFORE the exchange so a bad stored
+  // path can never turn a successful connect into an "exchange failed" message.
+  // Same-origin only: the stored value is checked again here in case an older
+  // row (or anything else that wrote the table) holds an absolute URL - the
+  // admin has just typed their Government Gateway credentials, and this
+  // redirect is the classic place to phish from.
+  const siteUrl = getSiteUrl()
+  let destination: URL
+  try {
+    destination = new URL(consumed.returnTo || `/${adminPath}/config`, siteUrl)
+  } catch {
+    destination = new URL(`${siteUrl}/${adminPath}/config`)
+  }
+  if (destination.origin !== new URL(siteUrl).origin) {
+    destination = new URL(`${siteUrl}/${adminPath}/config`)
+  }
+  destination.searchParams.set('tab', 'uk-bookkeeping')
+  destination.searchParams.set('hmrc', 'connected')
+
   try {
     const client = new DirectHmrcClient(getSiteUrl())
     const tokens = await client.exchangeCode({ code, environment: consumed.environment })
@@ -78,9 +97,6 @@ export async function GET(request: NextRequest) {
       user,
     })
 
-    const destination = new URL(consumed.returnTo || `${getSiteUrl()}/${adminPath}/config`)
-    destination.searchParams.set('tab', 'uk-bookkeeping')
-    destination.searchParams.set('hmrc', 'connected')
     return NextResponse.redirect(destination)
   } catch {
     // Deliberately not surfacing HMRC's own message here: this lands in a URL

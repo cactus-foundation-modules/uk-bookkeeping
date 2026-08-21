@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import type { SessionUser } from '@/lib/auth/session'
 import { appendAudit, getChainHead, nextChainLink, chainHash } from './audit'
-import { BookkeepingError, NotFoundError, PeriodStateError } from './errors'
+import { BookkeepingError, NotFoundError, PeriodStateError, RecordsChangedError } from './errors'
 import { formatMoney, formatPounds, toMoney } from './money'
 import { getSettings } from './settings'
 import type {
@@ -33,7 +33,10 @@ import { boxesMatch, computeVatReturn, netVatDirection } from './vat-boxes'
  */
 export function isOverdue(period: { status: string; due_date: Date | null }): boolean {
   if (period.status === 'submitted' || !period.due_date) return false
-  return period.due_date.getTime() < Date.now()
+  // Due DATES are inclusive: HMRC accepts a return all the way to the end of
+  // the due day, so overdue starts the day after, not at midnight as it turns.
+  const endOfDueDay = period.due_date.getTime() + 24 * 60 * 60 * 1000
+  return endOfDueDay <= Date.now()
 }
 
 export async function listPeriods(): Promise<BkVatPeriodRow[]> {
@@ -146,20 +149,25 @@ export async function computePeriod(period: BkVatPeriodRow) {
 // Creating periods
 // ---------------------------------------------------------------------------
 
-function addMonths(date: Date, months: number): Date {
-  const next = new Date(date.getTime())
-  next.setUTCMonth(next.getUTCMonth() + months)
-  return next
+/**
+ * Month arithmetic anchored to a fixed date, clamped to the month's length.
+ *
+ * setUTCMonth rolls over - 31 Jan + 1 month is 3 March - so iterating with it
+ * skews every boundary after a short month whenever the first period starts on
+ * the 29th, 30th or 31st. Anchoring each period at `first + i * months` and
+ * clamping the day keeps 31 Jan → 28 Feb → 31 Mar → 30 Apr, which is what a
+ * calendar means by "a month later".
+ */
+function addMonthsClamped(anchor: Date, months: number): Date {
+  const year = anchor.getUTCFullYear()
+  const month = anchor.getUTCMonth() + months
+  const day = anchor.getUTCDate()
+  const lastDayOfTarget = new Date(Date.UTC(year, month + 1, 0)).getUTCDate()
+  return new Date(Date.UTC(year, month, Math.min(day, lastDayOfTarget)))
 }
 
 function monthsPerPeriod(frequency: PeriodFrequency): number {
   return frequency === 'monthly' ? 1 : frequency === 'quarterly' ? 3 : 12
-}
-
-function endOfPeriod(start: Date, frequency: PeriodFrequency): Date {
-  const end = addMonths(start, monthsPerPeriod(frequency))
-  end.setUTCDate(end.getUTCDate() - 1)
-  return end
 }
 
 export function toDateOnly(value: Date): string {
@@ -181,27 +189,44 @@ export async function generateLocalPeriods(user: SessionUser | null): Promise<Bk
   }
 
   const frequency = settings.period_frequency
-  const created: string[] = []
-  let start = new Date(settings.first_period_start)
-  const horizon = addMonths(new Date(), monthsPerPeriod(frequency))
+  const months = monthsPerPeriod(frequency)
+  const anchor = new Date(settings.first_period_start)
+  const horizon = addMonthsClamped(new Date(), months)
 
+  // Each period is anchored to the first start rather than iterated from the
+  // previous end, so a short month cannot skew every boundary after it.
   // A guard rather than a `while (true)`: a first-period-start set to 1970 by
   // accident should produce a refusal, not four hundred rows.
-  for (let i = 0; i < 200 && start <= horizon; i += 1) {
-    const end = endOfPeriod(start, frequency)
-    const [existing] = await prisma.$queryRaw<{ id: string }[]>`
-      SELECT "id" FROM "bk_vat_periods"
-      WHERE "start_date" = ${start}::date AND "end_date" = ${end}::date LIMIT 1
+  const starts: string[] = []
+  const ends: string[] = []
+  for (let i = 0; i < 200; i += 1) {
+    const start = addMonthsClamped(anchor, i * months)
+    if (start > horizon) break
+    const end = new Date(addMonthsClamped(anchor, (i + 1) * months).getTime() - 24 * 60 * 60 * 1000)
+    starts.push(toDateOnly(start))
+    ends.push(toDateOnly(end))
+  }
+
+  // One statement, ON CONFLICT, so two simultaneous calls cannot race the
+  // SELECT-then-INSERT into a raw unique violation. A candidate that overlaps
+  // an existing period with a DIFFERENT range - usually one HMRC issued - is
+  // skipped rather than doubled up: two open periods claiming the same rows
+  // means every figure counted twice.
+  const created: string[] = []
+  if (starts.length > 0) {
+    const rows = await prisma.$queryRaw<{ id: string }[]>`
+      INSERT INTO "bk_vat_periods" ("start_date", "end_date", "scheme", "source", "vrn")
+      SELECT c.start_date, c.end_date, ${settings.scheme}, 'local', ${settings.vrn}
+      FROM unnest(${starts}::date[], ${ends}::date[]) AS c(start_date, end_date)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM "bk_vat_periods" p
+        WHERE p."start_date" <= c.end_date AND p."end_date" >= c.start_date
+          AND NOT (p."start_date" = c.start_date AND p."end_date" = c.end_date)
+      )
+      ON CONFLICT ("start_date", "end_date") DO NOTHING
+      RETURNING "id"
     `
-    if (!existing) {
-      const [row] = await prisma.$queryRaw<{ id: string }[]>`
-        INSERT INTO "bk_vat_periods" ("start_date", "end_date", "scheme", "source", "vrn")
-        VALUES (${start}::date, ${end}::date, ${settings.scheme}, 'local', ${settings.vrn})
-        RETURNING "id"
-      `
-      if (row) created.push(row.id)
-    }
-    start = addMonths(start, monthsPerPeriod(frequency))
+    created.push(...rows.map((r) => r.id))
   }
 
   if (created.length > 0) {
@@ -220,29 +245,57 @@ export async function generateLocalPeriods(user: SessionUser | null): Promise<Bk
 // Finalise
 // ---------------------------------------------------------------------------
 
+type PeriodRange = Pick<BkVatPeriodRow, 'id' | 'scheme' | 'start_date' | 'end_date'>
+
+/**
+ * Membership of a period, as a WHERE fragment over alias t. The same rule as
+ * vat-boxes.ts's membership: the period's OWN scheme decides which date column
+ * claims a transaction.
+ */
+function periodMembership(period: PeriodRange): Prisma.Sql {
+  return Prisma.sql`
+    t."status" = 'posted'
+    AND (
+      (${period.scheme}::text = 'accrual'
+        AND t."tax_point_date" BETWEEN ${period.start_date}::date AND ${period.end_date}::date)
+      OR (${period.scheme}::text = 'cash' AND t."settled_date" IS NOT NULL
+        AND t."settled_date" BETWEEN ${period.start_date}::date AND ${period.end_date}::date)
+    )
+  `
+}
+
 /** Every transaction whose lines land in this period, under this period's scheme. */
-async function contributingTransactionIds(period: BkVatPeriodRow): Promise<string[]> {
-  const rows = await prisma.$queryRaw<{ id: string }[]>`
+async function contributingTransactionIds(
+  period: BkVatPeriodRow,
+  db: Pick<typeof prisma, '$queryRaw' | '$executeRaw'> = prisma,
+): Promise<string[]> {
+  const rows = await db.$queryRaw<{ id: string }[]>`
     SELECT DISTINCT t."id"
     FROM "bk_transactions" t
     JOIN "bk_transaction_lines" l ON l."transaction_id" = t."id"
-    WHERE t."status" = 'posted'
+    WHERE ${periodMembership(period)}
+  `
+  return rows.map((r) => r.id)
+}
+
+/**
+ * Imported rows still awaiting review, which must be dealt with before filing.
+ * A draft counts when it WOULD belong to this period once posted - by the
+ * period's own scheme, not just by tax point.
+ */
+async function countDraftsInRange(
+  period: BkVatPeriodRow,
+  db: Pick<typeof prisma, '$queryRaw' | '$executeRaw'> = prisma,
+): Promise<number> {
+  const [row] = await db.$queryRaw<{ count: bigint }[]>`
+    SELECT COUNT(*)::bigint AS count FROM "bk_transactions" t
+    WHERE t."status" = 'draft'
       AND (
         (${period.scheme}::text = 'accrual'
           AND t."tax_point_date" BETWEEN ${period.start_date}::date AND ${period.end_date}::date)
         OR (${period.scheme}::text = 'cash' AND t."settled_date" IS NOT NULL
           AND t."settled_date" BETWEEN ${period.start_date}::date AND ${period.end_date}::date)
       )
-  `
-  return rows.map((r) => r.id)
-}
-
-/** Imported rows still awaiting review, which must be dealt with before filing. */
-async function countDraftsInRange(period: BkVatPeriodRow): Promise<number> {
-  const [row] = await prisma.$queryRaw<{ count: bigint }[]>`
-    SELECT COUNT(*)::bigint AS count FROM "bk_transactions"
-    WHERE "status" = 'draft'
-      AND "tax_point_date" BETWEEN ${period.start_date}::date AND ${period.end_date}::date
   `
   return Number(row?.count ?? 0n)
 }
@@ -260,7 +313,10 @@ export async function writeSnapshot(
     user: SessionUser | null
   },
 ): Promise<string> {
-  const { chainIndex, prevHash } = await nextChainLink('bk_period_snapshots')
+  // The chain head is read ON THE CALLER'S TRANSACTION, so the FOR UPDATE it
+  // takes really does serialise two concurrent snapshot writers instead of
+  // evaporating in autocommit on some other pooled connection.
+  const { chainIndex, prevHash } = await nextChainLink('bk_period_snapshots', tx)
   const payload = {
     periodId: input.periodId,
     kind: input.kind,
@@ -284,17 +340,30 @@ export async function writeSnapshot(
   `
   const snapshotId = snapshot!.id
 
-  for (const line of input.lines) {
+  // One statement for all lines. PgBouncer wraps every statement in its own
+  // round trips, so a loop here would cost four per line on a busy quarter.
+  if (input.lines.length > 0) {
+    const transactionIds = input.lines.map((l) => l.transactionId)
+    const lineIds = input.lines.map((l) => l.lineId)
+    const directions = input.lines.map((l) => l.direction)
+    const treatments = input.lines.map((l) => l.vatTreatment)
+    const rateCodes = input.lines.map((l) => l.vatRateCode)
+    const nets = input.lines.map((l) => l.netAmount)
+    const vats = input.lines.map((l) => l.vatAmount)
+    const boxes = input.lines.map((l) => JSON.stringify(l.boxes))
     await tx.$executeRaw`
       INSERT INTO "bk_period_snapshot_lines" (
         "snapshot_id", "transaction_id", "line_id", "direction", "vat_treatment",
         "vat_rate_code", "net_amount", "vat_amount", "boxes"
-      ) VALUES (
-        ${snapshotId}, ${line.transactionId}, ${line.lineId}, ${line.direction},
-        ${line.vatTreatment}, ${line.vatRateCode},
-        ${line.netAmount}::numeric, ${line.vatAmount}::numeric,
-        ${JSON.stringify(line.boxes)}::jsonb
       )
+      SELECT ${snapshotId}, c.transaction_id, c.line_id, c.direction, c.vat_treatment,
+             c.vat_rate_code, c.net_amount, c.vat_amount, c.boxes
+      FROM unnest(
+        ${transactionIds}::text[], ${lineIds}::text[], ${directions}::text[],
+        ${treatments}::text[], ${rateCodes}::text[],
+        ${nets}::numeric[], ${vats}::numeric[], ${boxes}::jsonb[]
+      ) AS c(transaction_id, line_id, direction, vat_treatment, vat_rate_code,
+             net_amount, vat_amount, boxes)
     `
   }
   return snapshotId
@@ -310,48 +379,68 @@ export async function finalisePeriod(id: string, user: SessionUser | null): Prom
     )
   }
 
-  const drafts = await countDraftsInRange(period)
-  if (drafts > 0) {
-    throw new PeriodStateError(
-      `There ${drafts === 1 ? 'is' : 'are'} still ${drafts} imported entr${drafts === 1 ? 'y' : 'ies'} in this period waiting to be reviewed. Deal with those first, then finalise.`,
-    )
-  }
-
-  const computed = await computePeriod(period)
   const settings = await getSettings()
-  const contributing = await contributingTransactionIds(period)
 
-  await prisma.$transaction(async (tx) => {
-    await writeSnapshot(tx, {
-      periodId: period.id,
-      kind: 'finalised',
-      scheme: period.scheme,
-      boxes: computed.boxes,
-      unrounded: computed.unrounded,
-      lines: computed.lines,
-      vrn: period.vrn ?? settings.vrn,
-      user,
-    })
-    if (contributing.length > 0) {
-      await tx.$executeRaw`
-        UPDATE "bk_transactions" SET "finalised_period_id" = ${period.id}, "updated_at" = NOW()
-        WHERE "id" = ANY(${contributing}::text[]) AND "locked_period_id" IS NULL
+  // Everything - the claim, the draft check, the computation, the snapshot and
+  // the row tagging - happens inside ONE repeatable-read transaction. The claim
+  // comes first so two concurrent finalises cannot both pass the status check,
+  // and repeatable read means the snapshot and the tagged row set are cut from
+  // the same instant rather than drifting while a colleague keeps typing.
+  const result = await prisma.$transaction(
+    async (tx) => {
+      const claimed = await tx.$executeRaw`
+        UPDATE "bk_vat_periods"
+        SET "status" = 'finalised', "finalised_at" = NOW(),
+            "finalised_by_user_id" = ${user?.id ?? null}, "updated_at" = NOW()
+        WHERE "id" = ${period.id} AND "status" = 'open'
       `
-    }
-    await tx.$executeRaw`
-      UPDATE "bk_vat_periods"
-      SET "status" = 'finalised', "finalised_at" = NOW(), "finalised_by_user_id" = ${user?.id ?? null},
-          "updated_at" = NOW()
-      WHERE "id" = ${period.id}
-    `
-  })
+      if (claimed === 0) {
+        throw new PeriodStateError('That return has just been finalised or filed by somebody else.')
+      }
+
+      const drafts = await countDraftsInRange(period, tx)
+      if (drafts > 0) {
+        throw new PeriodStateError(
+          `There ${drafts === 1 ? 'is' : 'are'} still ${drafts} imported entr${drafts === 1 ? 'y' : 'ies'} in this period waiting to be reviewed. Deal with those first, then finalise.`,
+        )
+      }
+
+      const computed = await computeVatReturn(
+        period.start_date,
+        period.end_date,
+        period.scheme,
+        settings.box_rounding,
+        tx,
+      )
+      const contributing = await contributingTransactionIds(period, tx)
+
+      await writeSnapshot(tx, {
+        periodId: period.id,
+        kind: 'finalised',
+        scheme: period.scheme,
+        boxes: computed.boxes,
+        unrounded: computed.unrounded,
+        lines: computed.lines,
+        vrn: period.vrn ?? settings.vrn,
+        user,
+      })
+      if (contributing.length > 0) {
+        await tx.$executeRaw`
+          UPDATE "bk_transactions" SET "finalised_period_id" = ${period.id}, "updated_at" = NOW()
+          WHERE "id" = ANY(${contributing}::text[]) AND "locked_period_id" IS NULL
+        `
+      }
+      return { computed, contributing }
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  )
 
   await appendAudit({
     action: 'period.finalised',
     entityType: 'vat_period',
     entityId: period.id,
     summary: `VAT return for ${toDateOnly(period.start_date)} to ${toDateOnly(period.end_date)} finalised`,
-    detail: { boxes: computed.boxes, transactions: contributing.length },
+    detail: { boxes: result.computed.boxes, transactions: result.contributing.length },
     user,
   })
 
@@ -370,16 +459,21 @@ export async function unfinalisePeriod(id: string, user: SessionUser | null): Pr
   }
 
   await prisma.$transaction(async (tx) => {
+    // The claim first: a submission may be mid-flight in another request, and
+    // its recordSubmission must not find the period quietly reopened under it.
+    const claimed = await tx.$executeRaw`
+      UPDATE "bk_vat_periods"
+      SET "status" = 'open', "finalised_at" = NULL, "finalised_by_user_id" = NULL, "updated_at" = NOW()
+      WHERE "id" = ${period.id} AND "status" = 'finalised'
+    `
+    if (claimed === 0) {
+      throw new PeriodStateError('That return has just been filed, so it can no longer be reopened.')
+    }
     // The snapshot stays. It is append-only, and it is now the evidence of what
     // the numbers were before somebody changed their mind.
     await tx.$executeRaw`
       UPDATE "bk_transactions" SET "finalised_period_id" = NULL, "updated_at" = NOW()
       WHERE "finalised_period_id" = ${period.id} AND "locked_period_id" IS NULL
-    `
-    await tx.$executeRaw`
-      UPDATE "bk_vat_periods"
-      SET "status" = 'open', "finalised_at" = NULL, "finalised_by_user_id" = NULL, "updated_at" = NOW()
-      WHERE "id" = ${period.id}
     `
   })
 
@@ -401,6 +495,15 @@ export async function unfinalisePeriod(id: string, user: SessionUser | null): Pr
 /**
  * The hard lock, applied when a return is filed - by us or elsewhere.
  *
+ * The rows locked are the period's rows BY MEMBERSHIP - the same date-and-scheme
+ * rule that decides the figures - not whatever happened to be tagged
+ * finalised_period_id at finalise time. Locking by the tag left a hole: any row
+ * that joined the period after finalise (or had its tag cleared by an
+ * unfinalise racing the submission) was written into the immutable snapshot yet
+ * left editable. Membership is recomputed here, inside the submitting
+ * transaction, so what is snapshotted and what is locked cannot be two
+ * different sets.
+ *
  * Called last within the submitting transaction, after the receipt is stored,
  * because a crash between the two states must leave a period that is
  * submitted-and-unlocked (recoverable, and visible to a consistency check)
@@ -408,24 +511,27 @@ export async function unfinalisePeriod(id: string, user: SessionUser | null): Pr
  */
 export async function lockPeriodRecords(
   tx: Omit<typeof prisma, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>,
-  periodId: string,
+  period: PeriodRange,
 ): Promise<void> {
   await tx.$executeRaw`
-    UPDATE "bk_transaction_lines" SET "locked_period_id" = ${periodId}, "updated_at" = NOW()
+    UPDATE "bk_transaction_lines" SET "locked_period_id" = ${period.id}, "updated_at" = NOW()
     WHERE "locked_period_id" IS NULL AND "transaction_id" IN (
-      SELECT "id" FROM "bk_transactions" WHERE "finalised_period_id" = ${periodId}
+      SELECT t."id" FROM "bk_transactions" t WHERE ${periodMembership(period)}
     )
   `
   await tx.$executeRaw`
-    UPDATE "bk_attachments" SET "locked_period_id" = ${periodId}
+    UPDATE "bk_attachments" SET "locked_period_id" = ${period.id}
     WHERE "locked_period_id" IS NULL AND "transaction_id" IN (
-      SELECT "id" FROM "bk_transactions" WHERE "finalised_period_id" = ${periodId}
+      SELECT t."id" FROM "bk_transactions" t WHERE ${periodMembership(period)}
     )
   `
   await tx.$executeRaw`
-    UPDATE "bk_transactions"
-    SET "locked_period_id" = ${periodId}, "locked_at" = NOW(), "updated_at" = NOW()
-    WHERE "finalised_period_id" = ${periodId} AND "locked_period_id" IS NULL
+    UPDATE "bk_transactions" SET
+      "locked_period_id" = ${period.id}, "locked_at" = NOW(),
+      "finalised_period_id" = ${period.id}, "updated_at" = NOW()
+    WHERE "locked_period_id" IS NULL AND "id" IN (
+      SELECT t."id" FROM "bk_transactions" t WHERE ${periodMembership(period)}
+    )
   `
 }
 
@@ -447,38 +553,69 @@ export async function markSubmittedElsewhere(
     )
   }
 
-  const computed = await computePeriod(period)
   const settings = await getSettings()
 
-  await prisma.$transaction(async (tx) => {
-    await writeSnapshot(tx, {
-      periodId: period.id,
-      kind: 'submitted',
-      scheme: period.scheme,
-      boxes: computed.boxes,
-      unrounded: computed.unrounded,
-      lines: computed.lines,
-      vrn: period.vrn ?? settings.vrn,
-      user,
-    })
-    await tx.$executeRaw`
-      UPDATE "bk_vat_periods"
-      SET "submitted_externally" = TRUE, "submitted_at" = NOW(),
-          "submitted_by_user_id" = ${user?.id ?? null}, "updated_at" = NOW()
-      WHERE "id" = ${period.id}
-    `
-    await lockPeriodRecords(tx, period.id)
-    await tx.$executeRaw`
-      UPDATE "bk_vat_periods" SET "status" = 'submitted', "updated_at" = NOW() WHERE "id" = ${period.id}
-    `
-  })
+  const boxes = await prisma.$transaction(
+    async (tx) => {
+      // Claim before anything else: two concurrent marks, or a mark racing the
+      // HMRC submit, must resolve to exactly one winner.
+      const claimed = await tx.$executeRaw`
+        UPDATE "bk_vat_periods"
+        SET "submitted_externally" = TRUE, "submitted_at" = NOW(),
+            "submitted_by_user_id" = ${user?.id ?? null}, "updated_at" = NOW()
+        WHERE "id" = ${period.id} AND "status" = 'finalised'
+      `
+      if (claimed === 0) {
+        throw new PeriodStateError('That return has just been filed or reopened by somebody else.')
+      }
+
+      const computed = await computeVatReturn(
+        period.start_date,
+        period.end_date,
+        period.scheme,
+        settings.box_rounding,
+        tx,
+      )
+
+      // The same gate the HMRC path has: what is recorded as filed must be the
+      // figures that were frozen at finalise. If the records moved since, the
+      // owner filed something else elsewhere, and that wants looking at - not
+      // silently snapshotting numbers nobody approved.
+      const [frozen] = await tx.$queryRaw<{ boxes: VatBoxes }[]>`
+        SELECT "boxes" FROM "bk_period_snapshots"
+        WHERE "period_id" = ${period.id} AND "kind" = 'finalised'
+        ORDER BY "chain_index" DESC LIMIT 1
+      `
+      if (!frozen || !boxesMatch(frozen.boxes, computed.boxes)) {
+        throw new RecordsChangedError()
+      }
+
+      await writeSnapshot(tx, {
+        periodId: period.id,
+        kind: 'submitted',
+        scheme: period.scheme,
+        boxes: computed.boxes,
+        unrounded: computed.unrounded,
+        lines: computed.lines,
+        vrn: period.vrn ?? settings.vrn,
+        user,
+      })
+      await lockPeriodRecords(tx, period)
+      await tx.$executeRaw`
+        UPDATE "bk_vat_periods" SET "status" = 'submitted', "updated_at" = NOW()
+        WHERE "id" = ${period.id} AND "status" = 'finalised'
+      `
+      return computed.boxes
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  )
 
   await appendAudit({
     action: 'period.marked-submitted-elsewhere',
     entityType: 'vat_period',
     entityId: period.id,
     summary: `VAT return for ${toDateOnly(period.start_date)} to ${toDateOnly(period.end_date)} recorded as filed elsewhere`,
-    detail: { boxes: computed.boxes },
+    detail: { boxes },
     user,
   })
 
@@ -558,6 +695,10 @@ export type FinalisedComparison = {
   frozen: VatBoxes | null
   current: VatBoxes
   differences: { box: string; frozen: string; current: string }[]
+  /** The full recomputation behind `current`, so a submission can snapshot the
+   * workings computed BEFORE the network call rather than re-reading the tables
+   * after HMRC has already accepted. */
+  computation: Awaited<ReturnType<typeof computePeriod>>
 }
 
 /**
@@ -575,7 +716,13 @@ export async function compareWithFinalisedSnapshot(
   const frozen = [...snapshots].reverse().find((s) => s.kind === 'finalised')?.boxes ?? null
 
   if (!frozen) {
-    return { matches: false, frozen: null, current: computed.boxes, differences: [] }
+    return {
+      matches: false,
+      frozen: null,
+      current: computed.boxes,
+      differences: [],
+      computation: computed,
+    }
   }
 
   const differences = (Object.keys(computed.boxes) as (keyof VatBoxes)[])
@@ -587,6 +734,7 @@ export async function compareWithFinalisedSnapshot(
     frozen,
     current: computed.boxes,
     differences,
+    computation: computed,
   }
 }
 

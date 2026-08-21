@@ -9,7 +9,7 @@ import { HmrcCallBody } from '@/modules/uk-bookkeeping/lib/validation'
 // difference between the two is a conversation with HMRC, not something for
 // software to quietly resolve.
 export async function POST(request: NextRequest) {
-  const gate = await requireBookkeepingUser('bookkeeping.access')
+  const gate = await requireBookkeepingUser('bookkeeping.submit')
   if (gate.error) return gate.error
 
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>

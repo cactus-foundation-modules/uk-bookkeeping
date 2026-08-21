@@ -13,6 +13,12 @@ export async function GET(request: NextRequest) {
     const value = query.get(name)
     return value === null || value === '' ? null : value === '1' || value === 'true'
   }
+  // Number('abc') is NaN, and NaN sails through a Math.min/Math.max clamp
+  // straight into LIMIT - a 500 for a mistyped query string.
+  const integer = (name: string, fallback: number): number => {
+    const value = Number(query.get(name) ?? NaN)
+    return Number.isFinite(value) ? Math.trunc(value) : fallback
+  }
 
   try {
     const list = await listTransactions({
@@ -25,8 +31,8 @@ export async function GET(request: NextRequest) {
       status: (query.get('status') as 'draft' | 'posted' | null) || null,
       locked: boolean('locked'),
       hasEvidence: boolean('hasEvidence'),
-      limit: Number(query.get('limit') ?? 50),
-      offset: Number(query.get('offset') ?? 0),
+      limit: integer('limit', 50),
+      offset: integer('offset', 0),
     })
     return NextResponse.json(list)
   } catch (error) {

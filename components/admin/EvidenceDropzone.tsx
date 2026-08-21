@@ -49,39 +49,52 @@ export default function EvidenceDropzone({
     setError(null)
     setBusy(true)
 
-    for (const file of Array.from(files)) {
-      const reason = preflightFileError(file)
-      if (reason) {
-        setError(reason)
-        continue
-      }
-      const body = new FormData()
-      body.append('file', file)
-      body.append('name', file.name)
+    try {
+      for (const file of Array.from(files)) {
+        const reason = preflightFileError(file)
+        if (reason) {
+          setError(reason)
+          continue
+        }
+        const body = new FormData()
+        body.append('file', file)
+        body.append('name', file.name)
 
-      const response = await fetch(
-        `/api/m/uk-bookkeeping/admin/transactions/${transactionId}/attachments`,
-        { method: 'POST', body },
-      )
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}))
-        setError(payload.error ?? `“${file.name}” could not be uploaded.`)
+        try {
+          const response = await fetch(
+            `/api/m/uk-bookkeeping/admin/transactions/${transactionId}/attachments`,
+            { method: 'POST', body },
+          )
+          if (!response.ok) {
+            const payload = await response.json().catch(() => ({}))
+            setError(payload.error ?? `“${file.name}” could not be uploaded.`)
+          }
+        } catch {
+          setError(`“${file.name}” did not reach the server. Check the connection and try again.`)
+        }
       }
+    } finally {
+      // Whatever happened, "Uploading…" must not be the permanent state of the
+      // page, and the list should show what DID land.
+      setBusy(false)
+      if (fileInput.current) fileInput.current.value = ''
+      onChange()
     }
-
-    setBusy(false)
-    if (fileInput.current) fileInput.current.value = ''
-    onChange()
   }
 
   async function remove(id: string) {
-    const response = await fetch(`/api/m/uk-bookkeeping/admin/attachments/${id}`, { method: 'DELETE' })
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}))
-      setError(payload.error ?? 'That could not be removed.')
-      return
+    if (!window.confirm('Remove this receipt from the entry?')) return
+    try {
+      const response = await fetch(`/api/m/uk-bookkeeping/admin/attachments/${id}`, { method: 'DELETE' })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        setError(payload.error ?? 'That could not be removed.')
+        return
+      }
+      onChange()
+    } catch {
+      setError('That did not reach the server. Check the connection and try again.')
     }
-    onChange()
   }
 
   return (
