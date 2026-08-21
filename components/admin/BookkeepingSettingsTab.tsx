@@ -139,6 +139,20 @@ type LedgerAccount = {
   is_system: boolean
 }
 
+type Category = {
+  id: string
+  code: string
+  name: string
+  direction: 'income' | 'expense' | 'both'
+  sa103_box: string | null
+  ct600_group: string | null
+  is_trading: boolean
+  is_capital: boolean
+  position: number
+  archived: boolean
+  is_system: boolean
+}
+
 type NewBankAccount = {
   name: string
   kind: BankAccountKind
@@ -156,6 +170,12 @@ type NewLedgerAccount = {
   personName: string
 }
 
+type NewCategory = {
+  name: string
+  direction: 'income' | 'expense' | 'both'
+  filing: string
+}
+
 const EMPTY_BANK_ACCOUNT: NewBankAccount = {
   name: '',
   kind: 'bank',
@@ -171,6 +191,95 @@ const EMPTY_LEDGER_ACCOUNT: NewLedgerAccount = {
   kind: 'liability',
   subtype: 'other',
   personName: '',
+}
+
+const EMPTY_CATEGORY: NewCategory = { name: '', direction: 'expense', filing: 'office' }
+
+/**
+ * Where a category lands, offered as one choice rather than three.
+ *
+ * A category carries a self-assessment box, a line of the profit and loss
+ * account, and two flags saying whether it is trade and whether it is capital.
+ * Those four are not independent - box 24 is an administrative expense and it
+ * is trade, every time - and a screen that asked for them separately would
+ * mostly be collecting ways to get them wrong. So the choice here is HMRC's own
+ * wording for the box, and the rest follows from it.
+ *
+ * The keys are the codes of the categories the module seeds, which is not an
+ * accident: picking one files the new category exactly where that seeded one
+ * already goes. Box numbers are the full self-assessment pages, SA103F.
+ */
+const FILING_OPTIONS: {
+  key: string
+  label: string
+  direction: 'income' | 'expense'
+  sa103Box: string | null
+  ct600Group: string
+  isTrading: boolean
+  isCapital: boolean
+}[] = [
+  { key: 'sales', label: 'Sales and turnover (box 15)', direction: 'income', sa103Box: 'SA103F.15', ct600Group: 'turnover', isTrading: true, isCapital: false },
+  { key: 'other-income', label: 'Other business income (box 16)', direction: 'income', sa103Box: 'SA103F.16', ct600Group: 'other-income', isTrading: true, isCapital: false },
+  { key: 'non-trade-income', label: 'Interest and other income that is not trade', direction: 'income', sa103Box: null, ct600Group: 'non-trade-income', isTrading: false, isCapital: false },
+  { key: 'property-income', label: 'Income from property', direction: 'income', sa103Box: null, ct600Group: 'property-income', isTrading: false, isCapital: false },
+  { key: 'capital-introduced', label: 'Money put in by the owner', direction: 'income', sa103Box: null, ct600Group: 'capital', isTrading: false, isCapital: false },
+  { key: 'cogs', label: 'Cost of goods and materials (box 17)', direction: 'expense', sa103Box: 'SA103F.17', ct600Group: 'cost-of-sales', isTrading: true, isCapital: false },
+  { key: 'subcontractors', label: 'Subcontractor costs (box 18)', direction: 'expense', sa103Box: 'SA103F.18', ct600Group: 'cost-of-sales', isTrading: true, isCapital: false },
+  { key: 'wages', label: 'Wages, salaries and staff costs (box 19)', direction: 'expense', sa103Box: 'SA103F.19', ct600Group: 'staff-costs', isTrading: true, isCapital: false },
+  { key: 'motor', label: 'Motor expenses (box 20)', direction: 'expense', sa103Box: 'SA103F.20', ct600Group: 'admin-expenses', isTrading: true, isCapital: false },
+  { key: 'travel', label: 'Travel and subsistence (box 21)', direction: 'expense', sa103Box: 'SA103F.21', ct600Group: 'admin-expenses', isTrading: true, isCapital: false },
+  { key: 'premises', label: 'Rent, rates, power and insurance (box 22)', direction: 'expense', sa103Box: 'SA103F.22', ct600Group: 'admin-expenses', isTrading: true, isCapital: false },
+  { key: 'repairs', label: 'Repairs and renewals (box 23)', direction: 'expense', sa103Box: 'SA103F.23', ct600Group: 'admin-expenses', isTrading: true, isCapital: false },
+  { key: 'office', label: 'Phone, stationery and office costs (box 24)', direction: 'expense', sa103Box: 'SA103F.24', ct600Group: 'admin-expenses', isTrading: true, isCapital: false },
+  { key: 'advertising', label: 'Advertising and entertainment (box 25)', direction: 'expense', sa103Box: 'SA103F.25', ct600Group: 'admin-expenses', isTrading: true, isCapital: false },
+  { key: 'loan-interest', label: 'Interest on bank and other loans (box 26)', direction: 'expense', sa103Box: 'SA103F.26', ct600Group: 'finance-costs', isTrading: true, isCapital: false },
+  { key: 'bank-charges', label: 'Bank and card charges (box 27)', direction: 'expense', sa103Box: 'SA103F.27', ct600Group: 'finance-costs', isTrading: true, isCapital: false },
+  { key: 'bad-debts', label: 'Irrecoverable debts (box 28)', direction: 'expense', sa103Box: 'SA103F.28', ct600Group: 'admin-expenses', isTrading: true, isCapital: false },
+  { key: 'professional', label: 'Accountancy, legal and professional (box 29)', direction: 'expense', sa103Box: 'SA103F.29', ct600Group: 'admin-expenses', isTrading: true, isCapital: false },
+  { key: 'depreciation', label: 'Depreciation and loss on sale (box 30)', direction: 'expense', sa103Box: 'SA103F.30', ct600Group: 'depreciation', isTrading: true, isCapital: false },
+  { key: 'other-expenses', label: 'Other business expenses (box 31)', direction: 'expense', sa103Box: 'SA103F.31', ct600Group: 'admin-expenses', isTrading: true, isCapital: false },
+  { key: 'capital-equipment', label: 'Equipment and other capital purchases', direction: 'expense', sa103Box: null, ct600Group: 'capital', isTrading: false, isCapital: true },
+  { key: 'drawings', label: 'Drawings or dividends', direction: 'expense', sa103Box: null, ct600Group: 'distributions', isTrading: false, isCapital: false },
+  { key: 'tax-payment', label: 'Corporation or income tax paid', direction: 'expense', sa103Box: null, ct600Group: 'tax', isTrading: false, isCapital: false },
+]
+
+const DIRECTION_GROUPS: { direction: Category['direction']; label: string }[] = [
+  { direction: 'income', label: 'Money in' },
+  { direction: 'expense', label: 'Money out' },
+  { direction: 'both', label: 'Either way' },
+]
+
+/** The filing options that make sense for a category pointing this way. */
+function filingOptionsFor(direction: Category['direction']) {
+  return direction === 'both' ? FILING_OPTIONS : FILING_OPTIONS.filter((option) => option.direction === direction)
+}
+
+/** Which of the options above a category already matches, if any. */
+function filingKeyOf(category: Category): string {
+  const match = FILING_OPTIONS.find(
+    (option) => option.sa103Box === category.sa103_box && option.ct600Group === category.ct600_group,
+  )
+  return match?.key ?? ''
+}
+
+/**
+ * What to print under a category's name.
+ *
+ * A category set up through the API can carry a box this screen has never heard
+ * of - HMRC renumbers, and the column is deliberately free text - so fall back
+ * to saying what is actually on it rather than to silence.
+ */
+function filingLabel(category: Category): string {
+  const key = filingKeyOf(category)
+  if (key) return FILING_OPTIONS.find((option) => option.key === key)!.label
+  if (category.sa103_box) return `Box ${category.sa103_box.replace('SA103F.', '')}`
+  if (category.ct600_group) {
+    return category.ct600_group
+      .split('-')
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ')
+  }
+  return 'Not on the tax return'
 }
 
 const MONTHS = [
@@ -311,9 +420,18 @@ export function BookkeepingSettingsTab() {
   const [bankBusy, setBankBusy] = useState(false)
   const [newBank, setNewBank] = useState<NewBankAccount>(EMPTY_BANK_ACCOUNT)
 
-  // The categories, for the one dropdown that needs them: what sales handed over
-  // by another module get filed under.
-  const [categories, setCategories] = useState<{ id: string; name: string; direction: string }[] | null>(null)
+  // The categories, both for the section that manages them and for the dropdown
+  // above it: what sales handed over by another module get filed under. Loaded
+  // with the put-away ones included, so they can be brought back.
+  const [categories, setCategories] = useState<Category[] | null>(null)
+  const [categoryError, setCategoryError] = useState<string | null>(null)
+  const [categoryNotice, setCategoryNotice] = useState<string | null>(null)
+  const [categoryBusy, setCategoryBusy] = useState(false)
+  const [newCategory, setNewCategory] = useState<NewCategory>(EMPTY_CATEGORY)
+  const [editingCategory, setEditingCategory] = useState<
+    { id: string; name: string; filing: string; isSystem: boolean } | null
+  >(null)
+  const [showArchivedCategories, setShowArchivedCategories] = useState(false)
 
   const [ledgerAccounts, setLedgerAccounts] = useState<LedgerAccount[] | null>(null)
   const [ledgerError, setLedgerError] = useState<string | null>(null)
@@ -381,6 +499,23 @@ export function BookkeepingSettingsTab() {
     }
   }, [])
 
+  const loadCategories = useCallback(async () => {
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/categories?archived=1')
+      const payload = (await response.json().catch(() => ({}))) as {
+        categories?: Category[]
+        error?: string
+      }
+      if (!response.ok) {
+        setCategoryError(payload.error ?? 'The categories could not be loaded.')
+        return
+      }
+      setCategories(payload.categories ?? [])
+    } catch {
+      setCategoryError('The categories could not be loaded. Check the connection and reload the page.')
+    }
+  }, [])
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- delegating to an async helper; every setState is after an await
     load()
@@ -397,14 +532,9 @@ export function BookkeepingSettingsTab() {
   }, [loadLedgerAccounts])
 
   useEffect(() => {
-    fetch('/api/m/uk-bookkeeping/admin/categories')
-      .then(async (response) => {
-        if (!response.ok) return
-        const payload = (await response.json()) as { categories?: { id: string; name: string; direction: string }[] }
-        setCategories(payload.categories ?? [])
-      })
-      .catch(() => {})
-  }, [])
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- delegating to an async helper; every setState is after an await
+    loadCategories()
+  }, [loadCategories])
 
   if (error && !data) return <ErrorNotice message={error} />
   if (!data || !settings) return <p>Loading…</p>
@@ -725,6 +855,197 @@ export function BookkeepingSettingsTab() {
       setLedgerError('That did not reach the server. Check the connection and try again.')
     } finally {
       setLedgerBusy(false)
+    }
+  }
+
+  async function patchCategory(id: string, body: Record<string, unknown>): Promise<string | null> {
+    const response = await fetch(`/api/m/uk-bookkeeping/admin/categories/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const payload = (await response.json().catch(() => ({}))) as { error?: string }
+    return response.ok ? null : (payload.error ?? 'That category could not be changed.')
+  }
+
+  async function addCategory() {
+    setCategoryError(null)
+    setCategoryNotice(null)
+    const name = newCategory.name.trim()
+    if (!name) {
+      setCategoryError('A category needs a name.')
+      return
+    }
+    const filing = FILING_OPTIONS.find((option) => option.key === newCategory.filing)
+    if (!filing) {
+      setCategoryError('Say where it belongs on the accounts.')
+      return
+    }
+    setCategoryBusy(true)
+    try {
+      // Past the end of the list, rather than the server's default of 1000: two
+      // categories sharing a position cannot be moved past one another.
+      const last = (categories ?? []).reduce((highest, category) => Math.max(highest, category.position), 0)
+      const response = await fetch('/api/m/uk-bookkeeping/admin/categories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: name,
+          name,
+          direction: newCategory.direction,
+          sa103Box: filing.sa103Box,
+          ct600Group: filing.ct600Group,
+          isTrading: filing.isTrading,
+          isCapital: filing.isCapital,
+          position: last + 10,
+        }),
+      })
+      const payload = (await response.json().catch(() => ({}))) as { error?: string }
+      if (!response.ok) {
+        setCategoryError(payload.error ?? 'That category could not be added.')
+        return
+      }
+      setNewCategory({ ...EMPTY_CATEGORY, direction: newCategory.direction, filing: newCategory.filing })
+      setCategoryNotice(`${name} has been added, at the bottom of its list. Move it up if it belongs higher.`)
+      await loadCategories()
+    } catch {
+      setCategoryError('The save did not reach the server. Check the connection and try again.')
+    } finally {
+      setCategoryBusy(false)
+    }
+  }
+
+  async function saveCategoryEdit() {
+    if (!editingCategory) return
+    setCategoryError(null)
+    setCategoryNotice(null)
+    const name = editingCategory.name.trim()
+    if (!name) {
+      setCategoryError('A category needs a name.')
+      return
+    }
+    // A built-in category keeps the box it was seeded with. The name is yours to
+    // change; where it files is not, because the self-assessment totals are keyed
+    // straight off sa103_box and a wrong box makes a wrong return months later
+    // rather than an error now. The way round it is to put the built-in away and
+    // add your own filed where you want it, which leaves every entry already
+    // recorded pointing at a category that still says what it always said.
+    const filing = editingCategory.isSystem
+      ? undefined
+      : FILING_OPTIONS.find((option) => option.key === editingCategory.filing)
+    setCategoryBusy(true)
+    try {
+      const failure = await patchCategory(editingCategory.id, {
+        name,
+        ...(filing
+          ? {
+              sa103Box: filing.sa103Box,
+              ct600Group: filing.ct600Group,
+              isTrading: filing.isTrading,
+              isCapital: filing.isCapital,
+            }
+          : {}),
+      })
+      if (failure) {
+        setCategoryError(failure)
+        return
+      }
+      setEditingCategory(null)
+      await loadCategories()
+    } catch {
+      setCategoryError('The save did not reach the server. Check the connection and try again.')
+    } finally {
+      setCategoryBusy(false)
+    }
+  }
+
+  /**
+   * Swap a category with the one above or below it.
+   *
+   * Where the two share a position - which they can, on books where categories
+   * were added before this screen existed - stepping past the neighbour rather
+   * than swapping with it is what breaks the tie.
+   */
+  async function moveCategory(category: Category, delta: -1 | 1, siblings: Category[]) {
+    const index = siblings.findIndex((sibling) => sibling.id === category.id)
+    const neighbour = siblings[index + delta]
+    if (!neighbour) return
+    setCategoryError(null)
+    setCategoryNotice(null)
+    setCategoryBusy(true)
+    try {
+      const target = neighbour.position === category.position ? neighbour.position + delta : neighbour.position
+      const failure =
+        (await patchCategory(category.id, { position: target })) ??
+        (await patchCategory(neighbour.id, { position: category.position }))
+      if (failure) {
+        setCategoryError(failure)
+        return
+      }
+      await loadCategories()
+    } catch {
+      setCategoryError('That did not reach the server. Check the connection and try again.')
+    } finally {
+      setCategoryBusy(false)
+    }
+  }
+
+  async function setCategoryArchived(category: Category, archived: boolean) {
+    setCategoryError(null)
+    setCategoryNotice(null)
+    setCategoryBusy(true)
+    try {
+      const failure = await patchCategory(category.id, { archived })
+      if (failure) {
+        setCategoryError(failure)
+        return
+      }
+      setCategoryNotice(
+        archived
+          ? `${category.name} has been put away. Entries already filed under it still show it.`
+          : `${category.name} is back on the list.`,
+      )
+      await loadCategories()
+    } catch {
+      setCategoryError('That did not reach the server. Check the connection and try again.')
+    } finally {
+      setCategoryBusy(false)
+    }
+  }
+
+  async function removeCategory(category: Category) {
+    if (
+      !window.confirm(
+        `Remove ${category.name}? If any entry has ever been filed under it, it is put away instead.`,
+      )
+    ) {
+      return
+    }
+    setCategoryError(null)
+    setCategoryNotice(null)
+    setCategoryBusy(true)
+    try {
+      const response = await fetch(`/api/m/uk-bookkeeping/admin/categories/${category.id}`, {
+        method: 'DELETE',
+      })
+      const payload = (await response.json().catch(() => ({}))) as {
+        outcome?: 'deleted' | 'archived'
+        error?: string
+      }
+      if (!response.ok) {
+        setCategoryError(payload.error ?? 'That category could not be removed.')
+        return
+      }
+      setCategoryNotice(
+        payload.outcome === 'archived'
+          ? `${category.name} has been put away rather than removed - something is filed under it, and a return from years ago can only explain itself if the categories it points at are still there.`
+          : `${category.name} has been removed.`,
+      )
+      await loadCategories()
+    } catch {
+      setCategoryError('That did not reach the server. Check the connection and try again.')
+    } finally {
+      setCategoryBusy(false)
     }
   }
 
@@ -1166,7 +1487,7 @@ export function BookkeepingSettingsTab() {
               >
                 <option value="">Sales and turnover (the usual one)</option>
                 {(categories ?? [])
-                  .filter((category) => category.direction !== 'expense')
+                  .filter((category) => category.direction !== 'expense' && !category.archived)
                   .map((category) => (
                     <option key={category.id} value={category.id}>{category.name}</option>
                   ))}
@@ -1234,11 +1555,257 @@ export function BookkeepingSettingsTab() {
       {saved && <span style={{ marginLeft: '0.75rem', color: 'var(--color-success, var(--color-text))', fontSize: 'var(--text-sm)' }}>Saved</span>}
 
       {/*
-        Both lists below sit under the save button on purpose: everything above it
+        The lists below sit under the save button on purpose: everything above it
         is settings you save in one go, and these save themselves the moment you
         press a button. Mixing the two in one column is how somebody ends up
         adding an account, pressing Save, and wondering which of the two happened.
       */}
+      <div className="card" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
+        <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Categories</h3>
+        <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
+          These are the choices in the &ldquo;What was it for&rdquo; box on every entry, and they
+          arrive ready made. Add one when a cost is big enough, or regular enough, that you would
+          rather see it on its own line than lumped in with everything else. Where you file it
+          decides which box of the tax return it counts towards - so a new category changes what you
+          can see, not what you owe. Changes here take effect straight away.
+        </p>
+        <ErrorNotice message={categoryError} />
+        {categoryNotice && (
+          <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+            {categoryNotice}
+          </p>
+        )}
+
+        {!categories ? (
+          <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>Loading…</p>
+        ) : (
+          DIRECTION_GROUPS.map((group) => {
+            const rows = categories.filter(
+              (category) =>
+                category.direction === group.direction &&
+                (showArchivedCategories || !category.archived),
+            )
+            if (rows.length === 0) return null
+            // Only the ones on the list can be moved, and only past each other -
+            // a put-away category has no place in the order to be moved within.
+            const movable = rows.filter((category) => !category.archived)
+            return (
+              <div key={group.direction}>
+                <h4 style={{ margin: '1rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+                  {group.label}
+                </h4>
+                {rows.map((category) =>
+                  editingCategory?.id === category.id ? (
+                    <div key={category.id} style={{ ...row, flexWrap: 'wrap' }}>
+                      <input
+                        aria-label={`What ${category.name} is called`}
+                        style={input}
+                        value={editingCategory.name}
+                        onChange={(e) => setEditingCategory({ ...editingCategory, name: e.target.value })}
+                      />
+                      {category.is_system ? (
+                        <span style={{ maxWidth: 280 }}>
+                          {filingLabel(category)}
+                          <span style={quiet}>
+                            Built in, so where it files stays put. To count something somewhere
+                            else, put this one away and add your own.
+                          </span>
+                        </span>
+                      ) : (
+                        <select
+                          aria-label={`Where ${category.name} belongs on the accounts`}
+                          style={input}
+                          value={editingCategory.filing}
+                          onChange={(e) => setEditingCategory({ ...editingCategory, filing: e.target.value })}
+                        >
+                          <option value="">Leave it filed where it is</option>
+                          {filingOptionsFor(category.direction).map((option) => (
+                            <option key={option.key} value={option.key}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      <span style={{ display: 'flex', gap: '0.375rem', flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-primary"
+                          onClick={saveCategoryEdit}
+                          disabled={categoryBusy}
+                        >
+                          {categoryBusy ? 'Saving…' : 'Save'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => setEditingCategory(null)}
+                          disabled={categoryBusy}
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    </div>
+                  ) : (
+                    <div key={category.id} style={row}>
+                      <span>
+                        {category.name}
+                        <span style={quiet}>
+                          {filingLabel(category)}
+                          {category.is_system ? ' · built in' : ''}
+                          {category.archived ? ' · put away' : ''}
+                        </span>
+                      </span>
+                      <span style={{ display: 'flex', gap: '0.375rem', flexWrap: 'wrap' }}>
+                        {category.archived ? (
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            onClick={() => setCategoryArchived(category, false)}
+                            disabled={categoryBusy}
+                          >
+                            Bring back
+                          </button>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              aria-label={`Move ${category.name} up`}
+                              onClick={() => moveCategory(category, -1, movable)}
+                              disabled={categoryBusy || movable[0]?.id === category.id}
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              aria-label={`Move ${category.name} down`}
+                              onClick={() => moveCategory(category, 1, movable)}
+                              disabled={categoryBusy || movable[movable.length - 1]?.id === category.id}
+                            >
+                              ↓
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() =>
+                                setEditingCategory({
+                                  id: category.id,
+                                  name: category.name,
+                                  filing: filingKeyOf(category),
+                                  isSystem: category.is_system,
+                                })
+                              }
+                              disabled={categoryBusy}
+                            >
+                              Change
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() => setCategoryArchived(category, true)}
+                              disabled={categoryBusy}
+                            >
+                              Put away
+                            </button>
+                            {!category.is_system && (
+                              <button
+                                type="button"
+                                className="btn btn-sm"
+                                onClick={() => removeCategory(category)}
+                                disabled={categoryBusy}
+                              >
+                                Remove
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </span>
+                    </div>
+                  ),
+                )}
+              </div>
+            )
+          })
+        )}
+
+        <h4 style={{ margin: '1rem 0 0.25rem', fontSize: 'var(--text-sm)' }}>Add a category</h4>
+        <div style={row}>
+          <label htmlFor="bk-new-category-name">
+            Name
+            <span style={quiet}>Required. What you want to see in the list when you record something.</span>
+          </label>
+          <input
+            id="bk-new-category-name"
+            style={input}
+            value={newCategory.name}
+            onChange={(e) => setNewCategory({ ...newCategory, name: e.target.value })}
+          />
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-category-direction">Money in or money out</label>
+          <select
+            id="bk-new-category-direction"
+            style={input}
+            value={newCategory.direction}
+            onChange={(e) => {
+              // Keep the filing choice if it still applies, rather than leaving a
+              // box selected that the new direction has no option for.
+              const direction = e.target.value as Category['direction']
+              const options = filingOptionsFor(direction)
+              const filing = options.some((option) => option.key === newCategory.filing)
+                ? newCategory.filing
+                : (options[0]?.key ?? '')
+              setNewCategory({ ...newCategory, direction, filing })
+            }}
+          >
+            {DIRECTION_GROUPS.map((group) => (
+              <option key={group.direction} value={group.direction}>
+                {group.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-category-filing">
+            Where it belongs on the accounts
+            <span style={quiet}>
+              Which box of the tax return it counts towards. Pick the one it would have gone in if
+              you had not given it a category of its own.
+            </span>
+          </label>
+          <select
+            id="bk-new-category-filing"
+            style={input}
+            value={newCategory.filing}
+            onChange={(e) => setNewCategory({ ...newCategory, filing: e.target.value })}
+          >
+            {filingOptionsFor(newCategory.direction).map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            onClick={addCategory}
+            disabled={categoryBusy}
+          >
+            {categoryBusy ? 'Adding…' : 'Add category'}
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setShowArchivedCategories(!showArchivedCategories)}
+          >
+            {showArchivedCategories ? 'Hide the put-away ones' : 'Show the put-away ones'}
+          </button>
+        </div>
+      </div>
+
       <div className="card" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
         <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Bank accounts</h3>
         <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>

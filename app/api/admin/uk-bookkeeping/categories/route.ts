@@ -20,6 +20,11 @@ const Body = z.object({
   ct600Group: z.string().nullable().optional(),
   isTrading: z.boolean().optional(),
   isCapital: z.boolean().optional(),
+  // Where it sits in the list, which is the order every category dropdown on
+  // the site is drawn in. Left out, it lands at the bottom on 1000 - and two
+  // added that way share a position, which makes moving one of them up a
+  // no-op. The settings screen sends one past the end instead.
+  position: z.number().int().optional(),
 })
 
 export async function POST(request: NextRequest) {
