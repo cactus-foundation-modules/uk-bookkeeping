@@ -84,6 +84,43 @@ export type ExternalSaleVoidPayload = {
   description?: string
 }
 
+/** What a publisher hands over when it credits part or all of one back.
+ *
+ *  Deliberately not a void with a smaller number on it. A void says the sale
+ *  never stood; this says it stood and some of it has since been handed back -
+ *  a different entry, and a different document in the customer's file. It
+ *  carries its own number because a credit note is a document in its own right,
+ *  and it names the invoice it credits because that is how the two are tied
+ *  together.
+ *
+ *  Every figure is a POSITIVE magnitude: what was credited, not a negative sale.
+ *  The negating happens here, exactly as it already does for a void. */
+export type ExternalSaleCreditPayload = {
+  source: string
+  creditNoteId?: string
+  creditNoteNumber: string
+  invoiceId?: string | null
+  /** The invoice being credited - what the sale was filed under. */
+  invoiceNumber: string
+  orderId?: string
+  orderNumber?: string
+  issuedAt?: string
+  /** yyyy-mm-dd. The tax point of the CREDIT, not of the sale. */
+  taxPointDate: string
+  currency?: string
+  taxMode?: 'INCLUSIVE' | 'EXCLUSIVE'
+  customer?: { name?: string; company?: string; email?: string }
+  totals?: { net?: string; tax?: string; gross?: string }
+  /** Net, tax and gross at each rate, all positive. */
+  taxBreakdown: { ratePercent: string; net: string; tax: string; gross: string }[]
+  /** Whether this credits the whole invoice or part of it. */
+  full?: boolean
+  reason?: string
+  description?: string
+  documentUrl?: string | null
+  document?: ExternalSaleDocument
+}
+
 export type ExternalSaleOutcome = { ok: boolean; message: string }
 
 /**
@@ -507,4 +544,207 @@ export async function reverseExternalSale(payload: ExternalSaleVoidPayload): Pro
 /** What the shop's `shop.invoice-voided` extension point calls. */
 export async function ukBookkeepingShopSaleVoider(payload: ExternalSaleVoidPayload): Promise<ExternalSaleOutcome> {
   return reverseExternalSale(payload)
+}
+
+// ---------------------------------------------------------------------------
+// Crediting part of one back
+// ---------------------------------------------------------------------------
+//
+// The commonest of the three by a distance, and the one whose absence cost the
+// most. A refund is not a void: the sale stood, most of it still stands, and
+// nothing about it was wrong. What has changed is that some of the money has
+// gone back, so that part is no longer turnover and the VAT inside it is no
+// longer owed to HMRC. Without this, a shop that refunds hands over tax on money
+// it gave to a customer, every quarter, and no screen anywhere says so.
+//
+// Always a reversing entry, never a deletion - which is the one place this
+// differs from a void. A voided invoice sitting in an open period with nothing
+// against it may honestly be removed, because it never happened. A credit note
+// always happened: there is a document with a number on it in a customer's
+// hands, and the sale it credits is still a real sale. Deleting either side of
+// that would leave the books disagreeing with the paperwork.
+
+/** The entry a credit note has already made, if it has made one. Namespaced so
+ *  it can never collide with the invoice's own ref on a shop whose credit note
+ *  and invoice prefixes happen to be the same. */
+function creditRef(creditNoteNumber: string): string {
+  return `credit:${creditNoteNumber}`
+}
+
+/**
+ * The publisher's own rate rows, negated into ledger lines.
+ *
+ * Its rates and its figures, not a scaling of the original sale's: a part refund
+ * of a mixed-rate basket is not a fixed proportion of anything, and only the
+ * publisher knows which rates the money actually came off. Handing back the
+ * zero-rated half of a basket and the standard-rated half are the same money and
+ * completely different VAT.
+ *
+ * Pure, so the rule can be read and tested without a database.
+ */
+export function creditLines(
+  taxBreakdown: { ratePercent: string; net: string; tax: string; gross: string }[],
+  categoryId: string,
+  description: string,
+): LineInput[] {
+  const negate = (value: string): string => {
+    const amount = Number(value)
+    // -0.00 is a real thing in JavaScript and reads as nonsense on a page.
+    const flipped = Number.isFinite(amount) ? -amount : 0
+    return (flipped === 0 ? 0 : flipped).toFixed(2)
+  }
+  const lines: LineInput[] = []
+  for (const row of taxBreakdown) {
+    const net = decimal(row.net)
+    const vat = decimal(row.tax)
+    const gross = decimal(row.gross)
+    // A rate that contributed nothing is not a line. It would pass validation
+    // and then sit in the books saying nothing.
+    if (Number(net) === 0 && Number(vat) === 0 && Number(gross) === 0) continue
+    const percent = Number(row.ratePercent) || 0
+    lines.push({
+      categoryId,
+      description: `${description}${percent > 0 ? ` (${row.ratePercent}%)` : ''}`,
+      vatTreatment: 'domestic',
+      vatRateCode: rateCodeFor(percent),
+      vatRatePercent: percent.toFixed(2),
+      netAmount: negate(net),
+      vatAmount: negate(vat),
+      grossAmount: negate(gross),
+    })
+  }
+  return lines
+}
+
+/**
+ * Records one credit note against a sale already in the books, or explains in a
+ * sentence why it did not.
+ *
+ * Never throws. It runs inside the publisher's own refund path - money has
+ * already moved at a payment provider by the time this is called - and there is
+ * no bookkeeping problem that justifies failing that.
+ *
+ * Idempotent on `source` + `source_ref`. The shop's "send it to the books
+ * again" button lands here, and a credit recorded twice is a wrong VAT return in
+ * the other direction.
+ */
+export async function recordExternalCredit(payload: ExternalSaleCreditPayload): Promise<ExternalSaleOutcome> {
+  try {
+    const creditNumber = payload.creditNoteNumber?.trim()
+    if (!creditNumber) return { ok: false, message: 'The credit arrived with no credit note number, so it cannot be filed.' }
+    const invoiceRef = payload.invoiceNumber?.trim()
+    if (!invoiceRef) {
+      return { ok: false, message: 'The credit does not say which invoice it credits, so nothing could be matched to it.' }
+    }
+    const source = payload.source?.trim() || 'external'
+    const ref = creditRef(creditNumber)
+
+    const settings = await getSettings()
+    if (!settings.external_sales_enabled) {
+      return { ok: true, message: 'Recording sales in the books automatically is switched off in Bookkeeping settings.' }
+    }
+
+    const already = await existingEntry(source, ref)
+    if (already) {
+      // The re-send button lands here. Nothing is recorded twice, but a document
+      // that never made it the first time gets another go.
+      const existingTx = await getTransaction(already)
+      const filed = existingTx ? await fileDocument(already, existingTx.tax_point_date, payload.document) : ''
+      return { ok: true, message: `Already in the books - nothing recorded twice.${filed}` }
+    }
+
+    // The sale itself has to be here, because a credit is a correction and a
+    // correction has to name what it corrects. A credit filed against nothing
+    // would push turnover below what was actually sold, which is a worse fault
+    // than the one being fixed - so it is refused in words the owner can act on.
+    const originalId = await existingEntry(source, invoiceRef)
+    if (!originalId) {
+      return {
+        ok: false,
+        message: `Invoice ${invoiceRef} is not in the books, so there is nothing to credit. Send that invoice to the books first, then try this again.`,
+      }
+    }
+    const original = await getTransaction(originalId)
+    if (!original) {
+      return { ok: false, message: `Invoice ${invoiceRef} is not in the books, so there is nothing to credit.` }
+    }
+
+    // The publisher's figures, negated. Its rates, its categories: a credit note
+    // is part of the sale in reverse, not a fresh judgement about what the sale
+    // was. Taken from the payload rather than by scaling the original's lines,
+    // because a part refund of a mixed-rate basket is not a fixed proportion of
+    // anything - the publisher is the only thing that knows which rates the money
+    // came off.
+    const category = settings.external_sales_category_id
+      ? await getCategory(settings.external_sales_category_id)
+      : await getCategoryByCode('sales')
+    if (!category) {
+      return { ok: false, message: 'No sales category to file this under. Pick one in Bookkeeping settings.' }
+    }
+
+    const lines = creditLines(payload.taxBreakdown ?? [], category.id, payload.description ?? `Credit note ${creditNumber}`)
+    if (lines.length === 0) {
+      return { ok: true, message: 'Nothing to record - the credit note came to zero.' }
+    }
+
+    const reason =
+      `Credit note ${creditNumber} against invoice ${invoiceRef}` +
+      (payload.reason?.trim() ? `: ${payload.reason.trim()}` : '')
+
+    const input = {
+      entryType: 'adjustment' as const,
+      direction: original.direction,
+      // The credit's own tax point - the day the money went back. Never the
+      // sale's: dating it back into the quarter the sale was in would reopen a
+      // return that has very probably been filed, and a credit belongs in the
+      // period it was given in anyway.
+      taxPointDate: payload.taxPointDate || today(),
+      settledDate: payload.taxPointDate || today(),
+      counterparty: original.counterparty,
+      description: payload.description ?? `Credit note ${creditNumber}`,
+      reference: creditNumber,
+      status: 'posted' as const,
+      source,
+      sourceRef: ref,
+      correctsTransactionId: originalId,
+      correctionReason: reason,
+      lines,
+    }
+
+    const gross = lines.reduce((sum, line) => sum + Math.abs(Number(line.grossAmount)), 0)
+
+    try {
+      const created = await createTransaction(input, null)
+      const filed = await fileDocument(created.id, created.tax_point_date, payload.document)
+      return {
+        ok: true,
+        message:
+          `Recorded as a credit of ${formatMoney(gross.toFixed(2))} against invoice ${invoiceRef}, with the VAT on it.` + filed,
+      }
+    } catch (error) {
+      // The credit's own period already filed. Rare - it is dated the day the
+      // money went back, which is nearly always the open one - but a draft keeps
+      // the record rather than losing it, and puts the judgement call with the
+      // person who files the returns.
+      if (error instanceof BackdatedIntoClosedPeriodError) {
+        const draft = await createTransaction({ ...input, status: 'draft' }, null)
+        const filed = await fileDocument(draft.id, draft.tax_point_date, payload.document)
+        return {
+          ok: false,
+          message:
+            'That VAT period is already filed, so this was saved as a draft entry for you to correct in the open period.' + filed,
+        }
+      }
+      throw error
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error('[uk-bookkeeping] could not record an external credit:', message)
+    return { ok: false, message }
+  }
+}
+
+/** What the shop's `shop.invoice-credited` extension point calls. */
+export async function ukBookkeepingShopSaleCreditor(payload: ExternalSaleCreditPayload): Promise<ExternalSaleOutcome> {
+  return recordExternalCredit(payload)
 }

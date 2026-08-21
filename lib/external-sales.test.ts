@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Prisma } from '@prisma/client'
-import { planSaleRemoval, reversalLines } from '@/modules/uk-bookkeeping/lib/external-sales'
+import { creditLines, planSaleRemoval, reversalLines } from '@/modules/uk-bookkeeping/lib/external-sales'
 import type { BkTransactionLineRow } from '@/modules/uk-bookkeeping/lib/types'
 
 // A voided invoice that the books never hear about leaves VAT standing on a sale
@@ -87,5 +87,67 @@ describe('reversalLines', () => {
   it('reverses every line of a mixed-rate sale', () => {
     const reduced = line({ id: 'ln_2', vat_rate_code: 'reduced', vat_rate_percent: new Prisma.Decimal('5.00'), net_amount: new Prisma.Decimal('100.00'), vat_amount: new Prisma.Decimal('5.00'), gross_amount: new Prisma.Decimal('105.00') })
     expect(reversalLines([line(), reduced]).map((row) => row.grossAmount)).toEqual(['-3673.20', '-105.00'])
+  })
+})
+
+// A refund the books never hear about is the commoner fault and the dearer one:
+// the shop goes on paying HMRC VAT on money it handed back, quarter after
+// quarter, with nothing on any screen to say so. What arrives is the publisher's
+// own rate rows, positive, and the whole job here is turning them into ledger
+// lines the right way up.
+describe('creditLines', () => {
+  it('negates the money the publisher handed over', () => {
+    const lines = creditLines([{ ratePercent: '20', net: '218.00', tax: '43.60', gross: '261.60' }], 'cat-1', 'Credit note CN-000001')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]!.netAmount).toBe('-218.00')
+    expect(lines[0]!.vatAmount).toBe('-43.60')
+    expect(lines[0]!.grossAmount).toBe('-261.60')
+    expect(lines[0]!.categoryId).toBe('cat-1')
+    expect(lines[0]!.vatRateCode).toBe('standard')
+    expect(lines[0]!.description).toBe('Credit note CN-000001 (20%)')
+  })
+
+  it('keeps gross equal to net plus VAT, which the CHECK constraint insists on', () => {
+    const lines = creditLines([{ ratePercent: '20', net: '218.00', tax: '43.60', gross: '261.60' }], 'cat-1', 'x')
+    const line = lines[0]!
+    expect(Number(line.grossAmount)).toBeCloseTo(Number(line.netAmount) + Number(line.vatAmount), 2)
+  })
+
+  it('does not write minus zero on a zero-rated line', () => {
+    const lines = creditLines([{ ratePercent: '0', net: '100.00', tax: '0.00', gross: '100.00' }], 'cat-1', 'x')
+    expect(lines[0]!.vatAmount).toBe('0.00')
+    expect(lines[0]!.vatRateCode).toBe('zero')
+    // No rate in the description: "(0%)" beside a zero-rated line says nothing.
+    expect(lines[0]!.description).toBe('x')
+  })
+
+  it('credits each rate of a mixed basket at its own rate', () => {
+    // The part that cannot be got by scaling the original sale: handing back the
+    // zero-rated half and the standard-rated half are the same money and
+    // completely different VAT.
+    const lines = creditLines(
+      [
+        { ratePercent: '20', net: '100.00', tax: '20.00', gross: '120.00' },
+        { ratePercent: '0', net: '50.00', tax: '0.00', gross: '50.00' },
+      ],
+      'cat-1',
+      'x',
+    )
+    expect(lines).toHaveLength(2)
+    expect(lines.map((l) => l.vatRateCode)).toEqual(['standard', 'zero'])
+    expect(lines.reduce((sum, l) => sum + Number(l.grossAmount), 0)).toBeCloseTo(-170, 2)
+    expect(lines.reduce((sum, l) => sum + Number(l.vatAmount), 0)).toBeCloseTo(-20, 2)
+  })
+
+  it('drops a rate that contributed nothing rather than filing an empty line', () => {
+    const lines = creditLines(
+      [
+        { ratePercent: '20', net: '100.00', tax: '20.00', gross: '120.00' },
+        { ratePercent: '5', net: '0.00', tax: '0.00', gross: '0.00' },
+      ],
+      'cat-1',
+      'x',
+    )
+    expect(lines).toHaveLength(1)
   })
 })
