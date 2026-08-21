@@ -5,9 +5,9 @@ import { listBankAccounts } from '@/modules/uk-bookkeeping/lib/bank-accounts'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
 
 // Bank statement import, in two halves. POST reads the file - CSV or PDF - and
-// shows what each line WOULD become, writing nothing. PUT does what the reviewer
-// settled on: keeps the bank's own lines, ties the ones that already have an
-// entry to it, and creates drafts for the rest.
+// shows what is in it, writing nothing. PUT keeps the bank's own lines and stops
+// there: what each line was for is settled afterwards, on the reconciliation
+// screen, where it can be done a few at a time and in bulk.
 
 /**
  * PDFs are read in a Node runtime, not on the edge: the reader inflates the
@@ -106,7 +106,6 @@ export async function PUT(request: NextRequest) {
           meta: body.meta ?? {},
           mapping: body.mapping ?? {},
           lines: body.lines,
-          decisions: body.decisions ?? {},
         },
         gate.user,
       ),

@@ -4,6 +4,7 @@ import { listBankTransactions } from '@/modules/uk-bookkeeping/lib/bank-transact
 import { suggestMatchesForLines, summariseReconciliation } from '@/modules/uk-bookkeeping/lib/reconciliation'
 import { formatMoney } from '@/modules/uk-bookkeeping/lib/money'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
+import { suggestCategoriesForCounterparties } from '@/modules/uk-bookkeeping/lib/transactions'
 import type { BankTransactionStatus } from '@/modules/uk-bookkeeping/lib/types'
 
 // The reconciliation screen's one read: the statement lines, what is matched to
@@ -47,9 +48,21 @@ export async function GET(request: NextRequest) {
       byId[row.id] = suggestions.get(index) ?? []
     })
 
+    // What each of these counterparties was filed under last time, so the screen
+    // opens with a category already picked on most lines. One query for the page.
+    const nameOf = (row: (typeof open)[number]): string =>
+      row.counterparty.trim() || row.details.trim()
+    const guesses = await suggestCategoriesForCounterparties(open.map(nameOf))
+    const categoryGuesses: Record<string, string> = {}
+    for (const row of open) {
+      const guess = guesses.get(nameOf(row).toLowerCase())
+      if (guess) categoryGuesses[row.id] = guess
+    }
+
     return NextResponse.json({
       ...list,
       suggestions: byId,
+      categoryGuesses,
       summary: bankAccountId
         ? await summariseReconciliation(bankAccountId, params.get('from'), params.get('to'))
         : null,

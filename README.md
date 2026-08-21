@@ -71,12 +71,31 @@ computation follows the same rule.
   running balance is checked against what was read, and shown to you, before
   anything is written. A scan or a photograph of a paper statement is refused in
   plain words rather than guessed at.
-- **Reconciliation.** The bank's own lines are kept as the bank wrote them, and
-  each is either tied to the entries that explain it or still open - and it is
-  only ticked off when the match accounts for all of it, to the penny. Lines that
-  are already recorded are offered against the entry they match, with the reason,
-  rather than imported a second time. Nothing new reaches a VAT box until a human
-  has said what it was for.
+  Importing keeps the bank's lines and stops there: you are never asked what two
+  hundred of them were for before a single one is saved, because that is the job
+  nobody finishes, and an import abandoned halfway has kept nothing at all.
+- **Reconciliation.** Where a statement is turned into a set of books. The bank's
+  own lines are kept as the bank wrote them, and each is either tied to the
+  entries that explain it or still open - and it is only ticked off when the match
+  accounts for all of it, to the penny. Anything already recorded is offered
+  against the entry it matches, with the reason it was offered, rather than
+  entered a second time. Anything not recorded yet becomes an entry from the line
+  itself: the date, the name and the amount come off the bank's own line, so the
+  only thing to supply is what it was for. And the same three things work on a
+  selection - search for what the bank prints on your director's loan payments,
+  tick the lot, code them in one go. One line that will not take the coding comes
+  back as a sentence beside its own row and never strands the rest. Nothing
+  reaches a VAT box until a human has said what it was for.
+- **Card payouts, less the fees.** A card processor does not pay you what you
+  invoiced: GoCardless and Square batch a day's takings into one payout, take
+  their cut out of the middle, and net any refunds off as well - so the bank line
+  matches no invoice, and no set of invoices, to the penny. Pick the ones the
+  payout covers and the difference is recorded as the expense it actually is, on
+  the bank and card charges category, exempt from VAT because a merchant fee is.
+  The sums are kept honest by the schema rather than by hope: matches carry a
+  signed amount, so six invoices plus a refund plus the fee add up to exactly what
+  arrived, and a settlement that does not add up is refused outright rather than
+  half applied.
 - **Journals.** Double entry for the things that are not money moving:
   depreciation, accruals, prepayments, corrections, director money in and out.
   Two sides that have to add up, enforced in the database rather than only in the

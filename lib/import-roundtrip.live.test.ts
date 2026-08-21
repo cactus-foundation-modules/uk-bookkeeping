@@ -34,8 +34,9 @@ import {
 //
 // The statement is a CSV rather than a PDF on purpose. Reading a PDF is covered
 // exhaustively by statement-pdf.test.ts and needs no database; everything from
-// the parse onwards - duplicate detection, matching, committing - is one shared
-// path, and a CSV reaches it without a hand-built PDF getting in the way.
+// the parse onwards - duplicate detection, committing, coding the lines up on
+// the reconciliation screen - is one shared path, and a CSV reaches it without a
+// hand-built PDF getting in the way.
 const ENABLED = process.env.RUN_LEDGER_GUARDS === '1' || process.env.RUN_BACKUP_ROUNDTRIP === '1'
 if (ENABLED) {
   try {
@@ -54,6 +55,14 @@ const STATEMENT_CSV = [
   '26/07/2026,ANTHROPIC* CLAUDE SUB - 548 Market Street,,144.59',
 ].join('\n')
 
+// A card processor's payout: two invoices and a refund, netted, less the fee.
+// 120.00 + 95.00 - 10.00 - 3.15 = 201.85, and not one of those figures is a
+// number the ordinary matcher would ever find.
+const PAYOUT_CSV = [
+  'Date,Description,Paid in,Paid out',
+  '31/07/2026,GOCARDLESS PAYOUT REF 88213,201.85,',
+].join('\n')
+
 suite('importing a statement, against a real database', () => {
   let config: VpsConfig
   let role: TestRole
@@ -69,7 +78,13 @@ suite('importing a statement, against a real database', () => {
     createBankAccount: typeof import('./bank-accounts').createBankAccount
     createTransaction: typeof import('./transactions').createTransaction
     listBankTransactions: typeof import('./bank-transactions').listBankTransactions
+    listSettlementCandidates: typeof import('./reconcile-actions').listSettlementCandidates
+    settleBankLine: typeof import('./reconcile-actions').settleBankLine
     getCategoryByCode: typeof import('./categories').getCategoryByCode
+    recordEntriesFromBankLines: typeof import('./reconcile-actions').recordEntriesFromBankLines
+    acceptSuggestedMatches: typeof import('./reconcile-actions').acceptSuggestedMatches
+    setBankLinesIgnored: typeof import('./reconcile-actions').setBankLinesIgnored
+    listTransactions: typeof import('./transactions').listTransactions
   }
   let bankAccountId: string
 
@@ -97,7 +112,13 @@ suite('importing a statement, against a real database', () => {
       createBankAccount: (await import('./bank-accounts')).createBankAccount,
       createTransaction: (await import('./transactions')).createTransaction,
       listBankTransactions: (await import('./bank-transactions')).listBankTransactions,
+      listSettlementCandidates: (await import('./reconcile-actions')).listSettlementCandidates,
+      settleBankLine: (await import('./reconcile-actions')).settleBankLine,
       getCategoryByCode: (await import('./categories')).getCategoryByCode,
+      recordEntriesFromBankLines: (await import('./reconcile-actions')).recordEntriesFromBankLines,
+      acceptSuggestedMatches: (await import('./reconcile-actions')).acceptSuggestedMatches,
+      setBankLinesIgnored: (await import('./reconcile-actions')).setBankLinesIgnored,
+      listTransactions: (await import('./transactions')).listTransactions,
     }
 
     const account = await lib.createBankAccount({ name: 'Test current account', kind: 'bank' })
@@ -129,9 +150,35 @@ suite('importing a statement, against a real database', () => {
     expect(result.lines).toHaveLength(4)
     expect(result.bankAccountId).toBe(bankAccountId)
     expect(result.lines.map((line) => line.amount)).toEqual(['20.00', '-20.00', '-4.68', '-144.59'])
+    expect(result.lines.every((line) => line.duplicateOfId === null)).toBe(true)
   })
 
-  it('offers an entry that is already recorded rather than a second copy of it', async () => {
+  it('brings the lines in without touching the books', async () => {
+    const result = await preview()
+    const committed = await lib.commitStatement(
+      {
+        filename: 'statement.csv',
+        format: 'csv',
+        bankAccountId,
+        meta: result.meta,
+        mapping: result.mapping,
+        lines: result.lines,
+      },
+      null,
+    )
+
+    expect(committed.linesKept).toBe(4)
+    expect(committed.duplicates).toBe(0)
+
+    const saved = await lib.listBankTransactions({ bankAccountId })
+    expect(saved.rows).toHaveLength(4)
+    // Nothing has been explained yet, and nothing was invented on the way in.
+    expect(saved.rows.every((row) => row.status === 'unreconciled')).toBe(true)
+    expect(saved.unreconciledCount).toBe(4)
+    expect((await lib.listTransactions({})).rows).toHaveLength(0)
+  })
+
+  it('ticks off a line against an entry that was already recorded', async () => {
     const category = await lib.getCategoryByCode('office')
     await lib.createTransaction(
       {
@@ -153,53 +200,62 @@ suite('importing a statement, against a real database', () => {
       null,
     )
 
-    const result = await preview()
-    const twilio = result.lines.find((line) => line.counterparty.includes('TWILIO'))!
-    expect(twilio.suggestions.length).toBeGreaterThan(0)
-    expect(twilio.suggestions[0]!.reasons).toContain('the amount is the same')
-    // Same day, same name, same amount: confident enough to tick on its own.
-    expect(twilio.action).toBe('match')
-    expect(twilio.suggestedMatchId).toBe(twilio.suggestions[0]!.transactionId)
+    const saved = await lib.listBankTransactions({ bankAccountId })
+    const twilio = saved.rows.find((row) => row.details.includes('TWILIO'))!
+    const outcome = await lib.acceptSuggestedMatches([twilio.id], null)
+    expect(outcome.done).toBe(1)
+    expect(outcome.failed).toHaveLength(0)
+
+    const after = await lib.listBankTransactions({ bankAccountId })
+    expect(after.rows.find((row) => row.id === twilio.id)!.status).toBe('reconciled')
+    // Matched, not duplicated: still the one entry in the books.
+    expect((await lib.listTransactions({})).rows).toHaveLength(1)
   })
 
-  it('commits what the reviewer settled on, and ties the matched line to its entry', async () => {
-    const result = await preview()
-    const committed = await lib.commitStatement(
-      {
-        filename: 'statement.csv',
-        format: 'csv',
-        bankAccountId,
-        meta: result.meta,
-        mapping: result.mapping,
-        lines: result.lines,
-        decisions: Object.fromEntries(
-          result.lines.map((line) => [
-            String(line.index),
-            { action: line.action, matchTransactionId: line.suggestedMatchId, categoryId: line.categoryId },
-          ]),
-        ),
-      },
+  it('codes a batch of lines to one category in a single go', async () => {
+    const category = await lib.getCategoryByCode('other-expenses')
+    const open = (await lib.listBankTransactions({ bankAccountId, status: 'unreconciled' })).rows
+    // The money-in line cannot take an expense category, and has to say so
+    // without stranding the two that can.
+    expect(open).toHaveLength(3)
+
+    const outcome = await lib.recordEntriesFromBankLines(
+      open.map((row) => row.id),
+      { categoryId: category!.id, vatRateCode: 'standard', status: 'posted' },
       null,
     )
+    expect(outcome.done).toBe(2)
+    expect(outcome.failed).toHaveLength(1)
+    expect(outcome.failed[0]!.error).toContain('money out')
 
-    expect(committed.linesKept).toBe(4)
-    // Three new drafts; the Twilio line was ticked off against the entry that
-    // already existed rather than entered a second time.
-    expect(committed.entriesCreated).toBe(3)
-    expect(committed.matched).toBe(1)
+    const after = await lib.listBankTransactions({ bankAccountId })
+    expect(after.unreconciledCount).toBe(1)
 
-    const saved = await lib.listBankTransactions({ bankAccountId })
-    expect(saved.rows).toHaveLength(4)
-    // Every line is explained: three by the draft made from it, one by the entry
-    // it was matched to. Nothing left unreconciled.
-    expect(saved.rows.every((row) => row.status === 'reconciled')).toBe(true)
-    expect(saved.unreconciledCount).toBe(0)
+    // The VAT was worked back out of the gross rather than added on top of it.
+    const entries = (await lib.listTransactions({})).rows
+    const ovh = entries.find((row) => row.counterparty.includes('OVHcloud'))!
+    expect(ovh.gross_total.toFixed(2)).toBe('4.68')
+    expect(ovh.net_total.toFixed(2)).toBe('3.90')
+    expect(ovh.vat_total.toFixed(2)).toBe('0.78')
+  })
+
+  it('sets the last one aside with a reason', async () => {
+    const open = (await lib.listBankTransactions({ bankAccountId, status: 'unreconciled' })).rows
+    expect(open).toHaveLength(1)
+
+    const outcome = await lib.setBankLinesIgnored([open[0]!.id], true, 'Money the director put in', null)
+    expect(outcome.done).toBe(1)
+
+    const after = await lib.listBankTransactions({ bankAccountId })
+    expect(after.unreconciledCount).toBe(0)
+    expect(after.rows.find((row) => row.id === open[0]!.id)!.ignored_reason).toBe(
+      'Money the director put in',
+    )
   })
 
   it('recognises the same statement on a second import instead of doubling it', async () => {
     const result = await preview()
     expect(result.duplicates).toBe(4)
-    expect(result.lines.every((line) => line.action === 'skip')).toBe(true)
 
     const committed = await lib.commitStatement(
       {
@@ -209,15 +265,180 @@ suite('importing a statement, against a real database', () => {
         meta: result.meta,
         mapping: result.mapping,
         lines: result.lines,
-        decisions: Object.fromEntries(
-          result.lines.map((line) => [String(line.index), { action: line.action }]),
-        ),
       },
       null,
     )
     expect(committed.linesKept).toBe(0)
+    expect(committed.duplicates).toBe(4)
 
     const saved = await lib.listBankTransactions({ bankAccountId })
     expect(saved.rows).toHaveLength(4)
+  })
+  it('settles a card payout against several invoices, less the fee', async () => {
+    const sales = await lib.getCategoryByCode('sales')
+    const expenses = await lib.getCategoryByCode('other-expenses')
+    const charges = await lib.getCategoryByCode('bank-charges')
+
+    const income = (counterparty: string, date: string, gross: string) =>
+      lib.createTransaction(
+        {
+          direction: 'income',
+          taxPointDate: date,
+          counterparty,
+          lines: [
+            {
+              categoryId: sales!.id,
+              vatTreatment: 'domestic',
+              vatRateCode: 'zero',
+              vatRatePercent: '0.00',
+              netAmount: gross,
+              vatAmount: '0.00',
+              grossAmount: gross,
+            },
+          ],
+        },
+        null,
+      )
+
+    await income('Acme Ltd', '2026-07-20', '120.00')
+    await income('Beta Ltd', '2026-07-22', '95.00')
+    // A refund the processor took back out of the same payout. It pulls the
+    // total DOWN, which is the sign the whole thing turns on.
+    await lib.createTransaction(
+      {
+        direction: 'expense',
+        taxPointDate: '2026-07-25',
+        counterparty: 'Refund to Acme Ltd',
+        lines: [
+          {
+            categoryId: expenses!.id,
+            vatTreatment: 'domestic',
+            vatRateCode: 'zero',
+            vatRatePercent: '0.00',
+            netAmount: '10.00',
+            vatAmount: '0.00',
+            grossAmount: '10.00',
+          },
+        ],
+      },
+      null,
+    )
+
+    const payout = await lib.previewStatement(
+      { filename: 'payout.csv', bytes: Buffer.from(PAYOUT_CSV, 'utf8') },
+      { bankAccountId },
+    )
+    await lib.commitStatement(
+      {
+        filename: 'payout.csv',
+        format: 'csv',
+        bankAccountId,
+        meta: payout.meta,
+        mapping: payout.mapping,
+        lines: payout.lines,
+      },
+      null,
+    )
+
+    const line = (await lib.listBankTransactions({ bankAccountId, status: 'unreconciled' })).rows[0]!
+    expect(line.amount.toFixed(2)).toBe('201.85')
+
+    const view = await lib.listSettlementCandidates(line.id)
+    expect(view.remaining).toBe('201.85')
+    const contributions = Object.fromEntries(
+      view.candidates.map((candidate) => [candidate.counterparty, candidate.contribution]),
+    )
+    expect(contributions['Acme Ltd']).toBe('120.00')
+    expect(contributions['Beta Ltd']).toBe('95.00')
+    // Signed the way the bank saw it, not the way the entry was recorded.
+    expect(contributions['Refund to Acme Ltd']).toBe('-10.00')
+
+    const settled = await lib.settleBankLine(
+      line.id,
+      {
+        transactionIds: view.candidates.map((candidate) => candidate.transactionId),
+        differenceCategoryId: charges!.id,
+        differenceVatRateCode: 'exempt',
+      },
+      null,
+    )
+    expect(settled.matched).toBe(3)
+    // Negative: money the processor kept rather than money that arrived.
+    expect(settled.difference).toBe('-3.15')
+    expect(settled.differenceTransactionId).not.toBeNull()
+
+    const after = await lib.listBankTransactions({ bankAccountId, status: 'unreconciled' })
+    expect(after.rows).toHaveLength(0)
+
+    // The fee is a real expense on the right category, not a rounding fudge.
+    const fee = (await lib.listTransactions({ categoryId: charges!.id })).rows
+    expect(fee).toHaveLength(1)
+    expect(fee[0]!.gross_total.toFixed(2)).toBe('3.15')
+    expect(fee[0]!.direction).toBe('expense')
+  })
+
+  it('refuses to settle while the difference has nowhere to go, and changes nothing', async () => {
+    const sales = await lib.getCategoryByCode('sales')
+    const charges = await lib.getCategoryByCode('bank-charges')
+    const gamma = await lib.createTransaction(
+      {
+        direction: 'income',
+        taxPointDate: '2026-07-28',
+        counterparty: 'Gamma Ltd',
+        lines: [
+          {
+            categoryId: sales!.id,
+            vatTreatment: 'domestic',
+            vatRateCode: 'zero',
+            vatRatePercent: '0.00',
+            netAmount: '50.00',
+            vatAmount: '0.00',
+            grossAmount: '50.00',
+          },
+        ],
+      },
+      null,
+    )
+
+    // £50.00 invoiced, £48.50 arrived.
+    const second = await lib.previewStatement(
+      {
+        filename: 'payout-2.csv',
+        bytes: Buffer.from(
+          ['Date,Description,Paid in,Paid out', '01/08/2026,GOCARDLESS PAYOUT REF 88907,48.50,'].join('\n'),
+          'utf8',
+        ),
+      },
+      { bankAccountId },
+    )
+    await lib.commitStatement(
+      {
+        filename: 'payout-2.csv',
+        format: 'csv',
+        bankAccountId,
+        meta: second.meta,
+        mapping: second.mapping,
+        lines: second.lines,
+      },
+      null,
+    )
+    const line = (await lib.listBankTransactions({ bankAccountId, status: 'unreconciled' })).rows[0]!
+
+    await expect(lib.settleBankLine(line.id, { transactionIds: [gamma.id] }, null)).rejects.toThrow(
+      /is unaccounted for/,
+    )
+
+    // Refused outright: the invoice is not half matched and the line has not moved.
+    const untouched = await lib.listBankTransactions({ bankAccountId, status: 'unreconciled' })
+    expect(untouched.rows.map((row) => row.id)).toEqual([line.id])
+
+    // With somewhere for the fee to go, the same settlement goes through.
+    const settled = await lib.settleBankLine(
+      line.id,
+      { transactionIds: [gamma.id], differenceCategoryId: charges!.id, differenceVatRateCode: 'exempt' },
+      null,
+    )
+    expect(settled.difference).toBe('-1.50')
+    expect((await lib.listBankTransactions({ bankAccountId, status: 'unreconciled' })).rows).toHaveLength(0)
   })
 })

@@ -255,6 +255,20 @@ export async function suggestMatches(bankTransactionId: string, limit = 8): Prom
  * changed.
  */
 export async function refreshBankTransactionStatus(tx: TxClient, bankTransactionId: string): Promise<void> {
+  await refreshBankTransactionStatuses(tx, [bankTransactionId])
+}
+
+/**
+ * The same, for a batch, in one statement.
+ *
+ * Coding forty statement lines in one go would otherwise be forty UPDATEs, and
+ * PgBouncer puts four round trips behind each of them.
+ */
+export async function refreshBankTransactionStatuses(
+  tx: TxClient,
+  bankTransactionIds: string[],
+): Promise<void> {
+  if (bankTransactionIds.length === 0) return
   await tx.$executeRaw`
     UPDATE "bk_bank_transactions" b
     SET "status" = CASE
@@ -264,10 +278,13 @@ export async function refreshBankTransactionStatus(tx: TxClient, bankTransaction
         END,
         "updated_at" = NOW()
     FROM (
-      SELECT COALESCE(SUM("amount"), 0) AS matched
-      FROM "bk_reconciliations" WHERE "bank_transaction_id" = ${bankTransactionId}
+      SELECT b2."id", COALESCE(SUM(r."amount"), 0) AS matched
+      FROM "bk_bank_transactions" b2
+      LEFT JOIN "bk_reconciliations" r ON r."bank_transaction_id" = b2."id"
+      WHERE b2."id" = ANY(${bankTransactionIds}::text[])
+      GROUP BY b2."id"
     ) m
-    WHERE b."id" = ${bankTransactionId}
+    WHERE b."id" = m."id"
   `
 }
 
@@ -295,9 +312,16 @@ export async function matchTransaction(input: MatchInput, user: SessionUser | nu
   if (!line) throw new NotFoundError('That statement line')
 
   const [entry] = await prisma.$queryRaw<
-    { id: string; counterparty: string; locked_period_id: string | null; gross: Prisma.Decimal; matched: Prisma.Decimal }[]
+    {
+      id: string
+      counterparty: string
+      direction: 'income' | 'expense'
+      locked_period_id: string | null
+      gross: Prisma.Decimal
+      matched: Prisma.Decimal
+    }[]
   >`
-    SELECT t."id", t."counterparty", t."locked_period_id",
+    SELECT t."id", t."counterparty", t."direction", t."locked_period_id",
            COALESCE(SUM(l."gross_amount"), 0)::numeric AS gross,
            COALESCE((SELECT SUM(ABS(r."amount")) FROM "bk_reconciliations" r
                      WHERE r."transaction_id" = t."id"), 0)::numeric AS matched
@@ -337,7 +361,12 @@ export async function matchTransaction(input: MatchInput, user: SessionUser | nu
     )
   }
 
-  const signed = line.amount.isNegative() ? requested.negated() : requested
+  // Signed by the ENTRY, not by the line. They agree for the ordinary case - an
+  // expense settled by a money-out line - but a refund netted off a money-in
+  // payout is an expense against a positive line, and taking the sign from the
+  // line there would add the refund to what the line explained instead of taking
+  // it off. The browser never gets a say either way.
+  const signed = entry.direction === 'income' ? requested : requested.negated()
 
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`

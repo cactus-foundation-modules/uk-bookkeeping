@@ -10,7 +10,9 @@ import {
   suggestMatches,
   unmatch,
 } from '@/modules/uk-bookkeeping/lib/reconciliation'
+import { settleBankLine } from '@/modules/uk-bookkeeping/lib/reconcile-actions'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
+import { VAT_RATE_CODES, type VatRateCode } from '@/modules/uk-bookkeeping/lib/types'
 
 export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const gate = await requireBookkeepingUser('bookkeeping.access')
@@ -59,6 +61,32 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           gate.user,
         )
         break
+      }
+      case 'settle': {
+        // A payout covering several invoices, less whatever the processor kept.
+        if (
+          !Array.isArray(body.transactionIds) ||
+          body.transactionIds.length === 0 ||
+          !body.transactionIds.every((value: unknown) => typeof value === 'string' && value)
+        ) {
+          return NextResponse.json({ error: 'Choose the entries this line paid for.' }, { status: 400 })
+        }
+        if (body.differenceVatRateCode && !VAT_RATE_CODES.includes(body.differenceVatRateCode)) {
+          return NextResponse.json({ error: 'That VAT rate is not one we recognise.' }, { status: 400 })
+        }
+        const settled = await settleBankLine(
+          id,
+          {
+            transactionIds: body.transactionIds as string[],
+            differenceCategoryId:
+              typeof body.differenceCategoryId === 'string' ? body.differenceCategoryId : null,
+            differenceVatRateCode: (body.differenceVatRateCode as VatRateCode) ?? undefined,
+            leaveForReview: body.leaveForReview === true,
+          },
+          gate.user,
+        )
+        const line = await getBankTransaction(id)
+        return NextResponse.json({ line, matches: await listMatches(id), suggestions: [], settled })
       }
       case 'unmatch': {
         if (typeof body.transactionId !== 'string') {

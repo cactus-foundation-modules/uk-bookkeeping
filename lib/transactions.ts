@@ -590,10 +590,7 @@ export async function listKnownCounterparties(limit = 200): Promise<string[]> {
   return rows.map((r) => r.counterparty)
 }
 
-/**
- * Counterparties this site has dealt with before, most used first. Used by the
- * form's suggestions and by the importer's category guess.
- */
+/** What this counterparty was filed under last time, for one name. */
 export async function suggestCategoryForCounterparty(counterparty: string): Promise<string | null> {
   const rows = await prisma.$queryRaw<{ category_id: string }[]>`
     SELECT l."category_id"
@@ -606,4 +603,34 @@ export async function suggestCategoryForCounterparty(counterparty: string): Prom
     LIMIT 1
   `
   return rows[0]?.category_id ?? null
+}
+
+/**
+ * The same guess for a whole screenful of names, in one query.
+ *
+ * The reconciliation screen pre-picks a category on every statement line it
+ * shows, and asking per name would be a hundred round trips through PgBouncer
+ * for one page. DISTINCT ON takes the most-used category per name in a single
+ * pass instead. Keyed by the lower-cased name, because that is what the counting
+ * groups on.
+ */
+export async function suggestCategoriesForCounterparties(
+  counterparties: string[],
+): Promise<Map<string, string>> {
+  const names = [...new Set(counterparties.map((name) => name.trim().toLowerCase()).filter(Boolean))]
+  if (names.length === 0) return new Map()
+
+  const rows = await prisma.$queryRaw<{ name: string; category_id: string }[]>`
+    SELECT DISTINCT ON (name) name, "category_id"
+    FROM (
+      SELECT lower(t."counterparty") AS name, l."category_id", COUNT(*) AS uses
+      FROM "bk_transactions" t
+      JOIN "bk_transaction_lines" l ON l."transaction_id" = t."id"
+      WHERE lower(t."counterparty") = ANY(${names}::text[])
+        AND t."status" = 'posted'
+      GROUP BY lower(t."counterparty"), l."category_id"
+    ) counted
+    ORDER BY name, uses DESC, "category_id"
+  `
+  return new Map(rows.map((row) => [row.name, row.category_id]))
 }

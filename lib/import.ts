@@ -5,20 +5,12 @@ import { appendAudit } from './audit'
 import { BookkeepingError } from './errors'
 import { parseCsv } from './csv'
 import { formatMoney, isMoneyString, toMoney } from './money'
-import { insertTransactionRows, suggestCategoryForCounterparty } from './transactions'
-import { getCategoryByCode } from './categories'
 import { matchBankAccount, requireBankAccount } from './bank-accounts'
 import {
   findExistingFingerprints,
   insertBankTransactions,
   prepareStatementLines,
 } from './bank-transactions'
-import {
-  confidentMatch,
-  refreshBankTransactionStatus,
-  suggestMatchesForLines,
-  type MatchCandidate,
-} from './reconciliation'
 import { parseStatementPdf } from './statement-pdf'
 import {
   EMPTY_META,
@@ -33,21 +25,21 @@ import type { Direction } from './types'
 
 // Bringing a bank statement in.
 //
-// Three things happen to every line, in this order, and the order is the whole
-// design:
+// Importing keeps the bank's own version of events and stops there. Every line
+// lands in bk_bank_transactions exactly as the bank wrote it, and nothing else
+// in the books moves: no entry is created, nothing is matched, nothing is
+// coded.
 //
-//   1. It is kept, as the bank wrote it, in bk_bank_transactions. That is what
-//      makes reconciliation possible later - "does the bank agree with the
-//      books" is unanswerable once the bank's version has been thrown away.
-//   2. It is offered to whatever entry already explains it. Most lines of most
-//      statements are things already recorded, and importing a second copy of
-//      them is the commonest way a set of books goes wrong.
-//   3. Only what is left becomes a new entry, and only as a DRAFT. A statement
-//      line says money moved; it does not say what for, and guessing that is
-//      what makes a set of books wrong in the other direction.
+// That is deliberate. Saying what each of two hundred lines was for, in one
+// sitting, before any of it is saved, is the bit nobody ever finishes - and an
+// import abandoned halfway has kept nothing at all. Explaining the lines is the
+// reconciliation screen's job, where it can be done a few at a time, in any
+// order, in bulk where the lines are alike, and where the work survives being
+// interrupted.
 //
-// Nothing here ever posts. A draft reaches no VAT box until a human has looked
-// at it and said what it was.
+// What import still does is check its own reading. The statement's own totals
+// are compared against what we read out of it, and a line already held for this
+// account is recognised rather than stored twice.
 
 // ---------------------------------------------------------------------------
 // CSV
@@ -241,7 +233,7 @@ export function parseStatementCsv(
   if (parsed.rows.length > MAX_LINES) {
     throw new BookkeepingError(
       'too_large',
-      `That file has ${parsed.rows.length} rows. Import up to ${MAX_LINES} at a time, so the review stays something a human can actually do.`,
+      `That file has ${parsed.rows.length} rows. Import up to ${MAX_LINES} at a time.`,
     )
   }
 
@@ -347,9 +339,6 @@ export function readStatementFile(
 // Preview
 // ---------------------------------------------------------------------------
 
-/** What we propose to do with one statement line. */
-export type LineAction = 'import' | 'match' | 'skip'
-
 export type PreparedLine = {
   index: number
   date: string
@@ -365,13 +354,6 @@ export type PreparedLine = {
   balance: string | null
   /** An identical line already on this account, if there is one. */
   duplicateOfId: string | null
-  /** Entries that could be what this line is, best first. */
-  suggestions: MatchCandidate[]
-  /** The one we would tick, if any one of them is clearly it. */
-  suggestedMatchId: string | null
-  /** What this counterparty was filed under last time, for the ones we create. */
-  categoryId: string | null
-  action: LineAction
 }
 
 export type StatementPreview = {
@@ -384,7 +366,6 @@ export type StatementPreview = {
   matchedBankAccount: { id: string; name: string } | null
   lines: PreparedLine[]
   duplicates: number
-  matches: number
   warnings: string[]
   /** The statement's own totals against what we read, where it printed them. */
   checks: { label: string; statement: string; read: string; agrees: boolean }[]
@@ -399,7 +380,7 @@ export async function previewStatement(
   if (statement.lines.length > MAX_LINES) {
     throw new BookkeepingError(
       'too_large',
-      `That statement has ${statement.lines.length} lines. Import up to ${MAX_LINES} at a time, so the review stays something a human can actually do.`,
+      `That statement has ${statement.lines.length} lines. Import up to ${MAX_LINES} at a time.`,
     )
   }
 
@@ -415,25 +396,8 @@ export async function previewStatement(
     ? await findExistingFingerprints(bankAccountId, prepared.map((line) => line.fingerprint))
     : new Map<string, string>()
 
-  const suggestions = await suggestMatchesForLines(
-    statement.lines.map((line) => ({
-      date: line.date,
-      amount: line.amount,
-      counterparty: line.counterparty,
-      details: line.details,
-      reference: line.reference,
-    })),
-  )
-
-  const categoryIds = await suggestCategories(statement.lines)
-
   const lines: PreparedLine[] = prepared.map((line, index) => {
     const amount = toMoney(line.amount)
-    const direction: Direction = amount.isPositive() ? 'income' : 'expense'
-    const duplicateOfId = existing.get(line.fingerprint) ?? null
-    const candidates = suggestions.get(index) ?? []
-    const confident = confidentMatch(candidates)
-
     return {
       index,
       date: line.date,
@@ -442,16 +406,10 @@ export async function previewStatement(
       reference: line.reference,
       transactionType: line.transactionType,
       amount: formatMoney(amount),
-      direction,
+      direction: amount.isPositive() ? 'income' : 'expense',
       gross: formatMoney(amount.abs()),
       balance: line.balance,
-      duplicateOfId,
-      suggestions: candidates,
-      suggestedMatchId: confident?.transactionId ?? null,
-      categoryId: categoryIds.get(line.counterparty) ?? categoryIds.get('') ?? null,
-      // Already have it: leave it alone. Something already explains it: match it.
-      // Otherwise it is new, and becomes a draft for review.
-      action: duplicateOfId ? 'skip' : confident ? 'match' : 'import',
+      duplicateOfId: existing.get(line.fingerprint) ?? null,
     }
   })
 
@@ -464,7 +422,6 @@ export async function previewStatement(
     matchedBankAccount: matched ? { id: matched.id, name: matched.name } : null,
     lines,
     duplicates: lines.filter((line) => line.duplicateOfId).length,
-    matches: lines.filter((line) => line.action === 'match').length,
     warnings: statement.warnings,
     checks: buildChecks(statement),
   }
@@ -516,26 +473,6 @@ function buildChecks(statement: ParsedStatement): StatementPreview['checks'] {
   return checks
 }
 
-/** What each counterparty was filed under last time, in as few queries as possible. */
-async function suggestCategories(lines: StatementLine[]): Promise<Map<string, string | null>> {
-  const names = [...new Set(lines.map((line) => line.counterparty))]
-  const suggestions = new Map<string, string | null>()
-  for (const name of names) {
-    suggestions.set(name, await suggestCategoryForCounterparty(name))
-  }
-
-  const fallbackIncome = await getCategoryByCode('sales')
-  const fallbackExpense = await getCategoryByCode('other-expenses')
-  for (const line of lines) {
-    if (suggestions.get(line.counterparty)) continue
-    suggestions.set(
-      line.counterparty,
-      toMoney(line.amount).isPositive() ? (fallbackIncome?.id ?? null) : (fallbackExpense?.id ?? null),
-    )
-  }
-  return suggestions
-}
-
 // ---------------------------------------------------------------------------
 // Commit
 // ---------------------------------------------------------------------------
@@ -548,16 +485,12 @@ export type CommitStatementInput = {
   meta: StatementMeta
   mapping: Record<string, unknown>
   lines: PreparedLine[]
-  /** Per line: what the reviewer settled on. Keyed by the line's index. */
-  decisions: Record<string, { action: LineAction; matchTransactionId?: string | null; categoryId?: string | null }>
 }
 
 export type CommitStatementResult = {
   statementId: string
   linesKept: number
-  entriesCreated: number
-  matched: number
-  skipped: number
+  duplicates: number
 }
 
 /**
@@ -566,42 +499,47 @@ export type CommitStatementResult = {
  * doctored line becomes a sentence naming itself rather than a raw constraint
  * violation from Postgres.
  */
-function checkLine(line: PreparedLine, categoryIds: Set<string>, categoryId: string | null): void {
+function checkLine(line: PreparedLine): void {
   const where = `Line ${line.index + 1}`
-  if (line.direction !== 'income' && line.direction !== 'expense') {
-    throw new BookkeepingError('invalid', `${where}: the direction is not one we recognise.`)
-  }
-  if (!isMoneyString(line.gross) || toMoney(line.gross).isNegative() || toMoney(line.gross).isZero()) {
+  if (!isMoneyString(line.amount) || toMoney(line.amount).isZero()) {
     throw new BookkeepingError('invalid', `${where}: the amount is not one we can record.`)
   }
-  if (toMoney(line.gross).greaterThan(new Prisma.Decimal('99999999.99'))) {
+  if (toMoney(line.amount).abs().greaterThan(new Prisma.Decimal('99999999.99'))) {
     throw new BookkeepingError('invalid', `${where}: the amount is larger than these books can hold.`)
   }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(line.date) || !line.counterparty.trim()) {
-    throw new BookkeepingError('invalid', `${where}: the date or the description has gone missing.`)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(line.date)) {
+    throw new BookkeepingError('invalid', `${where}: the date has gone missing.`)
   }
-  if (categoryId && !categoryIds.has(categoryId)) {
-    throw new BookkeepingError('invalid', `${where}: that category does not exist.`)
+  if (!line.details.trim() && !line.counterparty.trim()) {
+    throw new BookkeepingError('invalid', `${where}: the description has gone missing.`)
   }
 }
 
+/**
+ * Keep the statement, and the bank's own lines from it.
+ *
+ * Nothing else. No entry is created and nothing is matched: a statement line
+ * says money moved, it does not say what for, and the reconciliation screen is
+ * where somebody says so.
+ */
 export async function commitStatement(
   input: CommitStatementInput,
   user: SessionUser | null,
 ): Promise<CommitStatementResult> {
   const account = await requireBankAccount(input.bankAccountId)
-
-  const categories = await prisma.$queryRaw<{ id: string }[]>`SELECT "id" FROM "bk_categories"`
-  const categoryIds = new Set(categories.map((category) => category.id))
-
-  type Planned = {
-    line: PreparedLine
-    action: LineAction
-    categoryId: string | null
-    matchTransactionId: string | null
-    fingerprint: string
+  if (input.lines.length === 0) {
+    throw new BookkeepingError('invalid', 'There was nothing in that statement to bring in.')
   }
+  if (input.lines.length > MAX_LINES) {
+    throw new BookkeepingError(
+      'too_large',
+      `That statement has ${input.lines.length} lines. Import up to ${MAX_LINES} at a time.`,
+    )
+  }
+  input.lines.forEach(checkLine)
 
+  // Fingerprinted here rather than trusted from the browser: the fingerprint is
+  // the duplicate guard, and one supplied by the caller could be made to miss.
   const prepared = prepareStatementLines(
     input.lines.map((line) => ({
       date: line.date,
@@ -614,169 +552,47 @@ export async function commitStatement(
     })),
   )
 
-  const planned: Planned[] = []
-  for (const [index, line] of input.lines.entries()) {
-    const decision = input.decisions[String(line.index)] ?? { action: line.action }
-    if (decision.action === 'skip') continue
-
-    const categoryId = decision.categoryId ?? line.categoryId ?? null
-    if (decision.action === 'import') checkLine(line, categoryIds, categoryId)
-    planned.push({
-      line,
-      action: decision.action,
-      categoryId,
-      matchTransactionId: decision.matchTransactionId ?? line.suggestedMatchId ?? null,
-      fingerprint: prepared[index]!.fingerprint,
-    })
-  }
-
-  // Whatever the reviewer decided, a line already on this account is not stored
-  // twice. The unique index enforces it; this is what keeps the count honest.
   const existing = await findExistingFingerprints(
     account.id,
-    planned.map((item) => item.fingerprint),
+    prepared.map((line) => line.fingerprint),
   )
+  const fresh = prepared.filter((line) => !existing.has(line.fingerprint))
 
   const result = await prisma.$transaction(async (tx) => {
     const [statement] = await tx.$queryRaw<{ id: string }[]>`
       INSERT INTO "bk_bank_statements" (
         "bank_account_id", "filename", "format", "preset", "period_start", "period_end",
         "opening_balance", "closing_balance", "total_paid_in", "total_paid_out",
-        "row_count", "mapping", "created_by_user_id"
+        "row_count", "imported_count", "duplicate_count", "mapping", "created_by_user_id"
       ) VALUES (
         ${account.id}, ${input.filename}, ${input.format}, ${input.preset ?? null},
         ${input.meta.periodStart}::date, ${input.meta.periodEnd}::date,
         ${input.meta.openingBalance}::numeric, ${input.meta.closingBalance}::numeric,
         ${input.meta.totalPaidIn}::numeric, ${input.meta.totalPaidOut}::numeric,
-        ${input.lines.length}, ${JSON.stringify(input.mapping)}::jsonb, ${user?.id ?? null}
+        ${input.lines.length}, ${fresh.length}, ${prepared.length - fresh.length},
+        ${JSON.stringify(input.mapping)}::jsonb, ${user?.id ?? null}
       )
       RETURNING "id"
     `
     const statementId = statement!.id
-
-    const fresh = planned.filter((item) => !existing.has(item.fingerprint))
-    await insertBankTransactions(
-      tx,
-      account.id,
-      statementId,
-      fresh.map((item) => ({
-        date: item.line.date,
-        details: item.line.details,
-        counterparty: item.line.counterparty,
-        reference: item.line.reference,
-        transactionType: item.line.transactionType,
-        amount: item.line.amount,
-        balance: item.line.balance,
-        fingerprint: item.fingerprint,
-      })),
-    )
-
-    // Read the ids back by fingerprint rather than trusting the RETURNING order:
-    // ON CONFLICT DO NOTHING returns only the rows it actually wrote, so the two
-    // lists stop lining up the moment anything is skipped.
-    const saved = await tx.$queryRaw<{ id: string; fingerprint: string; amount: Prisma.Decimal }[]>`
-      SELECT "id", "fingerprint", "amount" FROM "bk_bank_transactions"
-      WHERE "bank_account_id" = ${account.id}
-        AND "fingerprint" = ANY(${planned.map((item) => item.fingerprint)}::text[])
-    `
-    const byFingerprint = new Map(saved.map((row) => [row.fingerprint, row]))
-
-    let entriesCreated = 0
-    let matched = 0
-
-    for (const item of planned) {
-      const bankRow = byFingerprint.get(item.fingerprint)
-      if (!bankRow) continue
-
-      let transactionId = item.matchTransactionId
-
-      if (item.action === 'import') {
-        const gross = toMoney(item.line.gross)
-        transactionId = await insertTransactionRows(
-          tx,
-          {
-            direction: item.line.direction,
-            taxPointDate: item.line.date,
-            settledDate: item.line.date,
-            counterparty: item.line.counterparty,
-            description: item.line.details === item.line.counterparty ? '' : item.line.details,
-            reference: item.line.reference,
-            // Draft, always. Nothing imported is a record until a human says so.
-            status: 'draft',
-            source: 'import',
-            sourceRef: `${statementId}:${item.line.index}`,
-            bankAccountId: account.id,
-            statementId,
-            lines: [
-              {
-                categoryId: item.categoryId!,
-                // Zero rated by default: a bank line does not know what VAT was
-                // on it, and inventing VAT here would be inventing a box 1 figure.
-                vatTreatment: 'domestic',
-                vatRateCode: 'zero',
-                vatRatePercent: '0.00',
-                netAmount: formatMoney(gross),
-                vatAmount: '0.00',
-                grossAmount: formatMoney(gross),
-              },
-            ],
-          },
-          user,
-        )
-        entriesCreated += 1
-      }
-
-      if (!transactionId) continue
-
-      // The entry explains the statement line, so record that it does. An
-      // imported draft is tied to the line it came from for the same reason: it
-      // IS that line, and the reconciliation screen should not ask about it
-      // again.
-      await tx.$executeRaw`
-        INSERT INTO "bk_reconciliations"
-          ("bank_transaction_id", "transaction_id", "amount", "match_method", "created_by_user_id")
-        SELECT ${bankRow.id}, ${transactionId}, ${formatMoney(bankRow.amount)}::numeric,
-               ${item.action === 'import' ? 'import' : 'suggested'}, ${user?.id ?? null}
-        WHERE NOT EXISTS (
-          SELECT 1 FROM "bk_reconciliations"
-          WHERE "bank_transaction_id" = ${bankRow.id} AND "transaction_id" = ${transactionId}
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM "bk_transactions" WHERE "id" = ${transactionId} AND "locked_period_id" IS NOT NULL
-        )
-      `
-      if (item.action === 'match') matched += 1
-      await refreshBankTransactionStatus(tx, bankRow.id)
-    }
-
-    const linesKept = fresh.length
-    await tx.$executeRaw`
-      UPDATE "bk_bank_statements"
-      SET "imported_count" = ${linesKept},
-          "duplicate_count" = ${planned.length - linesKept}
-      WHERE "id" = ${statementId}
-    `
-
-    return { statementId, linesKept, entriesCreated, matched }
+    await insertBankTransactions(tx, account.id, statementId, fresh)
+    return { statementId, linesKept: fresh.length, duplicates: prepared.length - fresh.length }
   })
 
   await appendAudit({
     action: 'statement.imported',
     entityType: 'bank_statement',
     entityId: result.statementId,
-    summary: `${result.linesKept} statement line${result.linesKept === 1 ? '' : 's'} brought in from ${input.filename}, ${result.entriesCreated} new entr${result.entriesCreated === 1 ? 'y' : 'ies'} for review`,
+    summary: `${result.linesKept} statement line${result.linesKept === 1 ? '' : 's'} brought in from ${input.filename}, waiting to be explained`,
     detail: {
       filename: input.filename,
       format: input.format,
       bankAccount: account.name,
       lines: input.lines.length,
-      matched: result.matched,
+      duplicates: result.duplicates,
     },
     user,
   })
 
-  return {
-    ...result,
-    skipped: input.lines.length - result.linesKept,
-  }
+  return result
 }

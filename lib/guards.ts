@@ -63,6 +63,62 @@ export async function assertDatesNotInClosedPeriod(
   await assertNotInClosedYear(taxPoint, settled)
 }
 
+/**
+ * Every closed range in one pair of queries, for checking a batch of dates.
+ *
+ * assertDatesNotInClosedPeriod costs two queries per date, which is right for
+ * one entry on a form and wrong for two hundred statement lines being coded in
+ * one go: that is four hundred round trips through PgBouncer against a route
+ * capped at sixty seconds. There are only ever a handful of closed periods and
+ * closed years, so they are read once and the dates checked against them in
+ * memory. Same rule, same sentences, same layer - this is still policy about
+ * what a human may type today, and still never a trigger.
+ */
+export type ClosedRanges = {
+  periods: { id: string; scheme: string; start_date: Date; end_date: Date }[]
+  years: { name: string; start_date: Date; end_date: Date }[]
+}
+
+export async function loadClosedRanges(): Promise<ClosedRanges> {
+  const periods = await prisma.$queryRaw<ClosedRanges['periods']>`
+    SELECT "id", "scheme", "start_date", "end_date" FROM "bk_vat_periods"
+    WHERE "status" IN ('finalised', 'submitted')
+  `
+  const years = await prisma.$queryRaw<ClosedRanges['years']>`
+    SELECT "name", "start_date", "end_date" FROM "bk_accounting_periods"
+    WHERE "status" = 'closed'
+  `
+  return { periods, years }
+}
+
+function within(date: Date, start: Date, end: Date): boolean {
+  return date.getTime() >= start.getTime() && date.getTime() <= end.getTime()
+}
+
+/** The batched form of assertDatesNotInClosedPeriod. Throws the same errors. */
+export function assertDatesNotClosed(
+  ranges: ClosedRanges,
+  taxPoint: Date,
+  settled: Date | null,
+): void {
+  const period = ranges.periods.find((row) =>
+    row.scheme === 'cash'
+      ? settled !== null && within(settled, row.start_date, row.end_date)
+      : within(taxPoint, row.start_date, row.end_date),
+  )
+  if (period) throw new BackdatedIntoClosedPeriodError(period.id)
+
+  for (const date of [taxPoint, settled]) {
+    if (!date) continue
+    const year = ranges.years.find((row) => within(date, row.start_date, row.end_date))
+    if (year) {
+      throw new PeriodStateError(
+        `That date falls in ${year.name}, which has been closed off. Reopen the year first if it really belongs there, or date it in the current one.`,
+      )
+    }
+  }
+}
+
 /** The closed period these dates would land in, if any. Used to offer the correction route. */
 export async function findClosedPeriodForDates(
   taxPoint: Date,
