@@ -1,6 +1,6 @@
 {
   "name": "uk-bookkeeping",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "tablePrefix": "bk_",
   "description": "UK bookkeeping with Making Tax Digital VAT returns. Records income and expenses with evidence, works the nine VAT boxes out from those records, and files them with HMRC.",
   "permissions": [

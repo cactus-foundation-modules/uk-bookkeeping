@@ -199,7 +199,7 @@ export default function VatPeriodsScreen({
           <p style={{ margin: '0 0 0.75rem' }}>
             {connected
               ? 'Nothing is outstanding, which is either very good news or a sign the VAT number needs checking.'
-              : 'Set your VAT scheme and how often you file, in Settings, and we will lay the periods out for you.'}
+              : 'Set your VAT scheme, how often you file, and your first period’s dates from the registration letter, in Settings, and we will lay the periods out for you.'}
           </p>
           {!connected && (
             <a className="btn btn-sm" href={`/${adminPath}/config?tab=uk-bookkeeping`}>

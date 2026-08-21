@@ -17,6 +17,7 @@ const FALLBACK: BkSettingsRow = {
   scheme_changed_at: null,
   period_frequency: 'quarterly',
   first_period_start: null,
+  first_period_end: null,
   hmrc_environment: 'sandbox',
   error_threshold_fixed: new Prisma.Decimal('10000.00'),
   error_threshold_percent: new Prisma.Decimal('1.00'),
@@ -54,6 +55,7 @@ export type SettingsPatch = {
   scheme?: 'accrual' | 'cash'
   periodFrequency?: 'monthly' | 'quarterly' | 'annual'
   firstPeriodStart?: string | null
+  firstPeriodEnd?: string | null
   hmrcEnvironment?: 'sandbox' | 'production'
   errorThresholdFixed?: string
   errorThresholdPercent?: string
@@ -101,6 +103,27 @@ export async function updateSettings(patch: SettingsPatch): Promise<BkSettingsRo
   checkAmountSetting(patch.errorThresholdCap, 'The error threshold cap')
   checkDateSetting(patch.vatRegisteredFrom, 'The VAT registration date')
   checkDateSetting(patch.firstPeriodStart, 'The first period start date')
+  checkDateSetting(patch.firstPeriodEnd, 'The first period end date')
+
+  // The pair has to make sense together, whichever half was just edited.
+  const nextFirstStart =
+    patch.firstPeriodStart === undefined
+      ? current.first_period_start
+      : patch.firstPeriodStart
+        ? new Date(patch.firstPeriodStart)
+        : null
+  const nextFirstEnd =
+    patch.firstPeriodEnd === undefined
+      ? current.first_period_end
+      : patch.firstPeriodEnd
+        ? new Date(patch.firstPeriodEnd)
+        : null
+  if (nextFirstStart && nextFirstEnd && nextFirstEnd.getTime() < nextFirstStart.getTime()) {
+    throw new BookkeepingError(
+      'invalid',
+      'The first VAT period cannot end before it starts - check the two dates.',
+    )
+  }
   if (patch.errorThresholdPercent !== undefined) {
     checkAmountSetting(patch.errorThresholdPercent, 'The error threshold percentage')
     const percent = Number(patch.errorThresholdPercent)
@@ -154,13 +177,8 @@ export async function updateSettings(patch: SettingsPatch): Promise<BkSettingsRo
       "scheme"                  = ${patch.scheme ?? current.scheme},
       "scheme_changed_at"       = ${schemeChanged ? new Date() : current.scheme_changed_at},
       "period_frequency"        = ${patch.periodFrequency ?? current.period_frequency},
-      "first_period_start"      = ${
-        patch.firstPeriodStart === undefined
-          ? current.first_period_start
-          : patch.firstPeriodStart
-            ? new Date(patch.firstPeriodStart)
-            : null
-      }::date,
+      "first_period_start"      = ${nextFirstStart}::date,
+      "first_period_end"        = ${nextFirstEnd}::date,
       "hmrc_environment"        = ${patch.hmrcEnvironment ?? current.hmrc_environment},
       "error_threshold_fixed"   = ${patch.errorThresholdFixed ?? current.error_threshold_fixed.toFixed(2)}::numeric,
       "error_threshold_percent" = ${patch.errorThresholdPercent ?? current.error_threshold_percent.toFixed(2)}::numeric,

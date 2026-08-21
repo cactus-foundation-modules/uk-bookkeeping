@@ -197,6 +197,7 @@ export type BkSettingsRow = {
   scheme_changed_at: Date | null
   period_frequency: PeriodFrequency
   first_period_start: Date | null
+  first_period_end: Date | null
   hmrc_environment: HmrcEnvironment
   error_threshold_fixed: Money
   error_threshold_percent: Money

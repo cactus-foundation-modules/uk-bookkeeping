@@ -1,6 +1,6 @@
 {
   "name": "cactus-module-uk-bookkeeping",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "UK bookkeeping and Making Tax Digital VAT returns for Cactus",
   "license": "MIT",
   "private": true

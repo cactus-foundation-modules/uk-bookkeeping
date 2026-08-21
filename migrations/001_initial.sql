@@ -325,6 +325,11 @@ CREATE TABLE IF NOT EXISTS "bk_settings" (
   "scheme_changed_at"       TIMESTAMPTZ,
   "period_frequency"        TEXT NOT NULL DEFAULT 'quarterly',
   "first_period_start"      DATE,
+  -- The day the FIRST period ends, from HMRC's registration letter. HMRC ends
+  -- every period on a calendar month end, so the first period - registration
+  -- date to the first stagger month end - is routinely longer or shorter than
+  -- the filing frequency suggests and cannot be derived from the start alone.
+  "first_period_end"        DATE,
   "hmrc_environment"        TEXT NOT NULL DEFAULT 'sandbox',
   -- Error correction thresholds, configurable so an HMRC rule change is a
   -- settings edit and not a release. Defaults are the current Method 1 limits

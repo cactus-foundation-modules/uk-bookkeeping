@@ -4,14 +4,9 @@ import type { SessionUser } from '@/lib/auth/session'
 import { appendAudit, getChainHead, nextChainLink, chainHash } from './audit'
 import { BookkeepingError, NotFoundError, PeriodStateError, RecordsChangedError } from './errors'
 import { formatMoney, formatPounds, toMoney } from './money'
+import { layOutPeriods } from './period-dates'
 import { getSettings } from './settings'
-import type {
-  BkVatPeriodRow,
-  PeriodFrequency,
-  SnapshotLine,
-  VatBoxes,
-  VatScheme,
-} from './types'
+import type { BkVatPeriodRow, SnapshotLine, VatBoxes, VatScheme } from './types'
 import { boxesMatch, computeVatReturn, netVatDirection } from './vat-boxes'
 
 // The period lifecycle: open → finalised → submitted, with `submitted` terminal.
@@ -149,27 +144,6 @@ export async function computePeriod(period: BkVatPeriodRow) {
 // Creating periods
 // ---------------------------------------------------------------------------
 
-/**
- * Month arithmetic anchored to a fixed date, clamped to the month's length.
- *
- * setUTCMonth rolls over - 31 Jan + 1 month is 3 March - so iterating with it
- * skews every boundary after a short month whenever the first period starts on
- * the 29th, 30th or 31st. Anchoring each period at `first + i * months` and
- * clamping the day keeps 31 Jan → 28 Feb → 31 Mar → 30 Apr, which is what a
- * calendar means by "a month later".
- */
-function addMonthsClamped(anchor: Date, months: number): Date {
-  const year = anchor.getUTCFullYear()
-  const month = anchor.getUTCMonth() + months
-  const day = anchor.getUTCDate()
-  const lastDayOfTarget = new Date(Date.UTC(year, month + 1, 0)).getUTCDate()
-  return new Date(Date.UTC(year, month, Math.min(day, lastDayOfTarget)))
-}
-
-function monthsPerPeriod(frequency: PeriodFrequency): number {
-  return frequency === 'monthly' ? 1 : frequency === 'quarterly' ? 3 : 12
-}
-
 export function toDateOnly(value: Date): string {
   return value.toISOString().slice(0, 10)
 }
@@ -178,6 +152,15 @@ export function toDateOnly(value: Date): string {
  * Lay out periods from the scheme and frequency, up to and including the one
  * that covers today. Local periods only: once HMRC is connected, real
  * obligations are matched onto these by date range.
+ *
+ * The layout follows HMRC's actual shape (see period-dates.ts): the first
+ * period runs from the registration date to the configured first period END -
+ * a month end from the registration letter, routinely NOT three months after
+ * the start - and every later period follows calendar months from there. Each
+ * period carries its due date (one calendar month and 7 days after it ends;
+ * annual accounting differs) so the list and reminders work before HMRC is
+ * ever connected; a real obligation's own due date still overwrites it when
+ * one is matched.
  */
 export async function generateLocalPeriods(user: SessionUser | null): Promise<BkVatPeriodRow[]> {
   const settings = await getSettings()
@@ -187,48 +170,83 @@ export async function generateLocalPeriods(user: SessionUser | null): Promise<Bk
       'Set the date your first VAT period starts, in Settings, and we will lay the periods out from there.',
     )
   }
+  if (
+    settings.first_period_end &&
+    settings.first_period_end.getTime() < settings.first_period_start.getTime()
+  ) {
+    throw new BookkeepingError(
+      'invalid',
+      'The first VAT period ends before it starts - check the two dates in Settings.',
+    )
+  }
 
   const frequency = settings.period_frequency
-  const months = monthsPerPeriod(frequency)
-  const anchor = new Date(settings.first_period_start)
-  const horizon = addMonthsClamped(new Date(), months)
+  const layout = layOutPeriods({
+    firstStart: new Date(settings.first_period_start),
+    firstEnd: settings.first_period_end ? new Date(settings.first_period_end) : null,
+    frequency,
+  })
+  const starts = layout.map((p) => toDateOnly(p.start))
+  const ends = layout.map((p) => toDateOnly(p.end))
+  const dues = layout.map((p) => toDateOnly(p.due))
 
-  // Each period is anchored to the first start rather than iterated from the
-  // previous end, so a short month cannot skew every boundary after it.
-  // A guard rather than a `while (true)`: a first-period-start set to 1970 by
-  // accident should produce a refusal, not four hundred rows.
-  const starts: string[] = []
-  const ends: string[] = []
-  for (let i = 0; i < 200; i += 1) {
-    const start = addMonthsClamped(anchor, i * months)
-    if (start > horizon) break
-    const end = new Date(addMonthsClamped(anchor, (i + 1) * months).getTime() - 24 * 60 * 60 * 1000)
-    starts.push(toDateOnly(start))
-    ends.push(toDateOnly(end))
-  }
+  // First, sweep away any locally laid-out period the settings no longer
+  // produce: still open, never finalised (no snapshot), never matched to an
+  // HMRC obligation. Without this, a first layout made before the owner set
+  // the real first period end sits there for ever, blocking the correct
+  // ranges - the overlap check below quite rightly refuses to double-book.
+  // Periods with any history are kept; only untouched scaffolding moves.
+  const removed = await prisma.$queryRaw<{ id: string; start_date: Date; end_date: Date }[]>`
+    DELETE FROM "bk_vat_periods" p
+    WHERE p."source" = 'local' AND p."status" = 'open' AND p."period_key" IS NULL
+      AND NOT EXISTS (SELECT 1 FROM "bk_period_snapshots" s WHERE s."period_id" = p."id")
+      AND NOT EXISTS (
+        SELECT 1 FROM unnest(${starts}::date[], ${ends}::date[]) AS c(start_date, end_date)
+        WHERE c.start_date = p."start_date" AND c.end_date = p."end_date"
+      )
+    RETURNING "id", "start_date", "end_date"
+  `
 
   // One statement, ON CONFLICT, so two simultaneous calls cannot race the
   // SELECT-then-INSERT into a raw unique violation. A candidate that overlaps
   // an existing period with a DIFFERENT range - usually one HMRC issued - is
   // skipped rather than doubled up: two open periods claiming the same rows
-  // means every figure counted twice.
+  // means every figure counted twice. The DO UPDATE arm exists solely to fill
+  // in a missing due date on a period laid out before due dates were computed;
+  // its WHERE keeps it off submitted rows, which are immutable by trigger.
   const created: string[] = []
   if (starts.length > 0) {
-    const rows = await prisma.$queryRaw<{ id: string }[]>`
-      INSERT INTO "bk_vat_periods" ("start_date", "end_date", "scheme", "source", "vrn")
-      SELECT c.start_date, c.end_date, ${settings.scheme}, 'local', ${settings.vrn}
-      FROM unnest(${starts}::date[], ${ends}::date[]) AS c(start_date, end_date)
+    const rows = await prisma.$queryRaw<{ id: string; inserted: boolean }[]>`
+      INSERT INTO "bk_vat_periods" ("start_date", "end_date", "due_date", "scheme", "source", "vrn")
+      SELECT c.start_date, c.end_date, c.due_date, ${settings.scheme}, 'local', ${settings.vrn}
+      FROM unnest(${starts}::date[], ${ends}::date[], ${dues}::date[])
+        AS c(start_date, end_date, due_date)
       WHERE NOT EXISTS (
         SELECT 1 FROM "bk_vat_periods" p
         WHERE p."start_date" <= c.end_date AND p."end_date" >= c.start_date
           AND NOT (p."start_date" = c.start_date AND p."end_date" = c.end_date)
       )
-      ON CONFLICT ("start_date", "end_date") DO NOTHING
-      RETURNING "id"
+      ON CONFLICT ("start_date", "end_date") DO UPDATE
+        SET "due_date" = EXCLUDED."due_date", "updated_at" = NOW()
+        WHERE "bk_vat_periods"."due_date" IS NULL
+          AND "bk_vat_periods"."source" = 'local'
+          AND "bk_vat_periods"."status" <> 'submitted'
+      RETURNING "id", (xmax = 0) AS inserted
     `
-    created.push(...rows.map((r) => r.id))
+    created.push(...rows.filter((r) => r.inserted).map((r) => r.id))
   }
 
+  if (removed.length > 0) {
+    await appendAudit({
+      action: 'period.relaid',
+      entityType: 'vat_period',
+      summary: `${removed.length} untouched VAT period${removed.length === 1 ? '' : 's'} re-laid to match your period settings`,
+      detail: {
+        removed: removed.map((r) => `${toDateOnly(r.start_date)} to ${toDateOnly(r.end_date)}`),
+      },
+      user,
+    })
+  }
   if (created.length > 0) {
     await appendAudit({
       action: 'period.created',

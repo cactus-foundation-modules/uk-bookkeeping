@@ -21,6 +21,7 @@ type Settings = {
   schemeChangedAt: string | null
   periodFrequency: 'monthly' | 'quarterly' | 'annual'
   firstPeriodStart: string | null
+  firstPeriodEnd: string | null
   hmrcEnvironment: 'sandbox' | 'production'
   errorThresholdFixed: string
   errorThresholdPercent: string
@@ -92,9 +93,24 @@ export function BookkeepingSettingsTab() {
   const [verdict, setVerdict] = useState<HeaderVerdict | null>(null)
   const [checking, setChecking] = useState(false)
 
+  // HMRC credentials are ordinary environment variables, stored through the
+  // same core route as every other credential on the site. The GET returns
+  // booleans only - whether each is set - never the values.
+  const [envVars, setEnvVars] = useState<Record<string, boolean>>({})
+  const [envLocalMode, setEnvLocalMode] = useState(false)
+  const [envEditable, setEnvEditable] = useState(false)
+  const [credClientId, setCredClientId] = useState('')
+  const [credClientSecret, setCredClientSecret] = useState('')
+  const [savingCreds, setSavingCreds] = useState(false)
+  const [savedCreds, setSavedCreds] = useState(false)
+  const [credError, setCredError] = useState<string | null>(null)
+
   const load = useCallback(async () => {
     try {
-      const response = await fetch('/api/m/uk-bookkeeping/admin/settings')
+      const [response, envResponse] = await Promise.all([
+        fetch('/api/m/uk-bookkeeping/admin/settings'),
+        fetch('/api/admin/env'),
+      ])
       if (!response.ok) {
         setError('The bookkeeping settings could not be loaded.')
         return
@@ -102,6 +118,14 @@ export function BookkeepingSettingsTab() {
       const payload: Payload = await response.json()
       setData(payload)
       setSettings(payload.settings)
+      // Only site admins may manage credentials; anybody else keeps the
+      // read-only view rather than a form that cannot save.
+      if (envResponse.ok) {
+        const env = (await envResponse.json()) as { vars?: Record<string, boolean>; localMode?: boolean }
+        setEnvVars(env.vars ?? {})
+        setEnvLocalMode(!!env.localMode)
+        setEnvEditable(true)
+      }
     } catch {
       setError('The bookkeeping settings could not be loaded. Check the connection and reload the page.')
     }
@@ -180,6 +204,46 @@ export function BookkeepingSettingsTab() {
     }
   }
 
+  async function saveCredentials() {
+    setSavingCreds(true)
+    setSavedCreds(false)
+    setCredError(null)
+    try {
+      // Only non-blank fields are sent, so a blank box leaves the stored value
+      // alone rather than wiping it.
+      const vars = [
+        { key: 'HMRC_CLIENT_ID', value: credClientId.trim() },
+        { key: 'HMRC_CLIENT_SECRET', value: credClientSecret.trim() },
+      ].filter((v) => v.value !== '')
+      if (vars.length === 0) {
+        throw new Error('Nothing to save - paste the client ID or the client secret first.')
+      }
+      const response = await fetch('/api/admin/env', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vars }),
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(payload.error ?? 'Those credentials could not be saved.')
+      // Core only stores keys the installed modules declare. If it dropped
+      // any, say so rather than show a green "Saved" over a credential that is
+      // not there.
+      if (Array.isArray(payload.skipped) && payload.skipped.length > 0) {
+        throw new Error(
+          `Not stored: ${payload.skipped.join(', ')}. Update the bookkeeping module to its latest version, then save again.`,
+        )
+      }
+      setSavedCreds(true)
+      setCredClientId('')
+      setCredClientSecret('')
+      await load()
+    } catch (err) {
+      setCredError(err instanceof Error ? err.message : 'Those credentials could not be saved.')
+    } finally {
+      setSavingCreds(false)
+    }
+  }
+
   async function disconnect() {
     if (!window.confirm('Disconnect from HMRC? Your records stay exactly as they are.')) return
     setError(null)
@@ -197,6 +261,73 @@ export function BookkeepingSettingsTab() {
   }
 
   const { hmrc } = data
+
+  const credentialsFields = envLocalMode ? (
+    <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
+      This site is running in local development mode, so credentials live in <code>.env.local</code>:
+      set <code>HMRC_CLIENT_ID</code> and <code>HMRC_CLIENT_SECRET</code> there and restart the dev
+      server.
+    </p>
+  ) : !envEditable ? (
+    <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
+      Storing the credentials needs a site administrator: ask them to paste{' '}
+      <code>HMRC_CLIENT_ID</code> and <code>HMRC_CLIENT_SECRET</code> into this tab, or into the
+      hosting environment variables.
+    </p>
+  ) : (
+    <div>
+      <div style={row}>
+        <label htmlFor="bk-client-id">
+          Client ID
+          <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
+            {envVars.HMRC_CLIENT_ID ? 'Stored. Paste a new one to replace it.' : 'Not stored yet.'}
+          </span>
+        </label>
+        <input
+          id="bk-client-id"
+          style={input}
+          autoComplete="off"
+          value={credClientId}
+          onChange={(e) => setCredClientId(e.target.value)}
+        />
+      </div>
+      <div style={row}>
+        <label htmlFor="bk-client-secret">
+          Client secret
+          <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
+            {envVars.HMRC_CLIENT_SECRET ? 'Stored. Paste a new one to replace it.' : 'Not stored yet.'}
+          </span>
+        </label>
+        <input
+          id="bk-client-secret"
+          type="password"
+          style={input}
+          autoComplete="new-password"
+          value={credClientSecret}
+          onChange={(e) => setCredClientSecret(e.target.value)}
+        />
+      </div>
+      <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginTop: '0.75rem', flexWrap: 'wrap' }}>
+        <button className="btn btn-sm btn-primary" onClick={saveCredentials} disabled={savingCreds}>
+          {savingCreds ? 'Saving…' : 'Save credentials'}
+        </button>
+        {savedCreds && (
+          <span style={{ color: 'var(--color-success, var(--color-text))', fontSize: 'var(--text-sm)' }}>
+            Saved. They take hold on the next deployment - the site will prompt for one.
+          </span>
+        )}
+      </div>
+      {credError && (
+        <p style={{ margin: '0.5rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-danger, var(--color-text))' }}>
+          {credError}
+        </p>
+      )}
+      <p style={{ margin: '0.5rem 0 0', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
+        Stored with the site&rsquo;s other credentials, never shown back here, and only ever sent to
+        HMRC.
+      </p>
+    </div>
+  )
 
   return (
     <div style={{ maxWidth: 720 }}>
@@ -244,8 +375,26 @@ export function BookkeepingSettingsTab() {
           </select>
         </div>
         <div style={row}>
-          <label htmlFor="bk-first">Your first VAT period starts</label>
+          <label htmlFor="bk-first">
+            Your first VAT period starts
+            <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))', maxWidth: 340 }}>
+              The day your VAT registration took effect.
+            </span>
+          </label>
           <input id="bk-first" type="date" style={input} value={toDateValue(settings.firstPeriodStart)} onChange={(e) => set('firstPeriodStart', e.target.value || null)} />
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-first-end">
+            …and that first period ends
+            <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))', maxWidth: 340 }}>
+              From your registration letter or VAT account. HMRC ends every period on the last day of
+              a month, so the first one is rarely a neat three months: registering on 10 July with
+              periods ending October gives 10 July to 31 October. Every return after that follows
+              calendar months, due one month and 7 days after each period ends. Left empty, we assume
+              the nearest month end.
+            </span>
+          </label>
+          <input id="bk-first-end" type="date" style={input} value={toDateValue(settings.firstPeriodEnd)} onChange={(e) => set('firstPeriodEnd', e.target.value || null)} />
         </div>
         <div style={row}>
           <label htmlFor="bk-rounding">
@@ -284,10 +433,39 @@ export function BookkeepingSettingsTab() {
               credentials to the business running the software, and that is you. It is about ten minutes
               of forms, then a wait.
             </p>
-            <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
-              Add <code>HMRC_CLIENT_ID</code> and <code>HMRC_CLIENT_SECRET</code> to your hosting
-              environment variables, then redeploy.
-            </p>
+            <ol style={{ margin: '0 0 0.75rem', paddingLeft: '1.25rem', fontSize: 'var(--text-sm)' }}>
+              <li style={{ marginBottom: '0.375rem' }}>
+                Create an account on the{' '}
+                <a href="https://developer.service.hmrc.gov.uk/developer/registration" target="_blank" rel="noreferrer">
+                  HMRC Developer Hub
+                </a>{' '}
+                - a government service, free, separate from your Government Gateway login.
+              </li>
+              <li style={{ marginBottom: '0.375rem' }}>
+                Under{' '}
+                <a href="https://developer.service.hmrc.gov.uk/developer/applications" target="_blank" rel="noreferrer">
+                  your applications
+                </a>
+                , add an application to the <em>sandbox</em> - that is HMRC&rsquo;s practice service,
+                and where everybody has to start.
+              </li>
+              <li style={{ marginBottom: '0.375rem' }}>
+                Subscribe the application to the <strong>VAT (MTD)</strong> API, and to{' '}
+                <strong>Test Fraud Prevention Headers</strong> while you are practising.
+              </li>
+              <li style={{ marginBottom: '0.375rem' }}>
+                Add the redirect URI shown below to the application, copied exactly.
+              </li>
+              <li style={{ marginBottom: '0.375rem' }}>
+                Copy the application&rsquo;s client ID, generate a client secret, and paste both in
+                below.
+              </li>
+              <li>
+                When practice filing looks right, apply for <em>production credentials</em> from the
+                same application page, and paste the new pair in here with the service switched to the
+                real thing. HMRC take up to ten working days to approve.
+              </li>
+            </ol>
           </div>
         )}
 
@@ -316,6 +494,17 @@ export function BookkeepingSettingsTab() {
               It does not contain your admin address, on purpose, so renaming that never breaks it.
             </div>
           </div>
+        )}
+
+        {!hmrc.configured ? (
+          credentialsFields
+        ) : (
+          <details style={{ marginBottom: '0.75rem' }}>
+            <summary style={{ cursor: 'pointer', fontSize: 'var(--text-sm)' }}>
+              Change the HMRC credentials
+            </summary>
+            <div style={{ paddingTop: '0.5rem' }}>{credentialsFields}</div>
+          </details>
         )}
 
         <div style={row}>
