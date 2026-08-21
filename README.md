@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="module-art.webp" alt="Cactus UK Bookkeeping Module" width="640" />
+</p>
+
 # Cactus UK Bookkeeping Module
 
 UK bookkeeping with double-entry accounts, Making Tax Digital VAT returns and
