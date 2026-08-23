@@ -116,6 +116,12 @@ const label: React.CSSProperties = {
   color: 'var(--color-text-muted, var(--color-text))',
 }
 
+const hint: React.CSSProperties = {
+  margin: '0.25rem 0 0',
+  fontSize: 'var(--text-sm)',
+  color: 'var(--color-text-muted, var(--color-text))',
+}
+
 function emptyLine(category: Pick<Category, 'id' | 'is_capital'> | null): Line {
   return {
     uid: nextLineUid(),
@@ -195,7 +201,13 @@ export default function TransactionForm({
       entryType: correcting ? 'adjustment' : 'normal',
       direction: 'expense',
       taxPointDate: today(),
-      settledDate: today(),
+      // Blank, not today. A bill typed in is not a bill paid, and a date in
+      // this box is the whole test for whether it settled: the ledger posts the
+      // money side to a bank account, the balance sheet stops showing it as
+      // owed, and it drops off "Who owes what". Defaulting to today made every
+      // hand-typed purchase look paid the moment it was saved, and the only way
+      // to record an unpaid one was to notice a pre-filled field and clear it.
+      settledDate: '',
       bankAccountId: '',
       evidenceNotRequired: false,
       counterparty: '',
@@ -453,7 +465,12 @@ export default function TransactionForm({
               style={input}
               value={toDateInput(value.settledDate)}
               onChange={(e) => setValue({ ...value, settledDate: e.target.value })}
+              aria-describedby="bk-settled-hint"
             />
+            <p id="bk-settled-hint" style={hint}>
+              Leave empty if it has not been paid yet. It will show under what is owed until you fill
+              this in.
+            </p>
           </div>
           {bankAccounts.length > 0 && (
             <div>
