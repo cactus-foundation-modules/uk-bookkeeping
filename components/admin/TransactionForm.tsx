@@ -155,9 +155,15 @@ export type TransactionFormValue = {
   taxPointDate: string
   settledDate: string
   /**
-   * Which account the money moved through. Empty means the main current
-   * account, which is where every entry settled before this could be asked -
-   * so an empty box changes nothing about how the books already read.
+   * Which account the money moved through. Empty means the built-in main
+   * current account, which is where every entry settled before this could be
+   * asked - so an empty box changes nothing about how the books already read.
+   *
+   * It is only ever empty now on an entry saved before the question existed,
+   * or on a site with no bank accounts set up at all. A new entry on a site
+   * that has them starts on a real one, because the built-in account is not
+   * in anybody's bank list and money stranded there shows up on the balance
+   * sheet as cash the business does not have anywhere.
    *
    * The reason it can be asked at all: a balance held with a supplier - a
    * prepaid phone or postage account, a card topped up in advance - is a cash
@@ -187,6 +193,9 @@ export default function TransactionForm({
   correcting?: { id: string; counterparty: string; taxPointDate: string } | null
 }) {
   const adminPath = useAdminPath()
+  // Whether this form is filling in a fresh entry or editing a saved one. The
+  // two want different defaults, and the distinction is worth a name.
+  const isNewEntry = !initial
   const [categories, setCategories] = useState<Category[]>([])
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -252,11 +261,28 @@ export default function TransactionForm({
   useEffect(() => {
     fetch('/api/m/uk-bookkeeping/admin/bank-accounts')
       .then((r) => (r.ok ? r.json() : { accounts: [] }))
-      .then((data) => setBankAccounts((data.accounts ?? []).filter((a: BankAccount) => !a.archived)))
+      .then((data) => {
+        const list: BankAccount[] = (data.accounts ?? []).filter((a: BankAccount) => !a.archived)
+        setBankAccounts(list)
+        // A new entry starts on the first real account rather than on a
+        // placeholder. The placeholder settled the money against a built-in
+        // "main current account" that is not in this list and that nobody
+        // reconciles, so leaving the box alone stranded the payment there and
+        // grew a bank line on the balance sheet for money that moved somewhere
+        // else entirely.
+        //
+        // An entry being EDITED keeps whatever it was saved with, even if that
+        // is nothing. Silently re-pointing somebody's history the moment they
+        // opened it would be a good deal worse than the stray line.
+        const first = list[0]
+        if (isNewEntry && first) {
+          setValue((prev) => (prev.bankAccountId ? prev : { ...prev, bankAccountId: first.id }))
+        }
+      })
       // Not an error worth a banner. The box simply does not appear, and the
       // entry settles where it always did.
       .catch(() => setBankAccounts([]))
-  }, [])
+  }, [isNewEntry])
 
   useEffect(() => {
     fetch('/api/m/uk-bookkeeping/admin/transactions/suggest')
@@ -483,7 +509,14 @@ export default function TransactionForm({
                 value={value.bankAccountId ?? ''}
                 onChange={(e) => setValue({ ...value, bankAccountId: e.target.value })}
               >
-                <option value="">Main current account</option>
+                {/*
+                  Only offered while nothing is chosen, which on a site with
+                  bank accounts set up means an older entry saved before the
+                  question was asked. It reads as the gap it is rather than as
+                  a sensible default, and once a real account is picked it goes
+                  away for good.
+                */}
+                {!value.bankAccountId && <option value="">Not recorded yet</option>}
                 {bankAccounts.map((account) => (
                   <option key={account.id} value={account.id}>
                     {account.name}

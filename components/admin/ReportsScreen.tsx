@@ -89,6 +89,7 @@ type TrialBalancePayload = {
     unmappedCategories: { id: string; code: string; name: string; entries: number }[]
     duplicateMappings: { code: string; name: string; accounts: number }[]
     suspenseBalance: string
+    strandedSettlements: { entries: number; balance: string } | null
     balanced: boolean
     difference: string
   }
@@ -259,6 +260,19 @@ export default function ReportsScreen({ environment }: { environment: string }) 
 // ---------------------------------------------------------------------------
 
 function LedgerHealthNotice({ health }: { health: TrialBalancePayload['health'] }) {
+  // Stranded settlements are a filing mistake, not an arithmetic one: the books
+  // add up perfectly, the money is just sitting in an account the owner does not
+  // keep. Telling somebody their reports do not add up when they do is how a
+  // warning gets ignored, so it gets its own heading when it is the only thing
+  // wrong.
+  const onlyStranded =
+    health.strandedSettlements !== null &&
+    health.balanced &&
+    health.suspenseBalance === '0.00' &&
+    health.unmappedCategories.length === 0 &&
+    health.duplicateMappings.length === 0 &&
+    health.missingAccounts.length === 0
+
   return (
     <div
       role="alert"
@@ -271,7 +285,11 @@ function LedgerHealthNotice({ health }: { health: TrialBalancePayload['health'] 
         lineHeight: 1.5,
       }}
     >
-      <strong>These reports do not quite add up.</strong>
+      <strong>
+        {onlyStranded
+          ? 'One thing on these reports wants a look.'
+          : 'These reports do not quite add up.'}
+      </strong>
       <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.25rem' }}>
         {!health.balanced && (
           <li>
@@ -283,6 +301,16 @@ function LedgerHealthNotice({ health }: { health: TrialBalancePayload['health'] 
           <li>
             <Money value={health.suspenseBalance} /> is sitting in suspense, which means some
             entries had nowhere else to go.
+          </li>
+        )}
+        {health.strandedSettlements && (
+          <li>
+            {health.strandedSettlements.entries}{' '}
+            {health.strandedSettlements.entries === 1 ? 'entry does' : 'entries do'} not say which
+            account the money moved through, so{' '}
+            <Money value={health.strandedSettlements.balance} /> is sitting on the main current
+            account rather than on one of yours. Open each one and fill in the account it was paid
+            from or into.
           </li>
         )}
         {health.unmappedCategories.map((category) => (

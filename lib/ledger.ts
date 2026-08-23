@@ -604,6 +604,14 @@ export type LedgerHealth = {
   duplicateMappings: { code: string; name: string; accounts: number }[]
   /** Anything sitting in suspense, which is always somebody's mistake. */
   suspenseBalance: string
+  /**
+   * Entries that settled without naming an account, on a site that keeps real
+   * ones. Their money went to the built-in main current account, which is not
+   * in the owner's bank list and which nobody reconciles - so the balance
+   * sheet shows cash sitting somewhere the business does not actually bank.
+   * Null when there is nothing to say.
+   */
+  strandedSettlements: { entries: number; balance: string } | null
   balanced: boolean
   difference: string
 }
@@ -627,7 +635,7 @@ const REQUIRED_ACCOUNT_CODES = [
  * check: a report that is quietly wrong is far worse than one that says it is.
  */
 export async function ledgerHealth(): Promise<LedgerHealth> {
-  const [present, unmapped, duplicates, tb] = await Promise.all([
+  const [present, unmapped, duplicates, stranded, tb] = await Promise.all([
     prisma.$queryRaw<{ code: string }[]>`
       SELECT "code" FROM "bk_accounts" WHERE "code" = ANY(${REQUIRED_ACCOUNT_CODES}::text[])
     `,
@@ -648,6 +656,19 @@ export async function ledgerHealth(): Promise<LedgerHealth> {
       HAVING COUNT(a."id") > 1
       ORDER BY c."name" ASC
     `,
+    // Two counts in one round trip: whether this site keeps real bank accounts
+    // at all, and how many settled entries never said which one the money moved
+    // through. Neither is a problem on its own. Together they are.
+    prisma.$queryRaw<{ bank_accounts: bigint; entries: bigint }[]>`
+      SELECT
+        (SELECT COUNT(*) FROM "bk_bank_accounts" WHERE "archived" = FALSE)::bigint
+          AS bank_accounts,
+        (SELECT COUNT(*) FROM "bk_transactions"
+          WHERE "status" = 'posted'
+            AND "settled_date" IS NOT NULL
+            AND "bank_account_id" IS NULL)::bigint
+          AS entries
+    `,
     trialBalance(),
   ])
 
@@ -658,12 +679,25 @@ export async function ledgerHealth(): Promise<LedgerHealth> {
     toMoney(suspense?.debit ?? '0').minus(toMoney(suspense?.credit ?? '0')),
   )
 
+  const counts = stranded[0]
+  const defaultBank = tb.rows.find((row) => row.code === 'bank-current')
+  const strandedSettlements =
+    Number(counts?.bank_accounts ?? 0) > 0 && Number(counts?.entries ?? 0) > 0
+      ? {
+          entries: Number(counts?.entries ?? 0),
+          balance: formatMoney(
+            toMoney(defaultBank?.debit ?? '0').minus(toMoney(defaultBank?.credit ?? '0')),
+          ),
+        }
+      : null
+
   return {
     healthy:
       missingAccounts.length === 0 &&
       unmapped.length === 0 &&
       duplicates.length === 0 &&
       tb.balanced &&
+      strandedSettlements === null &&
       suspenseBalance === '0.00',
     missingAccounts,
     unmappedCategories: unmapped.map((row) => ({
@@ -678,6 +712,7 @@ export async function ledgerHealth(): Promise<LedgerHealth> {
       accounts: Number(row.accounts),
     })),
     suspenseBalance,
+    strandedSettlements,
     balanced: tb.balanced,
     difference: tb.difference,
   }

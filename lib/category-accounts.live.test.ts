@@ -56,6 +56,7 @@ suite('categories and the accounts behind them, against a real database', () => 
     getAccountByCode: typeof import('./accounts').getAccountByCode
     createBankAccount: typeof import('./bank-accounts').createBankAccount
     createTransaction: typeof import('./transactions').createTransaction
+    updateTransaction: typeof import('./transactions').updateTransaction
     listTransactions: typeof import('./transactions').listTransactions
     accountBalances: typeof import('./ledger').accountBalances
     ledgerHealth: typeof import('./ledger').ledgerHealth
@@ -88,6 +89,7 @@ suite('categories and the accounts behind them, against a real database', () => 
       getAccountByCode: (await import('./accounts')).getAccountByCode,
       createBankAccount: (await import('./bank-accounts')).createBankAccount,
       createTransaction: (await import('./transactions')).createTransaction,
+      updateTransaction: (await import('./transactions')).updateTransaction,
       listTransactions: (await import('./transactions')).listTransactions,
       accountBalances: (await import('./ledger')).accountBalances,
       ledgerHealth: (await import('./ledger')).ledgerHealth,
@@ -309,5 +311,74 @@ suite('categories and the accounts behind them, against a real database', () => 
     const stillNeeded = await lib.listTransactions({ hasEvidence: false, evidenceNotRequired: false })
     expect(stillNeeded.rows).toHaveLength(1)
     expect(stillNeeded.rows[0]!.evidence_not_required).toBe(false)
+  })
+
+  it('names entries that settled without saying which account the money moved through', async () => {
+    // The books add up perfectly and are still wrong in a way somebody has to
+    // be told about: with no account named, the money settles against the
+    // built-in bank-current, which is not in the owner's bank list and which
+    // nobody reconciles. Live Deskwell grew a -£3.60 'Bank current account'
+    // line on its balance sheet exactly this way.
+    const office = (await lib.getCategoryByCode('office'))!
+    const entry = await lib.createTransaction(
+      {
+        direction: 'expense',
+        taxPointDate: '2026-07-22',
+        settledDate: '2026-07-23',
+        counterparty: 'Ionos',
+        lines: [
+          {
+            categoryId: office.id,
+            description: 'Domain names',
+            vatTreatment: 'domestic',
+            vatRateCode: 'standard',
+            vatRatePercent: '20.00',
+            netAmount: '3.00',
+            vatAmount: '0.60',
+            grossAmount: '3.60',
+          },
+        ],
+      },
+      null,
+    )
+
+    const stranded = await lib.ledgerHealth()
+    expect(stranded.balanced).toBe(true)
+    expect(stranded.suspenseBalance).toBe('0.00')
+    // Arithmetically fine, so the only thing wrong is the filing.
+    expect(stranded.strandedSettlements).toEqual({ entries: 1, balance: '-3.60' })
+    expect(stranded.healthy).toBe(false)
+
+    // Naming the account is the whole fix, and it clears the warning.
+    const { rows: bankRows } = await admin.query<{ id: string }>(
+      `SELECT "id" FROM "bk_bank_accounts" WHERE "name" = 'Current account'`,
+    )
+    await lib.updateTransaction(
+      entry.id,
+      {
+        direction: 'expense',
+        taxPointDate: '2026-07-22',
+        settledDate: '2026-07-23',
+        counterparty: 'Ionos',
+        bankAccountId: bankRows[0]!.id,
+        lines: [
+          {
+            categoryId: office.id,
+            description: 'Domain names',
+            vatTreatment: 'domestic',
+            vatRateCode: 'standard',
+            vatRatePercent: '20.00',
+            netAmount: '3.00',
+            vatAmount: '0.60',
+            grossAmount: '3.60',
+          },
+        ],
+      },
+      null,
+    )
+
+    const settled = await lib.ledgerHealth()
+    expect(settled.strandedSettlements).toBeNull()
+    expect(settled.healthy).toBe(true)
   })
 })
