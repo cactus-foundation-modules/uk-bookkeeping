@@ -100,6 +100,12 @@ CREATE TABLE IF NOT EXISTS "bk_transactions" (
   "description"             TEXT NOT NULL DEFAULT '',
   "reference"               TEXT,
   "status"                  TEXT NOT NULL DEFAULT 'posted',
+  -- "There is no receipt for this one, and there is not meant to be." A
+  -- transfer onto a balance held with a supplier, a bank charge, a payment on
+  -- account: the paperwork arrives later or never, and an entry that will never
+  -- have evidence should not sit on the "still to do" pile for six years.
+  -- Deliberately a statement by a human rather than anything inferred.
+  "evidence_not_required"   BOOLEAN NOT NULL DEFAULT FALSE,
   "source"                  TEXT NOT NULL DEFAULT 'manual',
   "source_ref"              TEXT,
   "import_batch_id"         TEXT,

@@ -40,6 +40,8 @@ type Transaction = {
   description: string
   reference: string | null
   status: string
+  bank_account_id: string | null
+  evidence_not_required: boolean
   correction_reason: string | null
   corrects_transaction_id: string | null
   finalised_period_id: string | null
@@ -60,6 +62,7 @@ export default function TransactionDetail({
 }) {
   const adminPath = useAdminPath()
   const [transaction, setTransaction] = useState<Transaction | null>(null)
+  const [bankAccountNames, setBankAccountNames] = useState<Record<string, string>>({})
   const [editing, setEditing] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -80,6 +83,17 @@ export default function TransactionDetail({
     // eslint-disable-next-line react-hooks/set-state-in-effect -- delegating to an async helper; every setState is after an await
     load()
   }, [load])
+
+  useEffect(() => {
+    // Archived ones included: an entry recorded against an account since put
+    // away still has to be able to say which one it was.
+    fetch('/api/m/uk-bookkeeping/admin/bank-accounts?archived=true')
+      .then((r) => (r.ok ? r.json() : { accounts: [] }))
+      .then((data: { accounts?: { id: string; name: string }[] }) =>
+        setBankAccountNames(Object.fromEntries((data.accounts ?? []).map((a) => [a.id, a.name]))),
+      )
+      .catch(() => setBankAccountNames({}))
+  }, [])
 
   if (error) {
     return (
@@ -137,6 +151,15 @@ export default function TransactionDetail({
       taxPointDate: toDateInput(transaction.tax_point_date),
       settledDate: toDateInput(transaction.settled_date),
       counterparty: transaction.counterparty,
+      // Carried through, never defaulted. The server replaces what the form
+      // sends, so a blank here would move every edited entry onto the main
+      // current account - including the ones raised from a bank line, which
+      // knew perfectly well which account they came from.
+      bankAccountId: transaction.bank_account_id ?? '',
+      // Carried through for the same reason as the account above: the server
+      // takes what the form sends, so a default here would untick it on every
+      // edit.
+      evidenceNotRequired: transaction.evidence_not_required,
       reference: transaction.reference ?? '',
       correctsTransactionId: transaction.corrects_transaction_id,
       correctionReason: transaction.correction_reason ?? '',
@@ -225,6 +248,14 @@ export default function TransactionDetail({
           <dd style={{ margin: 0 }}>{formatDate(transaction.settled_date)}</dd>
           <dt style={{ color: 'var(--color-text-muted, var(--color-text))' }}>In or out</dt>
           <dd style={{ margin: 0 }}>{transaction.direction === 'income' ? 'Money in' : 'Money out'}</dd>
+          <dt style={{ color: 'var(--color-text-muted, var(--color-text))' }}>
+            {transaction.direction === 'income' ? 'Paid into' : 'Paid from'}
+          </dt>
+          <dd style={{ margin: 0 }}>
+            {transaction.bank_account_id
+              ? (bankAccountNames[transaction.bank_account_id] ?? 'An account since removed')
+              : 'Main current account'}
+          </dd>
           <dt style={{ color: 'var(--color-text-muted, var(--color-text))' }}>What for</dt>
           <dd style={{ margin: 0 }}>{transaction.description || '—'}</dd>
           <dt style={{ color: 'var(--color-text-muted, var(--color-text))' }}>Their reference</dt>
@@ -277,6 +308,7 @@ export default function TransactionDetail({
       <EvidenceDropzone
         transactionId={transaction.id}
         attachments={transaction.attachments}
+        notRequired={transaction.evidence_not_required}
         locked={locked || finalised}
         canRecord={canRecord}
         onChange={load}

@@ -133,6 +133,8 @@ type LedgerAccount = {
   name: string
   kind: AccountKind
   subtype: AccountSubtype
+  /** The category whose entries post here, where it stands for one. */
+  category_id: string | null
   person_name: string | null
   position: number
   archived: boolean
@@ -174,6 +176,13 @@ type NewCategory = {
   name: string
   direction: 'income' | 'expense' | 'both'
   filing: string
+  /**
+   * Which account it posts to. Empty is the ordinary answer: an account is made
+   * for it, filed like the one above. Set it when the other side of the entry
+   * is a balance sheet account that already exists - a prepaid balance held
+   * with a supplier, a second director's drawings.
+   */
+  accountId: string
 }
 
 const EMPTY_BANK_ACCOUNT: NewBankAccount = {
@@ -193,7 +202,7 @@ const EMPTY_LEDGER_ACCOUNT: NewLedgerAccount = {
   personName: '',
 }
 
-const EMPTY_CATEGORY: NewCategory = { name: '', direction: 'expense', filing: 'office' }
+const EMPTY_CATEGORY: NewCategory = { name: '', direction: 'expense', filing: 'office', accountId: '' }
 
 /**
  * Where a category lands, offered as one choice rather than three.
@@ -429,7 +438,7 @@ export function BookkeepingSettingsTab() {
   const [categoryBusy, setCategoryBusy] = useState(false)
   const [newCategory, setNewCategory] = useState<NewCategory>(EMPTY_CATEGORY)
   const [editingCategory, setEditingCategory] = useState<
-    { id: string; name: string; filing: string; isSystem: boolean } | null
+    { id: string; name: string; filing: string; isSystem: boolean; accountId: string } | null
   >(null)
   const [showArchivedCategories, setShowArchivedCategories] = useState(false)
 
@@ -858,6 +867,28 @@ export function BookkeepingSettingsTab() {
     }
   }
 
+  /**
+   * Which account a category posts to.
+   *
+   * Every category has one. lib/ledger.ts turns a recorded entry into a debit
+   * and a credit by looking it up, and a category pointing at nothing lands
+   * half the entry in Suspense - so this is not decoration, it is the wiring.
+   */
+  function accountForCategory(categoryId: string): LedgerAccount | null {
+    return (ledgerAccounts ?? []).find((account) => account.category_id === categoryId) ?? null
+  }
+
+  /**
+   * The accounts a category may be moved onto: the free ones, plus the one it
+   * is already on. An account stands for at most one category, because the
+   * projection has to be able to answer "whose is this" with one name.
+   */
+  function accountOptionsFor(categoryId: string | null): LedgerAccount[] {
+    return (ledgerAccounts ?? []).filter(
+      (account) => !account.archived && (!account.category_id || account.category_id === categoryId),
+    )
+  }
+
   async function patchCategory(id: string, body: Record<string, unknown>): Promise<string | null> {
     const response = await fetch(`/api/m/uk-bookkeeping/admin/categories/${id}`, {
       method: 'PATCH',
@@ -898,6 +929,11 @@ export function BookkeepingSettingsTab() {
           isTrading: filing.isTrading,
           isCapital: filing.isCapital,
           position: last + 10,
+          // "File it like this one." The account the seeded category already
+          // posts to is the shape the new one's account should have, which
+          // beats this screen guessing at report lines it does not ask about.
+          likeCategoryCode: filing.key,
+          ...(newCategory.accountId ? { accountId: newCategory.accountId } : {}),
         }),
       })
       const payload = (await response.json().catch(() => ({}))) as { error?: string }
@@ -907,7 +943,9 @@ export function BookkeepingSettingsTab() {
       }
       setNewCategory({ ...EMPTY_CATEGORY, direction: newCategory.direction, filing: newCategory.filing })
       setCategoryNotice(`${name} has been added, at the bottom of its list. Move it up if it belongs higher.`)
-      await loadCategories()
+      // The account list too: adding a category either made an account or
+      // claimed one, and the "posts to" line on every row reads off it.
+      await Promise.all([loadCategories(), loadLedgerAccounts()])
     } catch {
       setCategoryError('The save did not reach the server. Check the connection and try again.')
     } finally {
@@ -937,6 +975,9 @@ export function BookkeepingSettingsTab() {
     try {
       const failure = await patchCategory(editingCategory.id, {
         name,
+        ...(editingCategory.accountId && editingCategory.accountId !== accountForCategory(editingCategory.id)?.id
+          ? { accountId: editingCategory.accountId }
+          : {}),
         ...(filing
           ? {
               sa103Box: filing.sa103Box,
@@ -951,7 +992,7 @@ export function BookkeepingSettingsTab() {
         return
       }
       setEditingCategory(null)
-      await loadCategories()
+      await Promise.all([loadCategories(), loadLedgerAccounts()])
     } catch {
       setCategoryError('The save did not reach the server. Check the connection and try again.')
     } finally {
@@ -1626,6 +1667,25 @@ export function BookkeepingSettingsTab() {
                           ))}
                         </select>
                       )}
+                      <select
+                        aria-label={`Which account ${category.name} posts to`}
+                        style={input}
+                        value={editingCategory.accountId}
+                        onChange={(e) => setEditingCategory({ ...editingCategory, accountId: e.target.value })}
+                      >
+                        {/* Only reachable on books that have not yet picked up
+                            014_category_accounts.sql. Offered so the select
+                            shows what is actually saved rather than the first
+                            account in the list. */}
+                        {!accountForCategory(category.id) && (
+                          <option value="">Posts to nothing yet</option>
+                        )}
+                        {accountOptionsFor(category.id).map((account) => (
+                          <option key={account.id} value={account.id}>
+                            Posts to {account.name}
+                          </option>
+                        ))}
+                      </select>
                       <span style={{ display: 'flex', gap: '0.375rem', flexWrap: 'wrap' }}>
                         <button
                           type="button"
@@ -1651,6 +1711,9 @@ export function BookkeepingSettingsTab() {
                         {category.name}
                         <span style={quiet}>
                           {filingLabel(category)}
+                          {accountForCategory(category.id)
+                            ? ` · posts to ${accountForCategory(category.id)!.name}`
+                            : ' · posts to nothing yet'}
                           {category.is_system ? ' · built in' : ''}
                           {category.archived ? ' · put away' : ''}
                         </span>
@@ -1694,6 +1757,7 @@ export function BookkeepingSettingsTab() {
                                   name: category.name,
                                   filing: filingKeyOf(category),
                                   isSystem: category.is_system,
+                                  accountId: accountForCategory(category.id)?.id ?? '',
                                 })
                               }
                               disabled={categoryBusy}
@@ -1783,6 +1847,30 @@ export function BookkeepingSettingsTab() {
             {filingOptionsFor(newCategory.direction).map((option) => (
               <option key={option.key} value={option.key}>
                 {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-category-account">
+            Which account it posts to
+            <span style={quiet}>
+              Leave this be unless you know otherwise - an account is made for it, filed exactly
+              where you said above. Point it at one you already have when what you are recording is
+              not a cost at all: money paid onto a balance held with a supplier, say, which is still
+              yours until they bill you for it.
+            </span>
+          </label>
+          <select
+            id="bk-new-category-account"
+            style={input}
+            value={newCategory.accountId}
+            onChange={(e) => setNewCategory({ ...newCategory, accountId: e.target.value })}
+          >
+            <option value="">Make one for it</option>
+            {accountOptionsFor(null).map((account) => (
+              <option key={account.id} value={account.id}>
+                {account.name}
               </option>
             ))}
           </select>

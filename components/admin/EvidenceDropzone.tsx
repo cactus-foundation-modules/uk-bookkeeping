@@ -29,12 +29,15 @@ function readableSize(bytes: number): string {
 export default function EvidenceDropzone({
   transactionId,
   attachments,
+  notRequired = false,
   locked,
   canRecord,
   onChange,
 }: {
   transactionId: string
   attachments: Attachment[]
+  /** Somebody has said this entry is never going to have a receipt. */
+  notRequired?: boolean
   locked: boolean
   canRecord: boolean
   onChange: () => void
@@ -102,10 +105,20 @@ export default function EvidenceDropzone({
       <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Evidence</h3>
       <ErrorNotice message={error} />
 
-      {attachments.length === 0 && (
+      {attachments.length === 0 && !notRequired && (
         <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
           No receipt on this one yet. HMRC expects you to keep them for six years, and the easiest
           time to attach one is now rather than in three years’ time.
+        </p>
+      )}
+
+      {/* The nag is the whole point of the tickbox, so it goes when it is
+          ticked. Attaching something anyway is still allowed: "none is coming"
+          and "one turned up after all" are both ordinary. */}
+      {notRequired && (
+        <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+          Marked as needing no receipt, so it is not counted as paperwork still owed. Untick that on
+          the entry if one turns up after all.
         </p>
       )}
 
@@ -123,10 +136,26 @@ export default function EvidenceDropzone({
               }}
             >
               <span style={{ flex: 1 }}>
-                <a href={`/api/m/uk-bookkeeping/admin/attachments/${attachment.id}`}>{attachment.name}</a>
+                {/* New tab, because the alternative is losing the entry you
+                    were checking it against. PDFs and photographs open in the
+                    browser; anything else the route still sends as a download,
+                    whatever this link says. */}
+                <a
+                  href={`/api/m/uk-bookkeeping/admin/attachments/${attachment.id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {attachment.name}
+                </a>
                 <span style={{ marginLeft: '0.5rem', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
                   {readableSize(attachment.size)}
                 </span>
+                <a
+                  href={`/api/m/uk-bookkeeping/admin/attachments/${attachment.id}?download=1`}
+                  style={{ marginLeft: '0.5rem', fontSize: 'var(--text-xs, 0.75rem)' }}
+                >
+                  Download
+                </a>
               </span>
               {attachment.locked_period_id ? (
                 <span title="On a filed return">🔒</span>

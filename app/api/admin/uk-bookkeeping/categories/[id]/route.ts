@@ -14,6 +14,8 @@ const Body = z.object({
   isCapital: z.boolean().optional(),
   position: z.number().int().optional(),
   archived: z.boolean().optional(),
+  /** Move it onto a different account. */
+  accountId: z.string().nullable().optional(),
 })
 
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {

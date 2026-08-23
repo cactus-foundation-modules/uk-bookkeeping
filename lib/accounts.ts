@@ -2,6 +2,8 @@ import { prisma } from '@/lib/db/prisma'
 import { BookkeepingError, NotFoundError } from './errors'
 import type { AccountKind, AccountSubtype, BkAccountRow } from './types'
 
+type TxClient = Omit<typeof prisma, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+
 // The ledger accounts a journal can reach.
 //
 // There is one list, not two. The profit and loss accounts mirror the categories
@@ -106,14 +108,111 @@ export function defaultBsGroup(kind: AccountKind, subtype?: AccountSubtype): str
   }
 }
 
+/**
+ * The profit and loss groups. Anything else on a category - "capital",
+ * "distributions" - is a balance sheet posting, and a category carrying one of
+ * those needs an account somebody chose rather than one this file guessed at.
+ */
+const PL_REPORT_GROUPS = [
+  'turnover',
+  'other-income',
+  'non-trade-income',
+  'property-income',
+  'cost-of-sales',
+  'staff-costs',
+  'admin-expenses',
+  'depreciation',
+  'finance-costs',
+  'tax',
+]
+
+export type CategoryLike = {
+  code: string
+  direction: 'income' | 'expense' | 'both'
+  ct600Group?: string | null
+  position?: number
+}
+
+/** The shape of an account, without the parts only a row has. */
+export type AccountTemplate = {
+  kind: AccountKind
+  subtype: AccountSubtype
+  reportGroup: string | null
+  bsGroup: string | null
+  disallowablePercent: string
+  position: number
+}
+
+export type CategoryAccountShape = AccountTemplate & { code: string }
+
+/**
+ * The account a category posts to, worked out rather than asked for.
+ *
+ * Every category needs one. Without it the cashbook posts the analysis side of
+ * an entry to Suspense, the trial balance stops agreeing with itself, and
+ * ledgerHealth() reports the books unhealthy - which is what happened to every
+ * category added through the settings screen before this existed.
+ *
+ * `template` is the account the category being copied already posts to: the
+ * settings screen files a new category "like" a seeded one, and the truest
+ * answer to "what shape of account does this need" is the shape of that one.
+ * A profit and loss template contributes its report line and its disallowable
+ * percentage while the new category's own direction still decides which side of
+ * the account an increase falls on. A balance sheet template - equipment,
+ * drawings, tax paid - is copied whole, because a second drawings category
+ * wants a second equity account and not a cost.
+ *
+ * With no template at all, which is the API caller's case and the backfill's,
+ * it is a profit and loss account named after the category, exactly as
+ * 006_accounts_and_journals.sql seeded the original ones.
+ */
+export function accountShapeForCategory(
+  category: CategoryLike,
+  template?: AccountTemplate | null,
+): CategoryAccountShape {
+  const plKind: AccountKind = category.direction === 'income' ? 'income' : 'expense'
+  const position = 1000 + (category.position ?? 1000)
+
+  if (template && template.kind !== 'income' && template.kind !== 'expense') {
+    return { ...template, code: `cat-${category.code}` }
+  }
+
+  const fallbackGroup = plKind === 'income' ? 'other-income' : 'admin-expenses'
+  const reportGroup =
+    template?.reportGroup ??
+    (category.ct600Group && PL_REPORT_GROUPS.includes(category.ct600Group)
+      ? category.ct600Group
+      : fallbackGroup)
+
+  return {
+    code: `pl-${category.code}`,
+    kind: plKind,
+    subtype: 'profit_and_loss',
+    reportGroup,
+    bsGroup: null,
+    disallowablePercent: template?.disallowablePercent ?? '0',
+    position,
+  }
+}
+
 function normaliseCode(input: string): string {
   return input.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 }
 
-export async function createAccount(input: AccountInput): Promise<BkAccountRow> {
+/**
+ * `db` so a caller that is already inside a transaction can create an account
+ * within it. A new category and the account it posts to have to arrive
+ * together or not at all: a category with no account posts one side of an
+ * entry and lands the other in suspense, which is the defect this parameter
+ * exists to make impossible.
+ */
+export async function createAccount(input: AccountInput, db: TxClient = prisma): Promise<BkAccountRow> {
   const code = normaliseCode(input.code || input.name)
   if (!code) throw new BookkeepingError('invalid', 'An account needs a name.')
-  if (await getAccountByCode(code)) {
+  const [clash] = await db.$queryRaw<{ id: string }[]>`
+    SELECT "id" FROM "bk_accounts" WHERE "code" = ${code} LIMIT 1
+  `
+  if (clash) {
     throw new BookkeepingError('duplicate', `There is already an account with the code "${code}".`)
   }
   if (input.subtype === 'director_loan' && !input.personName?.trim()) {
@@ -133,7 +232,7 @@ export async function createAccount(input: AccountInput): Promise<BkAccountRow> 
       : input.reportGroup
   const bsGroup = input.bsGroup === undefined ? defaultBsGroup(input.kind, input.subtype) : input.bsGroup
 
-  const rows = await prisma.$queryRaw<BkAccountRow[]>`
+  const rows = await db.$queryRaw<BkAccountRow[]>`
     INSERT INTO "bk_accounts"
       ("code", "name", "kind", "subtype", "category_id", "bank_account_id", "person_name",
        "position", "report_group", "bs_group", "disallowable_percent")

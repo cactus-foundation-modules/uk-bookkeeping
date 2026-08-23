@@ -25,6 +25,12 @@ const Body = z.object({
   // added that way share a position, which makes moving one of them up a
   // no-op. The settings screen sends one past the end instead.
   position: z.number().int().optional(),
+  // Which account it posts to. Given, it is pointed at that one; not given, an
+  // account is created for it in the same transaction, shaped like the one the
+  // named category already uses. A category with no account at all is not a
+  // thing this route can produce - see lib/categories.ts.
+  accountId: z.string().nullable().optional(),
+  likeCategoryCode: z.string().nullable().optional(),
 })
 
 export async function POST(request: NextRequest) {

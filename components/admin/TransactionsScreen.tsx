@@ -27,6 +27,7 @@ type Row = {
   vat_total: string
   gross_total: string
   attachment_count: number
+  evidence_not_required: boolean
 }
 
 type List = {
@@ -103,6 +104,7 @@ export default function TransactionsScreen({
     status: '',
     locked: '',
     hasEvidence: '',
+    evidenceNotRequired: '',
     categoryId: '',
   })
   // The text filter waits for the typing to pause rather than querying on every
@@ -140,6 +142,7 @@ export default function TransactionsScreen({
       status: params.get('status') ?? prev.status,
       locked: params.get('locked') ?? prev.locked,
       hasEvidence: params.get('hasEvidence') ?? prev.hasEvidence,
+      evidenceNotRequired: params.get('evidenceNotRequired') ?? prev.evidenceNotRequired,
       categoryId: params.get('categoryId') ?? prev.categoryId,
     }))
     const counterparty = params.get('counterparty')
@@ -285,10 +288,35 @@ export default function TransactionsScreen({
         </div>
         <div>
           <label htmlFor="bk-f-evidence" style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)' }}>Evidence</label>
-          <select id="bk-f-evidence" style={input} value={filters.hasEvidence} onChange={(e) => { setOffset(0); setFilters({ ...filters, hasEvidence: e.target.value }) }}>
+          {/* One box, two filters underneath it. "Still needs one" is the
+              question anybody actually asks, and it is not the same as "no
+              receipt" now that an entry can say none is coming. */}
+          <select
+            id="bk-f-evidence"
+            style={input}
+            value={
+              filters.evidenceNotRequired === '1'
+                ? 'x'
+                : filters.hasEvidence === '1'
+                  ? '1'
+                  : filters.hasEvidence === '0'
+                    ? '0'
+                    : ''
+            }
+            onChange={(e) => {
+              const choice = e.target.value
+              setOffset(0)
+              setFilters({
+                ...filters,
+                hasEvidence: choice === '1' ? '1' : choice === '0' ? '0' : '',
+                evidenceNotRequired: choice === 'x' ? '1' : choice === '0' ? '0' : '',
+              })
+            }}
+          >
             <option value="">All</option>
             <option value="1">Has a receipt</option>
-            <option value="0">No receipt</option>
+            <option value="0">Still needs one</option>
+            <option value="x">None needed</option>
           </select>
         </div>
         <div>
@@ -436,7 +464,24 @@ export default function TransactionsScreen({
                   </td>
                   <td style={money}>{poundsFromString(row.vat_total)}</td>
                   <td style={money}>{poundsFromString(row.gross_total)}</td>
-                  <td style={{ padding: '0.5rem 0.75rem' }}>{row.attachment_count > 0 ? row.attachment_count : ''}</td>
+                  <td style={{ padding: '0.5rem 0.75rem' }}>
+                    {row.attachment_count > 0 ? (
+                      row.attachment_count
+                    ) : row.evidence_not_required ? (
+                      // Grey rather than red, and a cross rather than a blank:
+                      // "dealt with, nothing to do" reads differently from
+                      // "nobody has looked at this yet".
+                      <span
+                        title="No receipt needed for this one"
+                        aria-label="No receipt needed"
+                        style={{ color: 'var(--color-text-muted, var(--color-text))', opacity: 0.65 }}
+                      >
+                        ✕
+                      </span>
+                    ) : (
+                      ''
+                    )}
+                  </td>
                   <td style={{ padding: '0.5rem 0.75rem' }}>{row.locked_period_id ? '🔒' : ''}</td>
                 </tr>
               ))}

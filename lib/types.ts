@@ -112,6 +112,8 @@ export type BkTransactionRow = {
   description: string
   reference: string | null
   status: TransactionStatus
+  /** "There is no receipt for this one, and there is not meant to be." */
+  evidence_not_required: boolean
   source: string
   source_ref: string | null
   import_batch_id: string | null

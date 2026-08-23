@@ -31,6 +31,7 @@ export async function GET(request: NextRequest) {
       status: (query.get('status') as 'draft' | 'posted' | null) || null,
       locked: boolean('locked'),
       hasEvidence: boolean('hasEvidence'),
+      evidenceNotRequired: boolean('evidenceNotRequired'),
       limit: integer('limit', 50),
       offset: integer('offset', 0),
     })

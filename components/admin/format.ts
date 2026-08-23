@@ -70,3 +70,76 @@ export function today(): string {
   const day = String(now.getDate()).padStart(2, '0')
   return `${now.getFullYear()}-${month}-${day}`
 }
+
+// ---------------------------------------------------------------------------
+// The three figures on a line
+// ---------------------------------------------------------------------------
+// Net, VAT and gross, of which exactly one is typed and the other two follow.
+// Kept here rather than inside the form so the arithmetic can be tested without
+// rendering anything - the rule below got this wrong once, in a way no test
+// could have caught while it lived in a component.
+
+/** Decimal arithmetic on strings, in pence, so no float ever exists here. */
+export function pence(value: string): number {
+  const cleaned = (value || '0').replace(/[^0-9.-]/g, '')
+  const negative = cleaned.startsWith('-')
+  const [whole = '0', fraction = ''] = cleaned.replace('-', '').split('.')
+  const total = Number(whole || '0') * 100 + Number(fraction.padEnd(2, '0').slice(0, 2) || '0')
+  return negative ? -total : total
+}
+
+export function fromPence(value: number): string {
+  const negative = value < 0
+  const absolute = Math.abs(Math.round(value))
+  return `${negative ? '-' : ''}${Math.floor(absolute / 100)}.${String(absolute % 100).padStart(2, '0')}`
+}
+
+export function vatForNet(net: string, ratePercent: string): string {
+  return fromPence(Math.round((pence(net) * pence(ratePercent)) / 100 / 100))
+}
+
+export function netForGross(gross: string, ratePercent: string): string {
+  const rate = pence(ratePercent)
+  return fromPence(Math.round((pence(gross) * 10000) / (rate + 10000)))
+}
+
+/** Which of the three figures is the fact the other two are worked out from. */
+export type AmountAnchor = 'net' | 'gross'
+
+export type LineAmounts = { netAmount: string; vatAmount: string; grossAmount: string }
+
+/**
+ * The line re-split at a new VAT rate, holding whichever figure was typed.
+ *
+ * This is the rule that was wrong. It always held the NET and put the VAT on
+ * top, so an entry raised from a bank line - where the gross is the money that
+ * actually left the account - grew by the VAT the moment somebody put it on
+ * 20%: a £20 statement line became a £24 receipt, and the entry no longer
+ * agreed with the statement it came from.
+ *
+ * Gross-anchored, the total stays put and the VAT comes out of it. Net-anchored,
+ * which is somebody typing a figure off an invoice that shows net and VAT
+ * separately, it goes on top. VAT is always the remainder rather than a second
+ * rounding, so gross equals net plus VAT to the penny and the CHECK constraint
+ * on the line cannot bite.
+ */
+export function resplitAtRate(
+  line: LineAmounts,
+  ratePercent: string,
+  anchor: AmountAnchor | undefined,
+): LineAmounts {
+  if (anchor !== 'net' && pence(line.grossAmount) !== 0) {
+    const netAmount = netForGross(line.grossAmount, ratePercent)
+    return {
+      netAmount,
+      vatAmount: fromPence(pence(line.grossAmount) - pence(netAmount)),
+      grossAmount: line.grossAmount,
+    }
+  }
+  const vatAmount = vatForNet(line.netAmount, ratePercent)
+  return {
+    netAmount: line.netAmount,
+    vatAmount,
+    grossAmount: fromPence(pence(line.netAmount) + pence(vatAmount)),
+  }
+}

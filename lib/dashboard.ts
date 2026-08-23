@@ -149,6 +149,10 @@ export async function getDashboard(): Promise<DashboardData> {
   const [evidenceRow] = await prisma.$queryRaw<{ count: bigint }[]>`
     SELECT COUNT(*)::bigint AS count FROM "bk_transactions" t
     WHERE t."status" = 'posted'
+      -- The ones somebody has said will never have a receipt are not a job.
+      -- Counting them for six years is how a genuinely missing one stops being
+      -- noticeable.
+      AND t."evidence_not_required" = FALSE
       AND NOT EXISTS (SELECT 1 FROM "bk_attachments" a WHERE a."transaction_id" = t."id")
   `
   // An asset nobody finished off claims no capital allowances, so the tax

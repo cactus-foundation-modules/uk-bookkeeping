@@ -60,7 +60,7 @@ export const EXPORT_KINDS: ExportKind[] = [
 const HEADERS: Record<ExportKind, string[]> = {
   transactions: [
     'id', 'entry_type', 'direction', 'tax_point_date', 'settled_date', 'counterparty',
-    'description', 'reference', 'status', 'source', 'corrects_transaction_id',
+    'description', 'reference', 'status', 'evidence_not_required', 'source', 'corrects_transaction_id',
     'correction_reason', 'finalised_period_id', 'locked_period_id', 'created_at',
   ],
   lines: [
@@ -128,7 +128,7 @@ async function fetchPage(kind: ExportKind, cursor: string | bigint | null): Prom
       const after = (cursor as string | null) ?? ''
       const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
         SELECT "id", "entry_type", "direction", "tax_point_date", "settled_date", "counterparty",
-               "description", "reference", "status", "source", "corrects_transaction_id",
+               "description", "reference", "status", "evidence_not_required", "source", "corrects_transaction_id",
                "correction_reason", "finalised_period_id", "locked_period_id", "created_at"
         FROM "bk_transactions" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
       `

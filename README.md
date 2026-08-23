@@ -23,8 +23,12 @@ computation follows the same rule.
   acted on.
 - **Records.** Entries with a date, a counterparty and one or more lines, so a
   single receipt can split across categories and VAT rates. A UK chart of
-  categories is seeded and can be extended. The form suggests counterparties the
-  site has seen before and pre-picks the category their entries usually land in.
+  categories is seeded and can be extended; a category added by the owner gets
+  its ledger account in the same transaction, or is pointed at one that already
+  exists, so it can never post half an entry into Suspense. Each entry says which
+  account it was paid from, so a bill settled out of a prepaid balance held with
+  a supplier leaves the bank alone. The form suggests counterparties the site has
+  seen before and pre-picks the category their entries usually land in.
 - **Evidence.** Receipts and invoices attached to an entry, stored through the
   site's own media provider and never tidied away by the media clean-up.
 - **VAT returns.** Periods, the nine boxes computed in one SQL statement,

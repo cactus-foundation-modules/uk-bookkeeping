@@ -56,6 +56,12 @@ export type TransactionInput = {
   description?: string
   reference?: string | null
   status?: TransactionStatus
+  /**
+   * "This one is never going to have a receipt." A top-up onto a balance held
+   * with a supplier, a bank charge, a payment on account. Left alone by every
+   * count of what is still missing evidence.
+   */
+  evidenceNotRequired?: boolean
   source?: string
   sourceRef?: string | null
   importBatchId?: string | null
@@ -161,6 +167,8 @@ export type TransactionFilter = {
   status?: TransactionStatus | null
   locked?: boolean | null
   hasEvidence?: boolean | null
+  /** Only the ones marked as needing no receipt, or only the ones not marked. */
+  evidenceNotRequired?: boolean | null
   limit?: number
   offset?: number
 }
@@ -213,6 +221,8 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
                  SELECT 1 FROM "bk_attachments" a WHERE a."transaction_id" = t."id"))
            OR (${filter.hasEvidence ?? null}::boolean = FALSE AND NOT EXISTS (
                  SELECT 1 FROM "bk_attachments" a WHERE a."transaction_id" = t."id")))
+      AND (${filter.evidenceNotRequired ?? null}::boolean IS NULL
+           OR t."evidence_not_required" = ${filter.evidenceNotRequired ?? null}::boolean)
   `
 
   const rows = await prisma.$queryRaw<TransactionListRow[]>`
@@ -293,6 +303,27 @@ export async function getTransaction(id: string): Promise<TransactionWithLines |
 // Writes
 // ---------------------------------------------------------------------------
 
+/**
+ * The account it was paid from, checked as a sentence.
+ *
+ * There is a foreign key behind this, so an id that is not an account of the
+ * business fails either way - but it fails as a constraint violation and a 500,
+ * and every other refusal in this module is a sentence somebody can act on.
+ */
+async function assertBankAccountUsable(id: string | null | undefined): Promise<void> {
+  if (!id) return
+  const [row] = await prisma.$queryRaw<{ name: string; archived: boolean }[]>`
+    SELECT "name", "archived" FROM "bk_bank_accounts" WHERE "id" = ${id} LIMIT 1
+  `
+  if (!row) throw new BookkeepingError('invalid', 'The account it was paid from is not one of yours.')
+  if (row.archived) {
+    throw new BookkeepingError(
+      'invalid',
+      `"${row.name}" has been archived, so nothing new can be recorded against it.`,
+    )
+  }
+}
+
 export async function createTransaction(
   input: TransactionInput,
   user: SessionUser | null,
@@ -321,6 +352,8 @@ export async function createTransaction(
     `
     if (!target) throw new NotFoundError('The entry this correction points at')
   }
+
+  await assertBankAccountUsable(input.bankAccountId)
 
   const id = await prisma.$transaction(async (tx) => insertTransactionRows(tx, input, user))
 
@@ -389,13 +422,14 @@ export async function insertTransactionRows(
   const [created] = await tx.$queryRaw<{ id: string }[]>`
     INSERT INTO "bk_transactions" (
       "entry_type", "direction", "tax_point_date", "settled_date", "counterparty",
-      "description", "reference", "status", "source", "source_ref", "import_batch_id",
+      "description", "reference", "status", "evidence_not_required", "source", "source_ref", "import_batch_id",
       "bank_account_id", "statement_id",
       "corrects_transaction_id", "correction_reason", "created_by_user_id", "updated_by_user_id"
     ) VALUES (
       ${input.entryType ?? 'normal'}, ${input.direction}, ${taxPoint}::date, ${settled}::date,
       ${input.counterparty.trim()}, ${resolveDescription(input)}, ${input.reference?.trim() || null},
-      ${input.status ?? 'posted'}, ${input.source ?? 'manual'}, ${input.sourceRef ?? null}, ${input.importBatchId ?? null},
+      ${input.status ?? 'posted'}, ${input.evidenceNotRequired ?? false},
+      ${input.source ?? 'manual'}, ${input.sourceRef ?? null}, ${input.importBatchId ?? null},
       ${input.bankAccountId ?? null}, ${input.statementId ?? null},
       ${input.correctsTransactionId ?? null}, ${input.correctionReason?.trim() ?? null},
       ${user?.id ?? null}, ${user?.id ?? null}
@@ -455,6 +489,10 @@ export async function updateTransaction(
   if (entryType === 'adjustment' && !correctsId) {
     throw new BookkeepingError('invalid', 'A correction has to say which entry it puts right.')
   }
+  if (input.bankAccountId !== undefined && input.bankAccountId !== before.bank_account_id) {
+    await assertBankAccountUsable(input.bankAccountId)
+  }
+
   if (correctsId && correctsId !== before.corrects_transaction_id) {
     const [target] = await prisma.$queryRaw<{ id: string }[]>`
       SELECT "id" FROM "bk_transactions" WHERE "id" = ${correctsId} LIMIT 1
@@ -470,9 +508,23 @@ export async function updateTransaction(
         "tax_point_date"    = ${taxPoint}::date,
         "settled_date"      = ${settled}::date,
         "counterparty"      = ${input.counterparty.trim()},
+        -- Undefined means "leave it alone", not "clear it". An entry raised
+        -- from a bank line carries the account it was reconciled against, and
+        -- a caller that does not send the field must not quietly move it to
+        -- the main current account. Same trap the lines had with is_capital.
+        "bank_account_id"   = ${
+          input.bankAccountId === undefined ? before.bank_account_id : input.bankAccountId
+        },
         "description"       = ${resolveDescription(input)},
         "reference"         = ${input.reference?.trim() || null},
         "status"            = ${status},
+        -- Undefined keeps what is there, for the same reason bank_account_id
+        -- does: a caller that does not send the field must not untick it.
+        "evidence_not_required" = ${
+          input.evidenceNotRequired === undefined
+            ? before.evidence_not_required
+            : input.evidenceNotRequired
+        },
         "corrects_transaction_id" = ${correctsId},
         "correction_reason" = ${entryType === 'adjustment' ? (input.correctionReason?.trim() ?? before.correction_reason) : null},
         "updated_by_user_id"= ${user?.id ?? null},

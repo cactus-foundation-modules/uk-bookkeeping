@@ -3,7 +3,17 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
 import { ErrorNotice } from './Notices'
-import { addStrings, poundsFromString, toDateInput, today } from './format'
+import {
+  addStrings,
+  fromPence,
+  netForGross,
+  pence,
+  poundsFromString,
+  resplitAtRate,
+  toDateInput,
+  today,
+  vatForNet,
+} from './format'
 
 // Recording one entry.
 //
@@ -14,9 +24,31 @@ import { addStrings, poundsFromString, toDateInput, today } from './format'
 
 type Category = { id: string; name: string; direction: string; is_capital: boolean; archived: boolean }
 
+type BankAccount = { id: string; name: string; kind: string; archived: boolean }
+
+const BANK_KIND_LABELS: Record<string, string> = {
+  bank: 'bank account',
+  card: 'card',
+  cash: 'cash or prepaid balance',
+}
+
 type Line = {
   /** Client-side identity for React keys and input ids. Never sent to the server. */
   uid?: string
+  /**
+   * Which figure on this line is the fact, and which two are worked out from
+   * it. Client-side only, never sent.
+   *
+   * Changing the VAT rate has to hold one of the three still, and holding the
+   * net was wrong for the commonest case in the module: an entry raised from a
+   * bank line, where the gross IS the money that left the account. Putting that
+   * line onto 20% used to leave the total at £24 when the bank said £20, which
+   * is a receipt that disagrees with the statement it came from.
+   *
+   * So the last figure typed wins, and a line nobody has typed into - an
+   * imported one, or one being edited - starts on the gross.
+   */
+  anchor?: 'net' | 'gross'
   categoryId: string
   description: string
   vatTreatment: string
@@ -87,6 +119,7 @@ const label: React.CSSProperties = {
 function emptyLine(category: Pick<Category, 'id' | 'is_capital'> | null): Line {
   return {
     uid: nextLineUid(),
+    anchor: 'gross',
     categoryId: category?.id ?? '',
     description: '',
     vatTreatment: 'domestic',
@@ -104,30 +137,6 @@ function emptyLine(category: Pick<Category, 'id' | 'is_capital'> | null): Line {
   }
 }
 
-/** Decimal arithmetic on strings, in pence, so no float ever exists here either. */
-function pence(value: string): number {
-  const cleaned = (value || '0').replace(/[^0-9.-]/g, '')
-  const negative = cleaned.startsWith('-')
-  const [whole = '0', fraction = ''] = cleaned.replace('-', '').split('.')
-  const total = Number(whole || '0') * 100 + Number(fraction.padEnd(2, '0').slice(0, 2) || '0')
-  return negative ? -total : total
-}
-
-function fromPence(value: number): string {
-  const negative = value < 0
-  const absolute = Math.abs(Math.round(value))
-  return `${negative ? '-' : ''}${Math.floor(absolute / 100)}.${String(absolute % 100).padStart(2, '0')}`
-}
-
-function vatForNet(net: string, ratePercent: string): string {
-  return fromPence(Math.round((pence(net) * pence(ratePercent)) / 100 / 100))
-}
-
-function netForGross(gross: string, ratePercent: string): string {
-  const rate = pence(ratePercent)
-  return fromPence(Math.round((pence(gross) * 10000) / (rate + 10000)))
-}
-
 // No entry-level description. What an entry was for is asked once per line, in
 // "What it was made up of", because that is the level it is actually true at: a
 // receipt with a tank of fuel and a sandwich on it was for two things, and one
@@ -139,6 +148,24 @@ export type TransactionFormValue = {
   direction: string
   taxPointDate: string
   settledDate: string
+  /**
+   * Which account the money moved through. Empty means the main current
+   * account, which is where every entry settled before this could be asked -
+   * so an empty box changes nothing about how the books already read.
+   *
+   * The reason it can be asked at all: a balance held with a supplier - a
+   * prepaid phone or postage account, a card topped up in advance - is a cash
+   * account of the business like any other. Recording the top-up against it and
+   * then each invoice as paid FROM it is what drains the balance down and keeps
+   * the bank out of a payment the bank never made.
+   */
+  bankAccountId?: string
+  /**
+   * "There is no receipt for this one, and there is not meant to be." Keeps a
+   * top-up onto a supplier balance, or a bank charge, off the list of things
+   * still waiting for paperwork, where it would otherwise sit for six years.
+   */
+  evidenceNotRequired?: boolean
   counterparty: string
   reference: string
   correctsTransactionId?: string | null
@@ -155,6 +182,7 @@ export default function TransactionForm({
 }) {
   const adminPath = useAdminPath()
   const [categories, setCategories] = useState<Category[]>([])
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([])
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [knownCounterparties, setKnownCounterparties] = useState<string[]>([])
@@ -168,6 +196,8 @@ export default function TransactionForm({
       direction: 'expense',
       taxPointDate: today(),
       settledDate: today(),
+      bankAccountId: '',
+      evidenceNotRequired: false,
       counterparty: '',
       reference: '',
       correctsTransactionId: correcting?.id ?? null,
@@ -205,6 +235,15 @@ export default function TransactionForm({
         )
       })
       .catch(() => setError('The category list could not be loaded.'))
+  }, [])
+
+  useEffect(() => {
+    fetch('/api/m/uk-bookkeeping/admin/bank-accounts')
+      .then((r) => (r.ok ? r.json() : { accounts: [] }))
+      .then((data) => setBankAccounts((data.accounts ?? []).filter((a: BankAccount) => !a.archived)))
+      // Not an error worth a banner. The box simply does not appear, and the
+      // entry settles where it always did.
+      .catch(() => setBankAccounts([]))
   }, [])
 
   useEffect(() => {
@@ -266,13 +305,19 @@ export default function TransactionForm({
   function changeNet(index: number, net: string) {
     const line = value.lines[index]!
     const vat = vatForNet(net, line.vatRatePercent)
-    setLine(index, { netAmount: net, vatAmount: vat, grossAmount: fromPence(pence(net) + pence(vat)) })
+    setLine(index, {
+      anchor: 'net',
+      netAmount: net,
+      vatAmount: vat,
+      grossAmount: fromPence(pence(net) + pence(vat)),
+    })
   }
 
   function changeGross(index: number, gross: string) {
     const line = value.lines[index]!
     const net = netForGross(gross, line.vatRatePercent)
     setLine(index, {
+      anchor: 'gross',
       grossAmount: gross,
       netAmount: net,
       vatAmount: fromPence(pence(gross) - pence(net)),
@@ -284,15 +329,21 @@ export default function TransactionForm({
     setLine(index, { vatAmount: vat, grossAmount: fromPence(pence(line.netAmount) + pence(vat)) })
   }
 
+  /**
+   * Changing the rate re-splits the line, holding whichever figure was typed.
+   *
+   * Gross-anchored - which is every imported line and every receipt somebody
+   * read the total off - the total stays put and the VAT comes OUT of it. Net
+   * -anchored, the VAT goes on top. The old behaviour was always the second
+   * one, so putting an imported £20 line onto 20% quietly made it £24.
+   */
   function changeRate(index: number, rateCode: string) {
     const line = value.lines[index]!
     const percent = RATE_PERCENTS[rateCode] ?? '0.00'
-    const vat = vatForNet(line.netAmount, percent)
     setLine(index, {
       vatRateCode: rateCode,
       vatRatePercent: percent,
-      vatAmount: vat,
-      grossAmount: fromPence(pence(line.netAmount) + pence(vat)),
+      ...resplitAtRate(line, percent, line.anchor),
     })
   }
 
@@ -311,11 +362,13 @@ export default function TransactionForm({
       direction: value.direction,
       taxPointDate: value.taxPointDate,
       settledDate: value.settledDate || null,
+      bankAccountId: value.bankAccountId || null,
+      evidenceNotRequired: !!value.evidenceNotRequired,
       counterparty: value.counterparty,
       reference: value.reference || null,
       correctsTransactionId: value.correctsTransactionId ?? null,
       correctionReason: value.correctionReason || null,
-      lines: value.lines.map(({ uid: _uid, ...line }) => line),
+      lines: value.lines.map(({ uid: _uid, anchor: _anchor, ...line }) => line),
     }
 
     try {
@@ -402,6 +455,27 @@ export default function TransactionForm({
               onChange={(e) => setValue({ ...value, settledDate: e.target.value })}
             />
           </div>
+          {bankAccounts.length > 0 && (
+            <div>
+              <label style={label} htmlFor="bk-bank-account">
+                {value.direction === 'income' ? 'Paid into' : 'Paid from'}
+              </label>
+              <select
+                id="bk-bank-account"
+                style={input}
+                value={value.bankAccountId ?? ''}
+                onChange={(e) => setValue({ ...value, bankAccountId: e.target.value })}
+              >
+                <option value="">Main current account</option>
+                {bankAccounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.name}
+                    {BANK_KIND_LABELS[account.kind] ? ` (${BANK_KIND_LABELS[account.kind]})` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <div>
             <label style={label} htmlFor="bk-counterparty">Who it was with</label>
             <input
@@ -440,6 +514,37 @@ export default function TransactionForm({
             </div>
           )}
         </div>
+
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '0.5rem',
+            marginTop: '1rem',
+            fontSize: 'var(--text-sm)',
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={!!value.evidenceNotRequired}
+            onChange={(e) => setValue({ ...value, evidenceNotRequired: e.target.checked })}
+            style={{ marginTop: '0.2rem' }}
+          />
+          <span>
+            No receipt needed for this one
+            <span
+              style={{
+                display: 'block',
+                fontSize: 'var(--text-xs, 0.75rem)',
+                color: 'var(--color-text-muted, var(--color-text))',
+              }}
+            >
+              For the entries that are never going to have one - money put onto an account held
+              with a supplier, a bank charge. It stops this entry counting as paperwork still
+              owed, and nothing else.
+            </span>
+          </span>
+        </label>
       </div>
 
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1rem' }}>

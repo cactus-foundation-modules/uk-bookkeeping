@@ -31,10 +31,18 @@ export const TransactionBody = z.object({
   direction: z.enum(['income', 'expense']),
   taxPointDate: z.string().min(8),
   settledDate: z.string().nullable().optional(),
+  /**
+   * Which account it was paid from or into. Null means the main current
+   * account, which is where a cashbook entry has always settled and is what
+   * every entry recorded before this field existed still means.
+   */
+  bankAccountId: z.string().nullable().optional(),
   counterparty: z.string().min(1),
   description: z.string().optional(),
   reference: z.string().nullable().optional(),
   status: z.enum(['draft', 'posted']).optional(),
+  /** "No receipt is coming, and none is meant to." */
+  evidenceNotRequired: z.boolean().optional(),
   correctsTransactionId: z.string().nullable().optional(),
   correctionReason: z.string().nullable().optional(),
   lines: z.array(LineBody).min(1),
