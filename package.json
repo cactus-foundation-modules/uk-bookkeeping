@@ -1,6 +1,6 @@
 {
   "name": "cactus-module-uk-bookkeeping",
-  "version": "0.2.16",
+  "version": "0.2.17",
   "description": "UK bookkeeping, double-entry accounts, Making Tax Digital VAT and corporation tax for Cactus",
   "license": "MIT",
   "private": true

@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db/prisma'
 import type { SessionUser } from '@/lib/auth/session'
 import { appendAudit } from './audit'
 import { BookkeepingError, NotFoundError } from './errors'
+import { refreshBankTransactionStatuses } from './reconciliation'
 import { removeAssetDraftsForTransaction, syncAssetDraftsForTransaction } from './fixed-assets'
 import { assertDatesNotInClosedPeriod, assertTransactionMutable } from './guards'
 import { formatMoney, toMoney } from './money'
@@ -590,7 +591,26 @@ export async function deleteTransaction(id: string, user: SessionUser | null): P
   // asset and useless for a draft: without its purchase a draft has nothing to
   // say where it came from.
   await removeAssetDraftsForTransaction(id)
-  await prisma.$executeRaw`DELETE FROM "bk_transactions" WHERE "id" = ${id}`
+
+  // Which statement lines this entry was explaining, read BEFORE it goes: the
+  // reconciliations cascade with it, and after the delete there is nothing left
+  // to say which lines are now short of an explanation.
+  const matched = await prisma.$queryRaw<{ bank_transaction_id: string }[]>`
+    SELECT DISTINCT "bank_transaction_id" FROM "bk_reconciliations" WHERE "transaction_id" = ${id}
+  `
+
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`DELETE FROM "bk_transactions" WHERE "id" = ${id}`
+    // The cascade takes the matches; nothing took the CONSEQUENCE of the
+    // matches. A line left stamped 'reconciled' with nothing explaining it
+    // disappears off the reconciliation screen entirely - ticked off by an
+    // entry that no longer exists, and no way back to it but setting it aside
+    // and bringing it back.
+    await refreshBankTransactionStatuses(
+      tx,
+      matched.map((row) => row.bank_transaction_id),
+    )
+  })
 
   await appendAudit({
     action: 'transaction.deleted',

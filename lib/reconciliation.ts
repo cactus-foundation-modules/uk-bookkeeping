@@ -288,6 +288,46 @@ export async function refreshBankTransactionStatuses(
   `
 }
 
+/**
+ * What a match tells the entry about itself.
+ *
+ * Tying an entry to a statement line settles two things the entry may not have
+ * known: WHICH account the money moved through, and WHEN. Both are filled in
+ * here, and only where the entry has no answer of its own - a date somebody
+ * typed is a statement of fact and a match must never overwrite it.
+ *
+ * The date matters more than it looks. lib/ledger.ts posts the money side of an
+ * entry at its settled date and nowhere else, so an invoice matched to the bank
+ * with no settled date stays sitting in creditors, with the bank never showing
+ * the payment - the statement line goes green and the books still say the
+ * supplier is owed. On cash accounting it is worse than untidy: the VAT is not
+ * reclaimable until the entry is paid, so an unstamped date keeps the VAT out
+ * of every return there is.
+ *
+ * Locked entries are skipped rather than refused: a filed return is not to be
+ * rewritten, and a match against one is legitimate.
+ */
+export async function stampSettlementFromLines(
+  tx: TxClient,
+  pairs: { bankTransactionId: string; transactionId: string }[],
+): Promise<void> {
+  if (pairs.length === 0) return
+  await tx.$executeRaw`
+    UPDATE "bk_transactions" t
+    SET "settled_date"    = COALESCE(t."settled_date", b."date"),
+        "bank_account_id" = COALESCE(t."bank_account_id", b."bank_account_id"),
+        "updated_at"      = NOW()
+    FROM UNNEST(
+      ${pairs.map((pair) => pair.bankTransactionId)}::text[],
+      ${pairs.map((pair) => pair.transactionId)}::text[]
+    ) AS d("bank_id", "transaction_id")
+    JOIN "bk_bank_transactions" b ON b."id" = d."bank_id"
+    WHERE t."id" = d."transaction_id"
+      AND t."locked_period_id" IS NULL
+      AND (t."settled_date" IS NULL OR t."bank_account_id" IS NULL)
+  `
+}
+
 export type MatchInput = {
   bankTransactionId: string
   transactionId: string
@@ -377,17 +417,13 @@ export async function matchTransaction(input: MatchInput, user: SessionUser | nu
       ON CONFLICT ("bank_transaction_id", "transaction_id") DO UPDATE
         SET "amount" = EXCLUDED."amount", "match_method" = EXCLUDED."match_method"
     `
-    // The entry now knows which account it was paid from, which is what makes a
-    // per-account report possible without walking the reconciliations every time.
-    await tx.$executeRaw`
-      UPDATE "bk_transactions" t
-      SET "bank_account_id" = b."bank_account_id", "updated_at" = NOW()
-      FROM "bk_bank_transactions" b
-      WHERE b."id" = ${input.bankTransactionId}
-        AND t."id" = ${input.transactionId}
-        AND t."bank_account_id" IS NULL
-        AND t."locked_period_id" IS NULL
-    `
+    // The entry now knows which account it was paid from and when, which is
+    // what makes a per-account report possible without walking the
+    // reconciliations every time - and what keeps a matched invoice from
+    // sitting in creditors for ever.
+    await stampSettlementFromLines(tx, [
+      { bankTransactionId: input.bankTransactionId, transactionId: input.transactionId },
+    ])
     await refreshBankTransactionStatus(tx, input.bankTransactionId)
   })
 

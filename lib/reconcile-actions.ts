@@ -5,7 +5,12 @@ import { appendAudit } from './audit'
 import { BookkeepingError, NotFoundError } from './errors'
 import { assertDatesNotClosed, loadClosedRanges } from './guards'
 import { formatMoney, formatPounds, netFromGross, ZERO } from './money'
-import { confidentMatch, refreshBankTransactionStatuses, suggestMatchesForLines } from './reconciliation'
+import {
+  confidentMatch,
+  refreshBankTransactionStatuses,
+  stampSettlementFromLines,
+  suggestMatchesForLines,
+} from './reconciliation'
 import { insertTransactionRows, type BulkOutcome } from './transactions'
 import { VAT_RATE_PERCENTS, type Money, type TransactionStatus, type VatRateCode } from './types'
 
@@ -270,6 +275,11 @@ async function insertReconciliations(
     ON CONFLICT ("bank_transaction_id", "transaction_id") DO UPDATE
       SET "amount" = EXCLUDED."amount", "match_method" = EXCLUDED."match_method"
   `
+  // Same as the single match does: the entries now know when they were paid and
+  // out of which account. Settling six invoices against one payout and leaving
+  // all six with no settled date is how a green statement line and a creditors
+  // balance that says the supplier is still owed end up on the same books.
+  await stampSettlementFromLines(tx, pairs)
 }
 
 // ---------------------------------------------------------------------------

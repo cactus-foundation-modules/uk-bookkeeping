@@ -77,6 +77,7 @@ suite('importing a statement, against a real database', () => {
     commitStatement: typeof import('./import').commitStatement
     createBankAccount: typeof import('./bank-accounts').createBankAccount
     createTransaction: typeof import('./transactions').createTransaction
+    deleteTransaction: typeof import('./transactions').deleteTransaction
     listBankTransactions: typeof import('./bank-transactions').listBankTransactions
     listSettlementCandidates: typeof import('./reconcile-actions').listSettlementCandidates
     settleBankLine: typeof import('./reconcile-actions').settleBankLine
@@ -111,6 +112,7 @@ suite('importing a statement, against a real database', () => {
       commitStatement: (await import('./import')).commitStatement,
       createBankAccount: (await import('./bank-accounts')).createBankAccount,
       createTransaction: (await import('./transactions')).createTransaction,
+      deleteTransaction: (await import('./transactions')).deleteTransaction,
       listBankTransactions: (await import('./bank-transactions')).listBankTransactions,
       listSettlementCandidates: (await import('./reconcile-actions')).listSettlementCandidates,
       settleBankLine: (await import('./reconcile-actions')).settleBankLine,
@@ -210,6 +212,13 @@ suite('importing a statement, against a real database', () => {
     expect(after.rows.find((row) => row.id === twilio.id)!.status).toBe('reconciled')
     // Matched, not duplicated: still the one entry in the books.
     expect((await lib.listTransactions({})).rows).toHaveLength(1)
+
+    // The match tells the entry what it did not know. Without the date the
+    // ledger never posts the money side, so a green statement line sits beside
+    // a creditors balance saying the supplier is still owed.
+    const entry = (await lib.listTransactions({})).rows[0]!
+    expect(entry.settled_date?.toISOString().slice(0, 10)).toBe('2026-07-18')
+    expect(entry.bank_account_id).toBe(bankAccountId)
   })
 
   it('codes a batch of lines to one category in a single go', async () => {
@@ -375,6 +384,14 @@ suite('importing a statement, against a real database', () => {
     expect(fee).toHaveLength(1)
     expect(fee[0]!.gross_total.toFixed(2)).toBe('3.15')
     expect(fee[0]!.direction).toBe('expense')
+
+    // Every invoice the payout settled now says when it was paid and out of
+    // which account, the same as a single match does. Six invoices settled
+    // against one payout and not one of them showing as paid was the shape of
+    // the bug this pins down.
+    const beta = (await lib.listTransactions({ counterparty: 'Beta Ltd' })).rows[0]!
+    expect(beta.settled_date?.toISOString().slice(0, 10)).toBe('2026-07-31')
+    expect(beta.bank_account_id).toBe(bankAccountId)
   })
 
   it('refuses to settle while the difference has nowhere to go, and changes nothing', async () => {
@@ -440,5 +457,23 @@ suite('importing a statement, against a real database', () => {
     )
     expect(settled.difference).toBe('-1.50')
     expect((await lib.listBankTransactions({ bankAccountId, status: 'unreconciled' })).rows).toHaveLength(0)
+  })
+
+  it('puts a statement line back on the pile when the entry explaining it is deleted', async () => {
+    // The line from the test above, now explained by Gamma's invoice and the
+    // fee entry raised beside it.
+    const gamma = (await lib.listTransactions({ counterparty: 'Gamma Ltd' })).rows[0]!
+    const before = await lib.listBankTransactions({ bankAccountId, status: 'reconciled' })
+    const line = before.rows.find((row) => row.amount.toFixed(2) === '48.50')!
+    expect(line.status).toBe('reconciled')
+
+    await lib.deleteTransaction(gamma.id, null)
+
+    // The matches cascade with the entry. What used to be missed was the
+    // consequence: the line stayed stamped 'reconciled', vanished off the
+    // reconciliation screen, and was explained by an entry that no longer
+    // existed.
+    const after = await lib.listBankTransactions({ bankAccountId })
+    expect(after.rows.find((row) => row.id === line.id)!.status).toBe('unreconciled')
   })
 })
