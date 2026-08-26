@@ -112,6 +112,7 @@ suite('the document inbox, against a real database', () => {
       vat: '20.00',
       total: '120.00',
       vatRateCode: 'standard',
+      vatTreatment: 'domestic',
       vatNumber: 'GB123456782',
       text: 'Acme Supplies Limited\nTotal 120.00',
     })
@@ -123,6 +124,7 @@ suite('the document inbox, against a real database', () => {
     expect(row!.guessed_total?.toFixed(2)).toBe('120.00')
     expect(row!.guessed_document_date?.toISOString().slice(0, 10)).toBe('2026-02-10')
     expect(row!.reading_confirmed).toBe(false)
+    expect(row!.guessed_vat_treatment).toBe('domestic')
 
     // And crosses the wire as a two-decimal string rather than Decimal's "120.5".
     const payload = documents.toDocumentPayload(row!)
@@ -247,10 +249,12 @@ suite('the document inbox, against a real database', () => {
         vat: '16.00',
         total: '96.00',
         vatRateCode: 'standard',
+        vatTreatment: 'reverse_charge_services',
       },
       null,
     )
     expect(corrected.reading_confirmed).toBe(true)
+    expect(corrected.guessed_vat_treatment).toBe('reverse_charge_services')
     expect(corrected.counterparty_confidence).toBe(100)
     expect(corrected.guessed_total?.toFixed(2)).toBe('96.00')
     expect(corrected.guessed_document_date?.toISOString().slice(0, 10)).toBe('2026-02-09')
@@ -263,6 +267,13 @@ suite('the document inbox, against a real database', () => {
     await expect(
       documents.updateDocumentReading('doc-1', { documentDate: 'last Tuesday' }, null),
     ).rejects.toThrow(/has to be a real date/i)
+    await expect(
+      documents.updateDocumentReading(
+        'doc-1',
+        { vatTreatment: 'made up' as never },
+        null,
+      ),
+    ).rejects.toThrow(/not a way of handling VAT/i)
   })
 
   it('will not silently re-read a document somebody has checked by hand', async () => {

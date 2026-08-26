@@ -92,6 +92,19 @@ const RATE_LABELS: Record<string, string> = {
   outside_scope: 'Outside the scope of VAT',
 }
 
+/**
+ * The treatments where the SUPPLIER charges nothing and the buyer accounts for
+ * the VAT on both sides of their own return.
+ *
+ * These lines carry no VAT at all - zero is what was paid, and the total is what
+ * left the bank, so the entry agrees with its statement line and the supplier is
+ * shown owed what they invoiced. The notional VAT is worked out on the return
+ * itself from the net and the rate, and lands in box 1 and box 4 together, where
+ * it nets to nothing. Putting it on the line instead would make a £75 invoice a
+ * £90 entry that no bank line can ever match.
+ */
+const BUYER_ACCOUNTS_FOR_VAT = ['reverse_charge_services', 'domestic_reverse_charge']
+
 const TREATMENT_LABELS: Record<string, string> = {
   domestic: 'UK domestic',
   ni_eu_acquisition: 'Goods bought into Northern Ireland from the EU',
@@ -371,7 +384,23 @@ export default function TransactionForm({
         const impliedZero = vat !== null && vat !== undefined && pence(vat) === 0
         const rateCode = document.guessed_vat_rate_code ?? (impliedZero ? 'zero' : null)
 
-        if (net && vat && pence(net) + pence(vat) === pence(total)) {
+        // A reverse charge: the whole payment is the net, the VAT box is nothing,
+        // and the rate is the notional UK one the return works from.
+        if (document.guessed_vat_treatment && BUYER_ACCOUNTS_FOR_VAT.includes(document.guessed_vat_treatment)) {
+          const code = document.guessed_vat_rate_code ?? 'standard'
+          next.lines = [
+            {
+              ...only,
+              anchor: 'gross',
+              vatTreatment: document.guessed_vat_treatment,
+              vatRateCode: code,
+              vatRatePercent: RATE_PERCENTS[code] ?? '20.00',
+              netAmount: total,
+              vatAmount: '0.00',
+              grossAmount: total,
+            },
+          ]
+        } else if (net && vat && pence(net) + pence(vat) === pence(total)) {
           // The supplier's own split, exactly as printed. Their rounding is the
           // record; re-deriving it from a rate is a coin flip we do not need to
           // take when they have told us.
@@ -380,6 +409,7 @@ export default function TransactionForm({
             {
               ...only,
               anchor: 'gross',
+              vatTreatment: document.guessed_vat_treatment ?? only.vatTreatment,
               vatRateCode: code,
               vatRatePercent: RATE_PERCENTS[code] ?? only.vatRatePercent,
               netAmount: net,
@@ -398,6 +428,7 @@ export default function TransactionForm({
             {
               ...only,
               anchor: 'gross',
+              vatTreatment: document.guessed_vat_treatment ?? only.vatTreatment,
               vatRateCode: code,
               vatRatePercent: percent,
               netAmount: derived,
@@ -477,6 +508,29 @@ export default function TransactionForm({
     })
   }
 
+  /**
+   * Changing the treatment can change what the VAT box means.
+   *
+   * Moving a line onto a reverse charge zeroes it and hands the whole amount to
+   * the net: nothing was charged. Moving it back off leaves the figures where
+   * they are rather than inventing any - the rate is still there, and somebody
+   * who wants the VAT can press the rate again.
+   */
+  function changeTreatment(index: number, treatment: string) {
+    const line = value.lines[index]!
+    if (!BUYER_ACCOUNTS_FOR_VAT.includes(treatment)) {
+      setLine(index, { vatTreatment: treatment })
+      return
+    }
+    const whole = line.anchor === 'net' ? line.netAmount : line.grossAmount
+    setLine(index, {
+      vatTreatment: treatment,
+      netAmount: whole,
+      vatAmount: '0.00',
+      grossAmount: whole,
+    })
+  }
+
   function changeVat(index: number, vat: string) {
     const line = value.lines[index]!
     setLine(index, { vatAmount: vat, grossAmount: fromPence(pence(line.netAmount) + pence(vat)) })
@@ -493,6 +547,13 @@ export default function TransactionForm({
   function changeRate(index: number, rateCode: string) {
     const line = value.lines[index]!
     const percent = RATE_PERCENTS[rateCode] ?? '0.00'
+    // On a reverse charge the rate says what the VAT WOULD have been, and the
+    // return works it out from there. Re-splitting the line at it would take VAT
+    // out of a payment that never had any in it.
+    if (BUYER_ACCOUNTS_FOR_VAT.includes(line.vatTreatment)) {
+      setLine(index, { vatRateCode: rateCode, vatRatePercent: percent })
+      return
+    }
     setLine(index, {
       vatRateCode: rateCode,
       vatRatePercent: percent,
@@ -501,6 +562,7 @@ export default function TransactionForm({
   }
 
   function vatWarning(line: Line): string | null {
+    if (BUYER_ACCOUNTS_FOR_VAT.includes(line.vatTreatment)) return null
     const implied = vatForNet(line.netAmount, line.vatRatePercent)
     return Math.abs(pence(implied) - pence(line.vatAmount)) > 1
       ? `At this rate the VAT would be ${poundsFromString(implied)}. That is fine if it is what the document says.`
@@ -830,7 +892,7 @@ export default function TransactionForm({
                   id={`bk-line-${line.uid}-treatment`}
                   style={input}
                   value={line.vatTreatment}
-                  onChange={(e) => setLine(index, { vatTreatment: e.target.value })}
+                  onChange={(e) => changeTreatment(index, e.target.value)}
                 >
                   {Object.entries(TREATMENT_LABELS).map(([code, text]) => (
                     <option key={code} value={code}>
@@ -867,8 +929,18 @@ export default function TransactionForm({
                   inputMode="decimal"
                   value={line.vatAmount}
                   onChange={(e) => changeVat(index, e.target.value)}
+                  readOnly={BUYER_ACCOUNTS_FOR_VAT.includes(line.vatTreatment)}
                 />
               </div>
+              {BUYER_ACCOUNTS_FOR_VAT.includes(line.vatTreatment) && (
+                <p style={{ ...hint, gridColumn: '1 / -1' }}>
+                  Your supplier charges no VAT on this one and you account for it yourself, which
+                  is why the VAT box is nothing and the total is what you actually paid. The VAT
+                  goes on your return twice - once as owed, once as reclaimed - so it costs you
+                  nothing. The rate above is the rate it WOULD have been at in the UK, and it is
+                  what that sum is worked out from, so it is worth being right.
+                </p>
+              )}
             </div>
 
             {/*

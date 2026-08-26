@@ -11,7 +11,7 @@ import {
 import { parseStatementDate } from './statement'
 import { normaliseAlias } from './counterparty-aliases'
 import { allWordsPresent, significantWords, DOCUMENT_STOP_WORDS } from './name-matching'
-import type { VatRateCode } from './types'
+import type { VatRateCode, VatTreatment } from './types'
 
 // Reading an invoice or a receipt.
 //
@@ -64,6 +64,13 @@ export type DocumentReading = {
   vat: string | null
   total: string | null
   vatRateCode: VatRateCode | null
+  /**
+   * How the VAT works, which is a different question from at what rate. An
+   * overseas invoice showing 0% and the words "reverse charge" is not a
+   * zero-rated purchase: the buyer accounts for the VAT on both sides of their
+   * own return, and reading it as zero-rated understates boxes 1 and 4.
+   */
+  vatTreatment: VatTreatment | null
   vatNumber: string | null
   text: string | null
 }
@@ -93,6 +100,7 @@ export const EMPTY_READING: DocumentReading = {
   vat: null,
   total: null,
   vatRateCode: null,
+  vatTreatment: null,
   vatNumber: null,
   text: null,
 }
@@ -751,6 +759,70 @@ export function guessCounterparty(
 }
 
 // ---------------------------------------------------------------------------
+// How the VAT works
+// ---------------------------------------------------------------------------
+
+/**
+ * The wordings a supplier uses when they are not charging VAT because you have
+ * to account for it yourself.
+ *
+ * Taken from what actually appears on invoices rather than from the legislation:
+ * an EU supplier quotes the Directive, a UK construction firm quotes the CIS
+ * wording, and an American one just writes "reverse charge". All three mean the
+ * same thing to the buyer's return.
+ */
+const REVERSE_CHARGE_WORDING =
+  /reverse[\s-]?charge|customer\s+to\s+account\s+for\s+(?:the\s+)?vat|vat\s+to\s+be\s+accounted\s+for\s+by\s+the\s+(?:customer|recipient)|article\s+19[46]|s55a\s+vata|vata\s*1994\s*(?:section|s)\s*55a/i
+
+/** The construction wording, which is the same mechanism under a different rule. */
+const CONSTRUCTION_WORDING =
+  /\bcis\b|construction\s+industry\s+scheme|domestic\s+reverse\s+charge|s55a|section\s+55a/i
+
+const PVA_WORDING = /postponed\s+(?:vat|import\s+vat|accounting)|\bpva\b|c79/i
+
+/**
+ * What the document says about how its VAT works.
+ *
+ * Wording first, because a supplier who writes "reverse charge" on their invoice
+ * has told us outright and is not to be second-guessed. Only where nothing is
+ * said does the VAT NUMBER get a vote, and only in one direction: a supplier
+ * with a non-GB European registration who has charged us nothing is describing a
+ * reverse charge whether or not they used the phrase.
+ *
+ * Null where there is nothing to go on, which the caller must read as "not
+ * known" and not as "domestic" - the difference between a guess and a default
+ * is the whole reason a human is shown this before it becomes an entry.
+ */
+export function findVatTreatment(
+  text: string,
+  input: { direction: 'income' | 'expense' | null; vat: string | null; vatNumber: string | null },
+): VatTreatment | null {
+  const chargedNothing = input.vat !== null && Number(input.vat) === 0
+
+  if (REVERSE_CHARGE_WORDING.test(text)) {
+    // Both are reverse charges and both self-account; they differ in box 6,
+    // which takes overseas services and not UK construction work.
+    return CONSTRUCTION_WORDING.test(text) ? 'domestic_reverse_charge' : 'reverse_charge_services'
+  }
+  if (PVA_WORDING.test(text)) return 'import_pva'
+
+  // Nothing said. A European VAT number that is not a GB one, on a bill that
+  // charged us no VAT, is a reverse charge that simply did not spell itself out.
+  if (input.direction === 'expense' && chargedNothing && foreignVatNumber(text)) {
+    return 'reverse_charge_services'
+  }
+
+  return null
+}
+
+/** True when the page carries an EU-style VAT registration and no GB one. */
+function foreignVatNumber(text: string): boolean {
+  const foreign =
+    /\b(IE|FR|DE|NL|BE|ES|IT|PT|AT|DK|SE|FI|PL|CZ|SK|HU|RO|BG|HR|SI|LT|LV|EE|LU|MT|CY|GR|EL)\s?[0-9A-Z]{8,12}\b/
+  return foreign.test(text.toUpperCase()) && !/\bGB\s?\d{9}\b/.test(text.toUpperCase())
+}
+
+// ---------------------------------------------------------------------------
 // The whole job
 // ---------------------------------------------------------------------------
 
@@ -777,6 +849,23 @@ export function readExtractedText(
   const own = context.ownVatNumber?.replace(/[^0-9]/g, '') ?? null
   const isOurs = !!(vatNumber && own && vatNumber.slice(2) === own)
 
+  const treatment = findVatTreatment(pdf.plain, {
+    direction: isOurs ? 'income' : 'expense',
+    vat: moneyOrNull(totals.vat),
+    vatNumber,
+  })
+
+  // On a reverse charge the rate printed on the invoice is 0%, because the
+  // supplier charges nothing - and the rate that matters is the UK one the BUYER
+  // has to account at, which an overseas supplier has no way of knowing and no
+  // reason to print. So the rate read off the page is replaced by the notional
+  // one. Standard: reverse-charge services and construction work are
+  // standard-rated but for rare exceptions, and it is a box on a form somebody
+  // reads before it becomes an entry.
+  const reverseCharge = treatment === 'reverse_charge_services' || treatment === 'domestic_reverse_charge'
+  const readRate = rateCodeFor(totals.net, totals.vat)
+  const rateCode = reverseCharge && (readRate === null || readRate === 'zero') ? 'standard' : readRate
+
   return {
     scanStatus: 'read',
     scanNote: null,
@@ -789,7 +878,8 @@ export function readExtractedText(
     net: moneyOrNull(totals.net),
     vat: moneyOrNull(totals.vat),
     total: moneyOrNull(totals.total),
-    vatRateCode: rateCodeFor(totals.net, totals.vat),
+    vatRateCode: rateCode,
+    vatTreatment: treatment,
     // Never our own number in the supplier's column - it would go on to claim
     // every later document for us.
     vatNumber: isOurs ? null : vatNumber,

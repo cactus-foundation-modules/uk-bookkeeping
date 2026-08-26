@@ -191,6 +191,8 @@ export type BkAttachmentRow = {
   guessed_vat: Money | null
   guessed_total: Money | null
   guessed_vat_rate_code: VatRateCode | null
+  /** How the VAT works, which is not the same question as at what rate. */
+  guessed_vat_treatment: VatTreatment | null
   guessed_vat_number: string | null
   reading_confirmed: boolean
   extracted_text: string | null

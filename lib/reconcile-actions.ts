@@ -16,6 +16,7 @@ import { insertTransactionRows, type BulkOutcome } from './transactions'
 import {
   VAT_RATE_PERCENTS,
   type Direction,
+  type VatTreatment,
   type Money,
   type TransactionStatus,
   type VatRateCode,
@@ -993,13 +994,28 @@ export async function recordEntryFromDocument(
     ? document.guessed_vat_rate_code ?? (document.guessed_vat!.isZero() ? 'zero' : 'standard')
     : input.vatRateCode ?? document.guessed_vat_rate_code ?? 'zero'
 
-  const split = useDocumentFigures
-    ? {
-        net: document.guessed_net!,
-        vat: document.guessed_vat!,
-        percent: VAT_RATE_PERCENTS[rateCode],
-      }
-    : splitGross(gross, rateCode)
+  // How the VAT works, which the document knows and the bank never could. Where
+  // it says nothing, an ordinary UK purchase is the right assumption and the
+  // form is there to be corrected.
+  const treatment: VatTreatment =
+    document.guessed_vat_treatment ?? (rateCode === 'outside_scope' ? 'outside_scope' : 'domestic')
+  const reverseCharge = treatment === 'reverse_charge_services' || treatment === 'domestic_reverse_charge'
+
+  // On a reverse charge the supplier charged nothing, so the WHOLE payment is
+  // the net and the line carries no VAT at all. The notional VAT is worked out
+  // on the return itself, from the net and the rate, and lands in box 1 and box
+  // 4 together - see VAT_FOR_RETURN in lib/vat-boxes.ts for why it is not put on
+  // the line. Splitting the payment at the rate here would be the old mistake in
+  // a new place: it would say the supplier is owed £62.50 of a £75 invoice.
+  const split = reverseCharge
+    ? { net: gross, vat: ZERO, percent: VAT_RATE_PERCENTS[rateCode] }
+    : useDocumentFigures
+      ? {
+          net: document.guessed_net!,
+          vat: document.guessed_vat!,
+          percent: VAT_RATE_PERCENTS[rateCode],
+        }
+      : splitGross(gross, rateCode)
 
   const counterparty =
     document.guessed_counterparty?.trim() || line.counterparty.trim() || line.details.trim() || 'Unnamed'
@@ -1028,7 +1044,7 @@ export async function recordEntryFromDocument(
         lines: [
           {
             categoryId: input.categoryId,
-            vatTreatment: rateCode === 'outside_scope' ? 'outside_scope' : 'domestic',
+            vatTreatment: treatment,
             vatRateCode: rateCode,
             vatRatePercent: split.percent,
             netAmount: formatMoney(split.net),
@@ -1073,6 +1089,7 @@ export async function recordEntryFromDocument(
       transactionId,
       category: category.name,
       vatRateCode: rateCode,
+      vatTreatment: treatment,
       usedDocumentFigures: useDocumentFigures,
       total: formatMoney(gross),
     },

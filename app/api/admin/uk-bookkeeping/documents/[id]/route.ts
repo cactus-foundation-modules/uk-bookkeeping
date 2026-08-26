@@ -43,6 +43,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
         vat: body.vat ?? null,
         total: body.total ?? null,
         vatRateCode: body.vatRateCode ?? null,
+        vatTreatment: body.vatTreatment ?? null,
       },
       gate.user,
     )

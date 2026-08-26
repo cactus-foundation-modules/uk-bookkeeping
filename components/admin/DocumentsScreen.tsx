@@ -9,6 +9,8 @@ import {
   readableSize,
   scanWording,
   RATE_LABELS,
+  REVERSE_CHARGE_TREATMENTS,
+  TREATMENT_LABELS,
   type UnfiledDocument,
 } from './documents-shared'
 import { preflightFileError } from '@/modules/uk-bookkeeping/lib/file-kinds'
@@ -56,6 +58,7 @@ type Draft = {
   vat: string
   total: string
   vatRateCode: string
+  vatTreatment: string
   direction: string
 }
 
@@ -68,6 +71,7 @@ function draftFrom(document: UnfiledDocument): Draft {
     vat: document.guessed_vat ?? '',
     total: document.guessed_total ?? '',
     vatRateCode: document.guessed_vat_rate_code ?? '',
+    vatTreatment: document.guessed_vat_treatment ?? '',
     direction: document.guessed_direction ?? 'expense',
   }
 }
@@ -189,6 +193,7 @@ export default function DocumentsScreen({
           vat: draft.vat || null,
           total: draft.total || null,
           vatRateCode: draft.vatRateCode || null,
+          vatTreatment: draft.vatTreatment || null,
         }),
       })
       if (!response.ok) {
@@ -627,6 +632,32 @@ export default function DocumentsScreen({
                       </option>
                     ))}
                   </select>
+                </div>
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <label style={labelStyle} htmlFor={`bk-doc-treatment-${document.id}`}>
+                    How the VAT works
+                  </label>
+                  <select
+                    id={`bk-doc-treatment-${document.id}`}
+                    style={inputStyle}
+                    value={draft.vatTreatment}
+                    onChange={(e) => patchDraft(document.id, { vatTreatment: e.target.value })}
+                  >
+                    <option value="">Not sure</option>
+                    {Object.entries(TREATMENT_LABELS).map(([code, text]) => (
+                      <option key={code} value={code}>
+                        {text}
+                      </option>
+                    ))}
+                  </select>
+                  {REVERSE_CHARGE_TREATMENTS.includes(draft.vatTreatment) && (
+                    <p style={{ ...mutedStyle, margin: '0.25rem 0 0', fontSize: 'var(--text-xs, 0.75rem)' }}>
+                      Your supplier charges no VAT on these and you account for it yourself, on
+                      both sides of your return, so it costs you nothing. Leave the VAT above at
+                      nothing - that is what you paid - and set the rate to whatever the rate would
+                      have been in the UK, which is normally the standard rate.
+                    </p>
+                  )}
                 </div>
                 <div style={{ gridColumn: '1 / -1', display: 'flex', gap: '0.5rem' }}>
                   <button

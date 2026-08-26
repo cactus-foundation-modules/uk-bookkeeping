@@ -25,9 +25,28 @@ export type UnfiledDocument = {
   guessed_vat: string | null
   guessed_total: string | null
   guessed_vat_rate_code: string | null
+  guessed_vat_treatment: string | null
   guessed_vat_number: string | null
   reading_confirmed: boolean
 }
+
+/**
+ * How the VAT works, in the words a site owner would use. The same seven the
+ * entry form offers, so a document and the entry it becomes describe themselves
+ * the same way.
+ */
+export const TREATMENT_LABELS: Record<string, string> = {
+  domestic: 'UK, VAT charged as normal',
+  reverse_charge_services: 'Bought from overseas - reverse charge',
+  domestic_reverse_charge: 'UK construction - reverse charge',
+  import_pva: 'Imported goods (postponed VAT accounting)',
+  ni_eu_acquisition: 'Goods into Northern Ireland from the EU',
+  ni_eu_dispatch: 'Goods from Northern Ireland to the EU',
+  outside_scope: 'Outside the scope of VAT',
+}
+
+/** The ones where the supplier charges nothing and you account for it yourself. */
+export const REVERSE_CHARGE_TREATMENTS = ['reverse_charge_services', 'domestic_reverse_charge']
 
 export const RATE_LABELS: Record<string, string> = {
   standard: 'Standard rate (20%)',

@@ -75,6 +75,44 @@ function membership(start: Date, end: Date, scheme: VatScheme): Prisma.Sql {
  * Box 8 - goods only, never services. Also in box 6.
  * Box 9 - also in box 7.
  */
+/**
+ * The VAT figure that goes on the RETURN for a line, which is not always the VAT
+ * figure on the line.
+ *
+ * On a reverse charge the supplier charges nothing at all - their invoice says
+ * "reverse charge" and shows no VAT - and the buyer accounts for it on BOTH
+ * sides: output tax in box 1, the same amount reclaimed in box 4, netting to
+ * nothing. So the line's own `vat_amount` is zero, because zero is what was
+ * paid, and the notional VAT is worked out here from the net and the rate.
+ *
+ * Keeping `vat_amount` at what was actually charged is what makes everything
+ * else right. `gross_amount` then equals what left the bank, so the entry
+ * matches its statement line, the creditor shows the supplier owed what they are
+ * owed, and the ledger posts nothing to VAT control - which is correct, since
+ * the two sides cancel. The alternative - storing the notional VAT on the line -
+ * puts £15 of VAT nobody paid into a £75 invoice, and the CHECK constraint then
+ * forces the gross to £90: a purchase that can never be reconciled and a
+ * supplier who appears to be owed more than they invoiced.
+ *
+ * ROUND on numeric, never a float, same rule as everywhere else in this module.
+ *
+ * An entry recorded the OLD way still gives the same answer: net 75 at 20% is
+ * 15 whether that 15 is read off the line or worked out here.
+ *
+ * Deliberately NOT applied to `import_pva`: postponed import VAT is assessed by
+ * customs on the customs value, which is not the supplier's net times a rate,
+ * so the figure entered from the postponed VAT statement is the only honest
+ * source. Nor to `ni_eu_acquisition`, for the same reason.
+ */
+const VAT_FOR_RETURN = Prisma.sql`
+  CASE
+    WHEN t."direction" = 'expense'
+     AND l."vat_treatment" IN ('reverse_charge_services', 'domestic_reverse_charge')
+    THEN ROUND(l."net_amount" * l."vat_rate_percent" / 100, 2)
+    ELSE l."vat_amount"
+  END AS vat_for_return
+`
+
 const CLASSIFY = Prisma.sql`
   (
     (t."direction" = 'income'  AND l."vat_treatment" <> 'outside_scope')
@@ -129,15 +167,15 @@ export async function computeVatTotals(
 ): Promise<TotalsRow> {
   const rows = await db.$queryRaw<TotalsRow[]>`
     WITH in_period AS (
-      SELECT l."net_amount", l."vat_amount", ${CLASSIFY}
+      SELECT l."net_amount", l."vat_amount", ${VAT_FOR_RETURN}, ${CLASSIFY}
       FROM "bk_transaction_lines" l
       JOIN "bk_transactions" t ON t."id" = l."transaction_id"
       WHERE ${membership(start, end, scheme)}
     )
     SELECT
-      COALESCE(SUM("vat_amount") FILTER (WHERE in_box1), 0)::numeric AS box1,
-      COALESCE(SUM("vat_amount") FILTER (WHERE in_box2), 0)::numeric AS box2,
-      COALESCE(SUM("vat_amount") FILTER (WHERE in_box4), 0)::numeric AS box4,
+      COALESCE(SUM("vat_for_return") FILTER (WHERE in_box1), 0)::numeric AS box1,
+      COALESCE(SUM("vat_for_return") FILTER (WHERE in_box2), 0)::numeric AS box2,
+      COALESCE(SUM("vat_for_return") FILTER (WHERE in_box4), 0)::numeric AS box4,
       COALESCE(SUM("net_amount") FILTER (WHERE in_box6), 0)::numeric AS box6,
       COALESCE(SUM("net_amount") FILTER (WHERE in_box7), 0)::numeric AS box7,
       COALESCE(SUM("net_amount") FILTER (WHERE in_box8), 0)::numeric AS box8,
@@ -158,6 +196,7 @@ type WorkingRow = {
   vat_rate_code: SnapshotLine['vatRateCode']
   net_amount: Prisma.Decimal
   vat_amount: Prisma.Decimal
+  vat_for_return: Prisma.Decimal
   in_box1: boolean
   in_box2: boolean
   in_box4: boolean
@@ -181,7 +220,7 @@ export async function computeVatWorkings(
   const rows = await db.$queryRaw<WorkingRow[]>`
     SELECT l."transaction_id", l."id" AS line_id, t."direction",
            l."vat_treatment", l."vat_rate_code", l."net_amount", l."vat_amount",
-           ${CLASSIFY}
+           ${VAT_FOR_RETURN}, ${CLASSIFY}
     FROM "bk_transaction_lines" l
     JOIN "bk_transactions" t ON t."id" = l."transaction_id"
     WHERE ${membership(start, end, scheme)}
@@ -204,7 +243,11 @@ export async function computeVatWorkings(
       vatTreatment: row.vat_treatment,
       vatRateCode: row.vat_rate_code,
       netAmount: formatMoney(row.net_amount),
-      vatAmount: formatMoney(row.vat_amount),
+      // The figure that went INTO the box, which on a reverse charge is the
+      // notional VAT rather than the nothing the supplier charged. The snapshot
+      // exists so the boxes can be reconstructed from it; a line reporting
+      // 0.00 against a box 1 of 15.00 would not reconstruct anything.
+      vatAmount: formatMoney(row.vat_for_return),
       boxes,
     }
   })

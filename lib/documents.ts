@@ -15,7 +15,7 @@ import { assertTransactionMutable } from './guards'
 import { formatMoney, isMoneyString } from './money'
 import { getSettings } from './settings'
 import { listKnownCounterparties } from './transactions'
-import type { BkAttachmentRow, Direction, VatRateCode } from './types'
+import { VAT_TREATMENTS, type BkAttachmentRow, type Direction, type VatRateCode, type VatTreatment } from './types'
 
 // The document inbox: evidence that arrived before the entry did.
 //
@@ -170,6 +170,7 @@ export async function saveReading(id: string, reading: DocumentReading): Promise
       "guessed_vat"             = ${reading.vat}::numeric,
       "guessed_total"           = ${reading.total}::numeric,
       "guessed_vat_rate_code"   = ${reading.vatRateCode},
+      "guessed_vat_treatment"   = ${reading.vatTreatment},
       "guessed_vat_number"      = ${reading.vatNumber},
       "extracted_text"          = ${reading.text}
     WHERE "id" = ${id}
@@ -326,6 +327,7 @@ export type ReadingPatch = {
   vat?: string | null
   total?: string | null
   vatRateCode?: VatRateCode | null
+  vatTreatment?: VatTreatment | null
 }
 
 const RATE_CODES: VatRateCode[] = ['standard', 'reduced', 'zero', 'exempt', 'outside_scope']
@@ -377,6 +379,10 @@ export async function updateDocumentReading(
   if (rateCode && !RATE_CODES.includes(rateCode)) {
     throw new BookkeepingError('invalid', 'That is not a VAT rate this module knows about.')
   }
+  const treatment = patch.vatTreatment ?? null
+  if (treatment && !VAT_TREATMENTS.includes(treatment)) {
+    throw new BookkeepingError('invalid', 'That is not a way of handling VAT this module knows about.')
+  }
 
   const net = checkMoney(patch.net, 'The net amount')
   const vat = checkMoney(patch.vat, 'The VAT')
@@ -394,6 +400,7 @@ export async function updateDocumentReading(
       "guessed_vat"             = ${vat}::numeric,
       "guessed_total"           = ${total}::numeric,
       "guessed_vat_rate_code"   = ${rateCode},
+      "guessed_vat_treatment"   = ${treatment},
       "reading_confirmed"       = TRUE
     WHERE "id" = ${id}
   `
@@ -492,6 +499,7 @@ export type DocumentPayload = {
   guessed_vat: string | null
   guessed_total: string | null
   guessed_vat_rate_code: VatRateCode | null
+  guessed_vat_treatment: VatTreatment | null
   guessed_vat_number: string | null
   reading_confirmed: boolean
 }
@@ -525,6 +533,7 @@ export function toDocumentPayload(row: BkDocumentRow): DocumentPayload {
     guessed_vat: row.guessed_vat === null ? null : formatMoney(row.guessed_vat),
     guessed_total: row.guessed_total === null ? null : formatMoney(row.guessed_total),
     guessed_vat_rate_code: row.guessed_vat_rate_code,
+    guessed_vat_treatment: row.guessed_vat_treatment,
     guessed_vat_number: row.guessed_vat_number,
     reading_confirmed: row.reading_confirmed,
   }

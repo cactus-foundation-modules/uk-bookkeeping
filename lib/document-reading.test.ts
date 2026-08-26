@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   findDocumentDate,
+  findVatTreatment,
   findDocumentNumber,
   findVatNumber,
   isValidVatNumber,
@@ -470,6 +471,100 @@ describe('the headings an invoice puts in its own biggest type', () => {
   it('still refuses a date as an invoice number', () => {
     expect(findDocumentNumber('Invoice Date 04/09/2026')).toBeNull()
     expect(findDocumentNumber('Invoice Date 04 09 2026')).toBeNull()
+  })
+})
+
+describe('how the VAT works, which is not the same as at what rate', () => {
+  const expense = { direction: 'expense' as const, vat: '0.00', vatNumber: null }
+
+  it('takes the supplier at their word when they say reverse charge', () => {
+    expect(findVatTreatment('Tax to be paid on reverse charge basis', expense)).toBe(
+      'reverse_charge_services',
+    )
+    expect(findVatTreatment('VAT to be accounted for by the customer', expense)).toBe(
+      'reverse_charge_services',
+    )
+    expect(findVatTreatment('Article 196 of Council Directive 2006/112/EC', expense)).toBe(
+      'reverse_charge_services',
+    )
+  })
+
+  it('tells UK construction apart from an overseas service', () => {
+    // Both self-account, and they differ in box 6, which takes overseas
+    // services and not construction work.
+    expect(
+      findVatTreatment('Domestic reverse charge: customer to account for VAT to HMRC (CIS)', expense),
+    ).toBe('domestic_reverse_charge')
+  })
+
+  it('recognises postponed import VAT', () => {
+    expect(findVatTreatment('Postponed VAT accounting applies', expense)).toBe('import_pva')
+  })
+
+  it('reads an EU supplier charging nothing as a reverse charge, unsaid', () => {
+    // No wording at all, an Irish registration, and no VAT charged. That is a
+    // reverse charge that did not spell itself out.
+    expect(
+      findVatTreatment('Acme BV VAT IE4276970QH Total 100.00', {
+        direction: 'expense',
+        vat: '0.00',
+        vatNumber: null,
+      }),
+    ).toBe('reverse_charge_services')
+  })
+
+  it('does not do that to an ordinary zero-rated UK purchase', () => {
+    expect(
+      findVatTreatment('Books R Us VAT Reg GB123456782 Total 100.00 VAT 0.00', {
+        direction: 'expense',
+        vat: '0.00',
+        vatNumber: 'GB123456782',
+      }),
+    ).toBeNull()
+  })
+
+  it('says nothing rather than guessing "domestic"', () => {
+    // Null means not known. A caller reading it as domestic would be putting a
+    // default where an answer belongs, and the whole point is that a person
+    // sees it before it becomes an entry.
+    expect(findVatTreatment('An ordinary invoice. Total 120.00', expense)).toBeNull()
+  })
+
+  it('puts the notional UK rate on a reverse charge, not the 0% the invoice shows', () => {
+    const reading = readExtractedText(
+      page([
+        { cells: ['Acme BV'], size: 18 },
+        { cells: ['Subtotal', '75.00'] },
+        { cells: ['VAT', '0.00'] },
+        { cells: ['Total', '75.00'] },
+        { cells: ['Tax to be paid on reverse charge basis'] },
+      ]),
+      'invoice.pdf',
+      context(),
+      TODAY,
+    )
+    expect(reading.vatTreatment).toBe('reverse_charge_services')
+    // The line keeps what the supplier charged - nothing - and the rate says
+    // what the return has to account at.
+    expect(reading.vat).toBe('0.00')
+    expect(reading.total).toBe('75.00')
+    expect(reading.vatRateCode).toBe('standard')
+  })
+
+  it('leaves a genuinely zero-rated purchase zero-rated', () => {
+    const reading = readExtractedText(
+      page([
+        { cells: ['Books R Us'], size: 18 },
+        { cells: ['Subtotal', '75.00'] },
+        { cells: ['VAT', '0.00'] },
+        { cells: ['Total', '75.00'] },
+      ]),
+      'invoice.pdf',
+      context(),
+      TODAY,
+    )
+    expect(reading.vatTreatment).toBeNull()
+    expect(reading.vatRateCode).toBe('zero')
   })
 })
 
