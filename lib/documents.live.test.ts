@@ -281,6 +281,50 @@ suite('the document inbox, against a real database', () => {
     expect((await documents.getDocument('doc-1'))!.reading_confirmed).toBe(false)
   })
 
+  it('throws a receipt away and leaves the file alone by default', async () => {
+    await client.query(`
+      INSERT INTO "bk_attachments"
+        ("id","transaction_id","name","filename","url","mime_type","size","media_provider","media_key")
+      VALUES ('doc-keep', NULL, 'keep.pdf', 'keep.pdf', 'https://x/keep.pdf', 'application/pdf', 10,
+              'BACKBLAZE_B2', 'bookkeeping/keep.pdf')
+    `)
+    const outcome = await documents.deleteDocument('doc-keep', null)
+    expect(outcome.fileDeleted).toBe(false)
+    expect(outcome.fileKept).toBeNull()
+    expect(await documents.getDocument('doc-keep')).toBeNull()
+  })
+
+  it('refuses to delete a file that is evidence on another entry as well', async () => {
+    // The same invoice filed against two entries. This is the case that actually
+    // happens, and the one guard that can be answered exactly.
+    await client.query(`
+      INSERT INTO "bk_attachments"
+        ("id","transaction_id","name","filename","url","mime_type","size","media_provider","media_key")
+      VALUES
+        ('doc-a', NULL, 'shared.pdf', 'shared.pdf', 'https://x/s.pdf', 'application/pdf', 10,
+         'BACKBLAZE_B2', 'bookkeeping/shared.pdf'),
+        ('doc-b', 'txn-1', 'shared.pdf', 'shared.pdf', 'https://x/s.pdf', 'application/pdf', 10,
+         'BACKBLAZE_B2', 'bookkeeping/shared.pdf')
+    `)
+    const outcome = await documents.deleteDocument('doc-a', null, true)
+    expect(outcome.fileDeleted).toBe(false)
+    expect(outcome.fileKept).toMatch(/evidence on another entry/i)
+    // The row still went - only the bytes were spared.
+    expect(await documents.getDocument('doc-a')).toBeNull()
+    expect(await documents.getDocument('doc-b')).not.toBeNull()
+  })
+
+  it('says so when there are no stored bytes to delete in the first place', async () => {
+    await client.query(`
+      INSERT INTO "bk_attachments"
+        ("id","transaction_id","name","filename","url","mime_type","size")
+      VALUES ('doc-linked', NULL, 'linked.pdf', 'linked.pdf', 'https://x/l.pdf', 'application/pdf', 10)
+    `)
+    const outcome = await documents.deleteDocument('doc-linked', null, true)
+    expect(outcome.fileDeleted).toBe(false)
+    expect(outcome.fileKept).toMatch(/no stored copy/i)
+  })
+
   it('keeps a name somebody typed on purpose above one it worked out', async () => {
     await aliases.learnAlias('tfl travel ch', 'Transport for London', null, 'manual')
     await aliases.learnAlias('tfl travel ch', 'Something Else Entirely', null, 'learned')

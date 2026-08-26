@@ -1,7 +1,9 @@
-import { Prisma } from '@prisma/client'
+import { Prisma, type MediaProviderType } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import type { SessionUser } from '@/lib/auth/session'
+import { deleteMediaBytes, getMediaReferences } from '@/lib/media/upload'
 import { appendAudit } from './audit'
+import { deleteAttachment } from './attachments'
 import { aliasMap, learnAlias, normaliseAlias } from './counterparty-aliases'
 import {
   readDocument,
@@ -526,4 +528,140 @@ export function toDocumentPayload(row: BkDocumentRow): DocumentPayload {
     guessed_vat_number: row.guessed_vat_number,
     reading_confirmed: row.reading_confirmed,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Throwing one away
+// ---------------------------------------------------------------------------
+
+export type DocumentRemoval = {
+  /** The bytes went too. */
+  fileDeleted: boolean
+  /** Why they did not, in a sentence, when they did not. */
+  fileKept: string | null
+}
+
+/**
+ * Remove a document from the inbox, and optionally the file behind it.
+ *
+ * The row and the blob have always been two separate things here, deliberately:
+ * the file lives in the site owner's own media library, and deleting somebody
+ * else's bytes on their behalf is not this module's business. `deleteFile` is
+ * that decision being made ON PURPOSE, by a person, with a tick in a box - so it
+ * is honoured, and it is irreversible, and the box says so.
+ *
+ * Two guards, and they are checked BEFORE the row goes rather than after:
+ *
+ *   1. Another entry's evidence using the same file. Exact, one query, and the
+ *      case that actually happens - the same invoice filed against two entries.
+ *   2. Anything else on the site pointing at it. `getMediaReferences` answers
+ *      that, and one of its answers - "page, layout or module content" - is the
+ *      one THIS row produces, because the module publishes its attachments to
+ *      core's usage index. Checking before the delete is what makes that
+ *      answerable: with the row still present, that reason is explained, and any
+ *      OTHER reason is somebody else's and keeps the file.
+ *
+ * Never throws over the file. A receipt that will not leave the media library is
+ * a tidying-up job; failing the whole removal over it would leave the entry
+ * showing evidence that is no longer there.
+ */
+export async function deleteDocument(
+  id: string,
+  user: SessionUser | null,
+  deleteFile = false,
+): Promise<DocumentRemoval> {
+  const document = await getDocument(id)
+  if (!document) throw new NotFoundError('That document')
+
+  const verdict = deleteFile ? await fileRemovalVerdict(document) : null
+
+  // The row first, and through the ordinary path, so the locked-evidence rules
+  // and the audit entry are the same ones every other removal goes through.
+  await deleteAttachment(id, user)
+
+  if (!deleteFile) return { fileDeleted: false, fileKept: null }
+  if (verdict && verdict.keptBecause) return { fileDeleted: false, fileKept: verdict.keptBecause }
+
+  try {
+    if (document.media_provider && document.media_key) {
+      await deleteMediaBytes({
+        provider: document.media_provider as MediaProviderType,
+        key: document.media_key,
+        mimeType: document.mime_type,
+      })
+    }
+    if (document.media_id) {
+      await prisma.media.deleteMany({ where: { id: document.media_id } })
+    }
+  } catch {
+    return {
+      fileDeleted: false,
+      fileKept:
+        'The receipt is gone from the list, but the file itself would not delete from storage. It is still in your media library.',
+    }
+  }
+
+  await appendAudit({
+    action: 'attachment.file-deleted',
+    entityType: 'attachment',
+    entityId: id,
+    summary: `The file behind “${document.name}” was deleted from the media library`,
+    detail: { filename: document.filename, mediaKey: document.media_key },
+    user,
+  })
+
+  return { fileDeleted: true, fileKept: null }
+}
+
+/** Whether the bytes may go, worked out while the row is still there. */
+async function fileRemovalVerdict(
+  document: BkDocumentRow,
+): Promise<{ keptBecause: string | null }> {
+  if (!document.media_provider && !document.media_key && !document.media_id) {
+    return { keptBecause: 'There is no stored copy of that file to delete, only a link to it.' }
+  }
+
+  const [shared] = await prisma.$queryRaw<{ total: bigint }[]>`
+    SELECT COUNT(*)::bigint AS total FROM "bk_attachments"
+    WHERE "id" <> ${document.id}
+      AND (
+        ("media_id" IS NOT NULL AND "media_id" = ${document.media_id})
+        OR ("media_key" IS NOT NULL AND "media_key" = ${document.media_key})
+      )
+  `
+  if (Number(shared?.total ?? 0) > 0) {
+    return {
+      keptBecause:
+        'The receipt is gone from the list, but the file stays: it is evidence on another entry as well.',
+    }
+  }
+
+  if (!document.media_id) return { keptBecause: null }
+
+  // "page, layout or module content" is the answer this very row produces, so
+  // with the row still present it is explained and is not a reason to keep
+  // anything. Every other answer names something that is not us.
+  //
+  // A check that will not run keeps the file. That is the only safe direction:
+  // "we could not find out whether anything else needs this" and "nothing else
+  // needs this" are not the same sentence, and only one of them justifies
+  // deleting somebody's bytes.
+  let elsewhere: string[]
+  try {
+    elsewhere = (await getMediaReferences(document.media_id)).filter(
+      (reference) => reference !== 'page, layout or module content',
+    )
+  } catch {
+    return {
+      keptBecause:
+        'The receipt is gone from the list, but the file stays: we could not check whether anything else on your site is using it.',
+    }
+  }
+  if (elsewhere.length > 0) {
+    return {
+      keptBecause: `The receipt is gone from the list, but the file stays: it is still used as ${elsewhere.join(' and ')}.`,
+    }
+  }
+
+  return { keptBecause: null }
 }

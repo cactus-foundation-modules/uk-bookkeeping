@@ -24,6 +24,18 @@ export type PdfFont = {
   toUnicode: Map<number, string> | null
   /** Type0 fonts encode two bytes per glyph; simple fonts encode one. */
   twoByte: boolean
+  /**
+   * Character code to advance width, in thousandths of an em. Empty where the
+   * font declared none, which callers must treat as "cannot measure" rather
+   * than as "zero wide".
+   *
+   * Needed because a great many generators - Stripe's invoices among them -
+   * place every glyph individually with its own Td, so the only way to tell
+   * "Invoice number" from "Invoicenumber" is to know how wide an "e" is and see
+   * whether the next glyph starts further along than that.
+   */
+  widths: Map<number, number>
+  defaultWidth: number
 }
 
 export type PdfPage = {
@@ -140,6 +152,48 @@ export class PdfDocument {
     }
   }
 
+  /**
+   * The whole `<< ... >>` beginning at `from`, nesting included.
+   *
+   * A non-greedy regex cannot do this, and the way it fails is quiet. A page's
+   * /Resources routinely holds /ExtGState and /XObject dictionaries BEFORE
+   * /Font, so `<<[\s\S]*?>>` stopped at the first inner `>>` and handed back a
+   * fragment with no fonts in it - and a page with no fonts still yields text,
+   * just with every character code left as a raw byte. The document reads as
+   * mojibake rather than as a failure, which is the worst of both.
+   */
+  private static dictionaryAt(text: string, from: number): string {
+    if (text.slice(from, from + 2) !== '<<') return ''
+    let depth = 0
+    for (let i = from; i < text.length; i += 1) {
+      if (text.startsWith('<<', i)) {
+        depth += 1
+        i += 1
+      } else if (text.startsWith('>>', i)) {
+        depth -= 1
+        if (depth === 0) return text.slice(from, i + 2)
+        i += 1
+      }
+    }
+    // Unbalanced - take what there is rather than nothing. A truncated
+    // dictionary still names most of its fonts.
+    return text.slice(from)
+  }
+
+  /** The whole `[ ... ]` beginning at `from`, nesting included. */
+  private static arrayAt(text: string, from: number): string {
+    if (text[from] !== '[') return ''
+    let depth = 0
+    for (let i = from; i < text.length; i += 1) {
+      if (text[i] === '[') depth += 1
+      else if (text[i] === ']') {
+        depth -= 1
+        if (depth === 0) return text.slice(from, i + 1)
+      }
+    }
+    return text.slice(from)
+  }
+
   private resolve(value: string): string {
     const reference = /^\s*(\d+)\s+\d+\s+R\s*$/.exec(value)
     return reference ? this.object(Number(reference[1])) : value
@@ -187,7 +241,10 @@ export class PdfDocument {
 
   private pageFonts(pageNumber: number): Map<string, PdfFont> {
     const page = this.object(pageNumber)
-    let resources = /\/Resources\s*(<<[\s\S]*?>>\s*(?:\/|>>|$))/.exec(page)?.[1] ?? ''
+    const inlineResources = /\/Resources\s*(?=<<)/.exec(page)
+    let resources = inlineResources
+      ? PdfDocument.dictionaryAt(page, inlineResources.index + inlineResources[0].length)
+      : ''
     const resourceRef = /\/Resources\s+(\d+)\s+\d+\s+R/.exec(page)
     if (resourceRef) resources = this.object(Number(resourceRef[1]))
     // Inherited from the page tree, which is where a generator that repeats one
@@ -198,9 +255,12 @@ export class PdfDocument {
     }
 
     const fontRef = /\/Font\s+(\d+)\s+\d+\s+R/.exec(resources)
+    const inlineFont = /\/Font\s*(?=<<)/.exec(resources)
     const fontDict = fontRef
       ? this.object(Number(fontRef[1]))
-      : (/\/Font\s*<<([\s\S]*?)>>/.exec(resources)?.[1] ?? '')
+      : inlineFont
+        ? PdfDocument.dictionaryAt(resources, inlineFont.index + inlineFont[0].length)
+        : ''
 
     const fonts = new Map<string, PdfFont>()
     for (const entry of fontDict.matchAll(/\/([^\s/[\]<>]+)\s+(\d+)\s+\d+\s+R/g)) {
@@ -210,10 +270,100 @@ export class PdfDocument {
       fonts.set(entry[1]!, {
         toUnicode: cmap ? parseToUnicode(cmap.toString('latin1')) : null,
         twoByte: /\/Type0\b/.test(definition) || /\/Identity-[HV]\b/.test(this.resolve(definition)),
+        ...this.fontWidths(definition),
       })
     }
     return fonts
   }
+
+  /**
+   * A font's advance widths.
+   *
+   * Two shapes, because there are two kinds of font. A Type0 font keeps them on
+   * its descendant, keyed by CID in a `/W` array that mixes `c [w w w]` runs
+   * with `first last w` ranges. A simple font keeps a flat `/Widths` array
+   * starting at `/FirstChar`. Neither is optional to support: the first is what
+   * every modern generator emits and the second is what the older ones do.
+   */
+  private fontWidths(definition: string): { widths: Map<number, number>; defaultWidth: number } {
+    const descendant = this.descendantFont(definition)
+    if (descendant) {
+      const at = descendant.indexOf('/W')
+      const start = at === -1 ? -1 : descendant.indexOf('[', at)
+      const widths =
+        start === -1 || start > at + 4
+          ? new Map<number, number>()
+          : parseCidWidths(PdfDocument.arrayAt(descendant, start))
+      return {
+        widths,
+        defaultWidth: Number(/\/DW\s+(-?[\d.]+)/.exec(descendant)?.[1] ?? 1000),
+      }
+    }
+
+    const first = Number(/\/FirstChar\s+(\d+)/.exec(definition)?.[1] ?? NaN)
+    const at = definition.indexOf('/Widths')
+    const start = at === -1 ? -1 : definition.indexOf('[', at)
+    if (Number.isNaN(first) || start === -1) return { widths: new Map(), defaultWidth: 1000 }
+
+    const widths = new Map<number, number>()
+    const body = PdfDocument.arrayAt(definition, start)
+    let code = first
+    for (const number of body.match(/-?\d+(?:\.\d+)?/g) ?? []) {
+      widths.set(code, Number(number))
+      code += 1
+    }
+    return { widths, defaultWidth: Number(/\/MissingWidth\s+(-?[\d.]+)/.exec(definition)?.[1] ?? 0) }
+  }
+
+  /** The CIDFont behind a Type0 font, whether the reference is direct or in an array. */
+  private descendantFont(definition: string): string | null {
+    const inArray = /\/DescendantFonts\s*\[\s*(\d+)\s+\d+\s+R/.exec(definition)
+    if (inArray) return this.object(Number(inArray[1]))
+    const byReference = /\/DescendantFonts\s+(\d+)\s+\d+\s+R/.exec(definition)
+    if (!byReference) return null
+    const array = this.object(Number(byReference[1]))
+    const inner = /(\d+)\s+\d+\s+R/.exec(array)
+    return inner ? this.object(Number(inner[1])) : null
+  }
+}
+
+/**
+ * A `/W` array: `c [w w w]` assigns consecutive codes from c, and `first last w`
+ * assigns one width to a whole range.
+ */
+export function parseCidWidths(source: string): Map<number, number> {
+  const widths = new Map<number, number>()
+  const tokens = source.match(/\[|\]|-?\d+(?:\.\d+)?/g) ?? []
+  let i = 0
+  // The outer brackets are the array's own.
+  if (tokens[0] === '[') i = 1
+
+  while (i < tokens.length) {
+    const token = tokens[i]
+    if (token === undefined || token === ']') break
+    const code = Number(token)
+    i += 1
+    if (tokens[i] === '[') {
+      i += 1
+      let at = code
+      while (i < tokens.length && tokens[i] !== ']') {
+        widths.set(at, Number(tokens[i]))
+        at += 1
+        i += 1
+      }
+      i += 1 // past the ]
+    } else {
+      const last = Number(tokens[i])
+      const width = Number(tokens[i + 1])
+      i += 2
+      if (!Number.isFinite(last) || !Number.isFinite(width)) break
+      // A range that would be absurd is a misread, not a font.
+      if (last >= code && last - code <= 65_535) {
+        for (let at = code; at <= last; at += 1) widths.set(at, width)
+      }
+    }
+  }
+  return widths
 }
 
 /**

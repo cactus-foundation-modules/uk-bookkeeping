@@ -1,6 +1,13 @@
 import { Prisma } from '@prisma/client'
 import { PdfError } from './pdf/document'
-import { extractPdfText, type PdfText, type PdfTextItem, type PdfTextRow } from './pdf/text'
+import {
+  extractPdfText,
+  mergeGlyphRuns,
+  plainFromRows,
+  type PdfText,
+  type PdfTextItem,
+  type PdfTextRow,
+} from './pdf/text'
 import { parseStatementDate } from './statement'
 import { normaliseAlias } from './counterparty-aliases'
 import { allWordsPresent, significantWords, DOCUMENT_STOP_WORDS } from './name-matching'
@@ -437,11 +444,36 @@ export function findDocumentNumber(text: string): string | null {
       const match = /^[\s:.#-]*([A-Za-z0-9][A-Za-z0-9/\-_.]{1,29})/.exec(window)
       if (!match) continue
       const candidate = match[1]!.replace(/[.,;:]+$/, '')
+
+      // Every one of these is checked on the candidate ON ITS OWN, before the
+      // continuation below is considered. Checking afterwards was a bug: given
+      // "Invoice Date 04/09/2026" the candidate is "Date", the continuation
+      // makes it "Date 04", and "Date 04" is in none of the refusal lists.
       if (!candidate || NOT_A_NUMBER.test(candidate)) continue
       // "Invoice Date 04/09/2026" would otherwise hand back the date.
       if (parseDateToken(candidate)) continue
       // A number with no digit in it at all is a word we misread as a label's value.
       if (!/\d/.test(candidate)) continue
+
+      // A subset font that maps its punctuation glyph to nothing leaves a gap
+      // where a hyphen was, and "C1DC111A-0012" arrives as two words. Stopping
+      // at the gap is not a shorter answer, it is a DIFFERENT invoice number -
+      // so a following chunk that plainly belongs to it is taken as well.
+      // Guarded tightly: short, alphanumeric, carrying a digit of its own, and
+      // not one of the words that ordinarily follows an invoice number.
+      const continued = /^ ([A-Za-z0-9]{2,8})(?![A-Za-z0-9])/.exec(
+        window.slice(match[0].length),
+      )
+      if (
+        continued &&
+        /\d/.test(continued[1]!) &&
+        /[A-Za-z0-9]$/.test(candidate) &&
+        candidate.length + continued[1]!.length <= 24 &&
+        !NOT_A_NUMBER.test(continued[1]!) &&
+        !parseDateToken(continued[1]!)
+      ) {
+        return `${candidate} ${continued[1]}`
+      }
       return candidate
     }
   }
@@ -460,7 +492,33 @@ const TITLE_PHRASES = new Set([
   'quote', 'estimate', 'proforma', 'pro forma', 'pro forma invoice', 'bill', 'payment receipt',
   'bill to', 'billed to', 'invoice to', 'sold to', 'ship to', 'deliver to', 'customer',
   'account', 'date', 'description', 'page', 'your reference', 'our reference', 'from', 'to',
+  'vat', 'tax', 'qty', 'quantity', 'unit', 'amount', 'subtotal', 'total', 'due', 'pay',
+  'payment', 'reference', 'terms', 'notes', 'summary', 'balance',
 ])
+
+/**
+ * True when a line is one of the document's own headings rather than anybody's
+ * name.
+ *
+ * A PREFIX test, not equality. An invoice's headings are "Invoice number",
+ * "Date of issue", "VAT Registration", "Amount due" - a list of exact phrases
+ * would have to guess at every wording anybody has ever used, and would still
+ * pick "Invoice number" as the supplier the first time it met a new one, in the
+ * biggest type on the page, with every appearance of confidence.
+ *
+ * The cost is that a business genuinely called "Invoice Ninja" is not read off
+ * its own letterhead. It is still found by its web address, which is the next
+ * source down, and that is much the better way round.
+ */
+function isTitlePhrase(text: string): boolean {
+  const cleaned = text.toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!cleaned) return true
+  if (TITLE_PHRASES.has(cleaned)) return true
+  for (const phrase of TITLE_PHRASES) {
+    if (cleaned.startsWith(`${phrase} `)) return true
+  }
+  return false
+}
 
 /**
  * The top of page one, where a letterhead lives.
@@ -491,32 +549,73 @@ function headerItems(items: PdfTextItem[]): PdfTextItem[] {
  * more often than anything cleverer. It is also the weakest source here, so it
  * scores accordingly and gives way to anything the books already recognise.
  */
+function letterheadCandidates(items: PdfTextItem[], ownName: string | null): string[] {
+  return rankedLetterheadItems(items, ownName).map((entry) => entry.text)
+}
+
 function letterheadName(items: PdfTextItem[], ownName: string | null): string | null {
+  return rankedLetterheadItems(items, ownName)[0]?.text ?? null
+}
+
+/** The lines at the top that could be a name, biggest and highest first. */
+function rankedLetterheadItems(
+  items: PdfTextItem[],
+  ownName: string | null,
+): { item: PdfTextItem; text: string }[] {
   const header = headerItems(items)
-  if (header.length === 0) return null
+  if (header.length === 0) return []
 
   const own = ownName ? normaliseAlias(ownName) : null
   const candidates = header
-    .map((item) => ({ item, text: item.text.replace(/\s+/g, ' ').trim() }))
+    .map((item) => ({ item, text: withoutAddresses(item.text) }))
     .filter(({ text }) => {
       if (text.length < 3 || text.length > 60) return false
       if (!/[A-Za-z]{3}/.test(text)) return false
-      if (TITLE_PHRASES.has(text.toLowerCase().replace(/[^a-z ]/g, '').trim())) return false
-      // An address line, a phone number or a VAT line is not the name.
+      if (isTitlePhrase(text)) return false
+      // A phone number or a bare address line is not the name.
       if (/^[\d\s+()-]+$/.test(text)) return false
-      if (/@|www\.|https?:/i.test(text)) return false
       // Nor is a figure, nor the word in front of one. On a short receipt the
       // header band reaches the totals block, and "Total" is otherwise a
       // perfectly good-looking company name in the biggest type on the page.
       if (/\d[\d,]*\.\d{2}/.test(text)) return false
       if (labelKind(text) !== null) return false
+      // Nor a date. "Date of issue" is caught as a heading, but the date sitting
+      // in the column beside it is not, and it reads as a perfectly ordinary
+      // line of text in the same size as the letterhead.
+      if (looksLikeADate(text)) return false
       if (own && normaliseAlias(text) === own) return false
       return true
     })
 
-  if (candidates.length === 0) return null
   candidates.sort((a, b) => b.item.size - a.item.size || b.item.y - a.item.y)
-  return candidates[0]!.text
+  return candidates
+}
+
+/**
+ * A letterhead line with any web address or handle taken off it.
+ *
+ * Refusing the whole line was wrong, and wrong in the way that matters: a
+ * letterhead reading "Anthropic, PBC @anthropic" is the supplier's name with a
+ * social handle stuck on the end, and throwing the line away threw the name away
+ * with it. What is left once the address is removed IS the name; where nothing
+ * is left, the line really was only an address and it fails the length test.
+ */
+function withoutAddresses(text: string): string {
+  return text
+    .replace(/\s*(?:https?:\/\/|www\.)\S+/gi, ' ')
+    .replace(/\s*\S*@\S*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/[,;:|\-\u2013\s]+$/, '')
+    .trim()
+}
+
+/** True when the whole line is a date and nothing else. */
+function looksLikeADate(text: string): boolean {
+  const trimmed = text.trim()
+  DATE_TOKEN.lastIndex = 0
+  const match = DATE_TOKEN.exec(trimmed)
+  DATE_TOKEN.lastIndex = 0
+  return !!match && match.index === 0 && match[0].length >= trimmed.length - 2
 }
 
 /** A supplier's name off their own web address, when nothing else offers one. */
@@ -607,6 +706,25 @@ export function guessCounterparty(
     }
   }
 
+  const domain = domainName(plain, context.ownBusinessName)
+
+  // A line at the top of the page that agrees with the web address printed on
+  // it. Two weak signals that corroborate each other, and much the strongest
+  // thing left: the biggest text at the top of an invoice is as often the word
+  // "Invoice" or a heading beside it as it is the supplier, and the domain on
+  // its own gives "Anthropic" where the document says "Anthropic, PBC".
+  if (domain) {
+    const key = normaliseAlias(domain)
+    for (const candidate of letterheadCandidates(items, context.ownBusinessName)) {
+      if (normaliseAlias(candidate).includes(key)) {
+        const resolved = context.aliases.get(normaliseAlias(candidate))
+        return resolved
+          ? { counterparty: resolved, confidence: 80, source: 'alias' }
+          : { counterparty: candidate, confidence: 70, source: 'letterhead' }
+      }
+    }
+  }
+
   const letterhead = letterheadName(items, context.ownBusinessName)
   if (letterhead) {
     const resolved = context.aliases.get(normaliseAlias(letterhead))
@@ -614,7 +732,6 @@ export function guessCounterparty(
     return { counterparty: letterhead, confidence: 55, source: 'letterhead' }
   }
 
-  const domain = domainName(plain, context.ownBusinessName)
   if (domain) {
     const resolved = context.aliases.get(normaliseAlias(domain))
     return resolved
@@ -717,7 +834,11 @@ export function readDocument(
   }
 
   try {
-    return readExtractedText(pdf, input.filename, context, today)
+    // Letters back into words first. A page laid out one glyph at a time reads
+    // as "I n v o i c e" otherwise, and nothing below would find anything.
+    const rows = mergeGlyphRuns(pdf.rows)
+    const merged = { rows, items: rows.flatMap((row) => row.cells), plain: plainFromRows(rows) }
+    return readExtractedText(merged, input.filename, context, today)
   } catch {
     return {
       ...EMPTY_READING,

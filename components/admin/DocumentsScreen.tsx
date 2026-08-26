@@ -92,6 +92,11 @@ export default function DocumentsScreen({
   const [notes, setNotes] = useState<string[]>([])
   const [drafts, setDrafts] = useState<Record<string, Draft>>({})
   const [open, setOpen] = useState<string | null>(null)
+  // Throwing one away asks a second question - whether the file goes too - and a
+  // question with a choice in it does not fit in a browser confirm box. So the
+  // row opens a small panel of its own instead.
+  const [discarding, setDiscarding] = useState<string | null>(null)
+  const [discardFile, setDiscardFile] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -223,20 +228,26 @@ export default function DocumentsScreen({
     }
   }
 
-  async function remove(document: UnfiledDocument) {
-    if (!window.confirm(`Throw away “${document.name}”? The file itself stays in your media library.`)) {
-      return
-    }
+  async function remove(document: UnfiledDocument, alsoDeleteFile: boolean) {
     setBusyId(document.id)
+    setError(null)
     try {
-      const response = await fetch(`/api/m/uk-bookkeeping/admin/documents/${document.id}`, {
-        method: 'DELETE',
-      })
+      const query = alsoDeleteFile ? '?deleteFile=1' : ''
+      const response = await fetch(
+        `/api/m/uk-bookkeeping/admin/documents/${document.id}${query}`,
+        { method: 'DELETE' },
+      )
+      const payload = await response.json().catch(() => ({}))
       if (!response.ok) {
-        const payload = await response.json().catch(() => ({}))
         setError(payload.error ?? 'That could not be removed.')
         return
       }
+      // The file can survive a request that otherwise worked - it is evidence on
+      // another entry, or something else on the site points at it. Saying so is
+      // the whole point of having asked.
+      setNotes(payload.fileKept ? [payload.fileKept] : [])
+      setDiscarding(null)
+      setDiscardFile(false)
       load()
     } catch {
       setError('That did not reach the server. Check the connection and try again.')
@@ -413,12 +424,91 @@ export default function DocumentsScreen({
                       Read again
                     </button>
                   )}
-                  <button className="btn btn-sm" onClick={() => remove(document)} disabled={busy}>
-                    Throw away
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => {
+                      setDiscardFile(false)
+                      setDiscarding(discarding === document.id ? null : document.id)
+                    }}
+                    disabled={busy}
+                  >
+                    {discarding === document.id ? 'Keep it' : 'Throw away'}
                   </button>
                 </div>
               )}
             </div>
+
+            {discarding === document.id && canRecord && (
+              <div
+                style={{
+                  marginTop: '1rem',
+                  paddingTop: '1rem',
+                  borderTop: '1px solid var(--color-border)',
+                }}
+              >
+                <p style={{ margin: '0 0 0.5rem' }}>
+                  Throw away <strong>{document.name}</strong>?
+                </p>
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '0.5rem',
+                    fontSize: 'var(--text-sm)',
+                    marginBottom: '0.75rem',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={discardFile}
+                    onChange={(e) => setDiscardFile(e.target.checked)}
+                    style={{ marginTop: '0.2rem' }}
+                  />
+                  <span>
+                    Delete the file itself as well
+                    <span
+                      style={{
+                        display: 'block',
+                        fontSize: 'var(--text-xs, 0.75rem)',
+                        color: 'var(--color-text-muted, var(--color-text))',
+                      }}
+                    >
+                      {/*
+                        Said plainly, because it is the one thing on this screen
+                        that cannot be undone. Left unticked the file stays in
+                        Media, which is where it has always stayed.
+                      */}
+                      Removes it from your media library and from storage for good. Leave it
+                      unticked and the file stays in Media - only the receipt leaves this list.
+                      Only tick it if the file is not being used anywhere else on your site.
+                    </span>
+                  </span>
+                </label>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button
+                    className="btn btn-sm btn-danger"
+                    onClick={() => remove(document, discardFile)}
+                    disabled={busy}
+                  >
+                    {busy
+                      ? 'Throwing away…'
+                      : discardFile
+                        ? 'Throw away and delete the file'
+                        : 'Throw away'}
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => {
+                      setDiscarding(null)
+                      setDiscardFile(false)
+                    }}
+                    disabled={busy}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
 
             {editing && canRecord && (
               <div

@@ -53,6 +53,9 @@ function page(rows: { cells: string[]; size?: number }[]): Pick<PdfText, 'plain'
       y,
       size: row.size ?? 10,
       text,
+      // Unmeasured, which is what makes mergeGlyphRuns leave these rows alone -
+      // they are already words.
+      width: 0,
     }))
     items.push(...cells)
     pdfRows.push({ page: 0, y, cells })
@@ -419,6 +422,54 @@ describe('who it is from', () => {
       TODAY,
     )
     expect(reading.counterpartySource).not.toBe('domain')
+  })
+})
+
+describe('the headings an invoice puts in its own biggest type', () => {
+  // Every case here comes off one real invoice, which the reader got wrong in
+  // four different ways before any of them existed.
+  const stripeish = (extra: { cells: string[]; size?: number }[] = []) =>
+    page([
+      { cells: ['Invoice'], size: 18 },
+      { cells: ['Invoice number', 'C1DC111A 0012'] },
+      { cells: ['Date of issue', 'August 26, 2026'] },
+      { cells: ['VAT Registration UK VAT GB475258267'] },
+      { cells: ['Anthropic, PBC @anthropic'] },
+      { cells: ['support@anthropic.com'] },
+      ...extra,
+      { cells: ['Total', '75.00'] },
+    ])
+
+  it('does not read "Invoice number" as the supplier', () => {
+    const reading = readExtractedText(stripeish(), 'invoice.pdf', context(), TODAY)
+    expect(reading.counterparty).not.toMatch(/invoice/i)
+  })
+
+  it('does not read the date beside "Date of issue" as the supplier', () => {
+    const reading = readExtractedText(stripeish(), 'invoice.pdf', context(), TODAY)
+    expect(reading.counterparty).not.toMatch(/august/i)
+  })
+
+  it('keeps the name and drops the handle stuck on the end of it', () => {
+    const reading = readExtractedText(stripeish(), 'invoice.pdf', context(), TODAY)
+    expect(reading.counterparty).toBe('Anthropic, PBC')
+  })
+
+  it('trusts a letterhead line more when the web address agrees with it', () => {
+    const reading = readExtractedText(stripeish(), 'invoice.pdf', context(), TODAY)
+    expect(reading.counterpartyConfidence).toBeGreaterThan(60)
+  })
+
+  it('reads the invoice number across the gap a lost hyphen leaves', () => {
+    const reading = readExtractedText(stripeish(), 'invoice.pdf', context(), TODAY)
+    // The font maps its hyphen to nothing, so the page reads "C1DC111A 0012".
+    // Stopping at the gap would hand back a different invoice number.
+    expect(reading.documentNumber).toBe('C1DC111A 0012')
+  })
+
+  it('still refuses a date as an invoice number', () => {
+    expect(findDocumentNumber('Invoice Date 04/09/2026')).toBeNull()
+    expect(findDocumentNumber('Invoice Date 04 09 2026')).toBeNull()
   })
 })
 

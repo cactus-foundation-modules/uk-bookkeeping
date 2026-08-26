@@ -30,6 +30,7 @@ export type AuditAction =
   // what changes is what it is evidence FOR, which is the interesting fact.
   | 'attachment.filed'
   | 'attachment.unfiled'
+  | 'attachment.file-deleted'
   | 'attachment.reading-corrected'
   | 'attachment.reread'
   | 'category.created'

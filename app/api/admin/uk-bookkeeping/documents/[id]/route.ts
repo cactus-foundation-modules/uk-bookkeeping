@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { deleteAttachment } from '@/modules/uk-bookkeeping/lib/attachments'
+import { hasPermission } from '@/lib/permissions/check'
 import {
+  deleteDocument,
   getDocument,
   toDocumentPayload,
   updateDocumentReading,
@@ -51,14 +52,28 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   }
 }
 
-export async function DELETE(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const gate = await requireBookkeepingUser('bookkeeping.record')
   if (gate.error) return gate.error
 
+  // `?deleteFile=1` throws the bytes away as well as the row. Deleting from the
+  // media library is a media permission, not a bookkeeping one, and it is asked
+  // for BEFORE anything is removed: somebody without it should be told to untick
+  // the box, not left with the receipt gone and the file still sitting there.
+  const deleteFile = request.nextUrl.searchParams.get('deleteFile') === '1'
+  if (deleteFile && !(await hasPermission(gate.user, 'media.delete'))) {
+    return NextResponse.json(
+      {
+        error:
+          'You do not have permission to delete files from the media library. Untick that box and the receipt will still be thrown away.',
+      },
+      { status: 403 },
+    )
+  }
+
   const { id } = await params
   try {
-    await deleteAttachment(id, gate.user)
-    return NextResponse.json({ ok: true })
+    return NextResponse.json({ ok: true, ...(await deleteDocument(id, gate.user, deleteFile)) })
   } catch (error) {
     return toErrorResponse(error)
   }
