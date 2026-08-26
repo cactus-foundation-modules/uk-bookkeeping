@@ -435,7 +435,59 @@ const NUMBER_LABELS = [
 /** Words that follow a label but are plainly not a number. */
 const NOT_A_NUMBER = /^(date|dated|to|for|from|no|number|ref|reference|total|due|of|is|and|the)$/i
 
-export function findDocumentNumber(text: string): string | null {
+/**
+ * The document number as the FILENAME spells it, where the two agree on every
+ * character that could actually be read.
+ *
+ * Some subset fonts simply do not say what one of their glyphs is. The ToUnicode
+ * CMap maps it to U+0000 - "no character" - and there is nowhere else to look:
+ * the embedded font's own cmap covers only the handful of code points the
+ * subsetter kept, and its `post` table is version 3.0, which carries no glyph
+ * names at all. The only thing left that knows is the outline, and reading an
+ * outline is OCR. So "C1DC111A-0012" comes off the page as C1DC111A, a gap, and
+ * 0012, with nothing to say what sat in the gap.
+ *
+ * The file it arrived in is a second source, and a good one: the invoicing
+ * systems that produce these name the download after the number. This is NOT
+ * guessing the missing character - it is refusing to guess, and taking a
+ * spelling that matches on every character we did read. Every letter and digit
+ * has to agree, in order, with nothing extra on either end; only the punctuation
+ * between them may differ, which is precisely the part we could not see.
+ *
+ * A file called "invoice.pdf" or "scan001.pdf" agrees with nothing and changes
+ * nothing.
+ */
+function numberFromFilename(candidate: string, filename: string): string | null {
+  const key = candidate.replace(/[^A-Za-z0-9]/g, '').toLowerCase()
+  // Short keys match too easily - "12" would find itself in half the filenames
+  // ever written, and be wrong about most of them.
+  if (key.length < 4) return null
+
+  const stem = [...filename.replace(/\.[A-Za-z0-9]+$/, '')]
+  const positions: number[] = []
+  let flat = ''
+  stem.forEach((character, index) => {
+    if (/[A-Za-z0-9]/.test(character)) {
+      positions.push(index)
+      flat += character.toLowerCase()
+    }
+  })
+
+  const at = flat.indexOf(key)
+  if (at === -1) return null
+
+  const start = positions[at]!
+  const end = positions[at + key.length - 1]!
+  // The run has to stand alone. Matching the tail of a longer number would
+  // hand back half of somebody else's reference.
+  if (stem[start - 1] && /[A-Za-z0-9]/.test(stem[start - 1]!)) return null
+  if (stem[end + 1] && /[A-Za-z0-9]/.test(stem[end + 1]!)) return null
+
+  const spelled = stem.slice(start, end + 1).join('')
+  return spelled === candidate ? null : spelled
+}
+
+export function findDocumentNumber(text: string, filename = ''): string | null {
   const flat = text.replace(/\s+/g, ' ')
   const lower = flat.toLowerCase()
 
@@ -480,9 +532,10 @@ export function findDocumentNumber(text: string): string | null {
         !NOT_A_NUMBER.test(continued[1]!) &&
         !parseDateToken(continued[1]!)
       ) {
-        return `${candidate} ${continued[1]}`
+        const joined = `${candidate} ${continued[1]}`
+        return numberFromFilename(joined, filename) ?? joined
       }
-      return candidate
+      return numberFromFilename(candidate, filename) ?? candidate
     }
   }
   return null
@@ -874,7 +927,7 @@ export function readExtractedText(
     counterpartySource: guess?.source ?? null,
     direction: isOurs ? 'income' : 'expense',
     documentDate: findDocumentDate(pdf.plain, today),
-    documentNumber: findDocumentNumber(pdf.plain),
+    documentNumber: findDocumentNumber(pdf.plain, filename),
     net: moneyOrNull(totals.net),
     vat: moneyOrNull(totals.vat),
     total: moneyOrNull(totals.total),

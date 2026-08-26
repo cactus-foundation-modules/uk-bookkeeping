@@ -317,6 +317,43 @@ describe('document numbers', () => {
   })
 })
 
+describe('a number whose punctuation the font would not name', () => {
+  // Some subset fonts map a glyph to U+0000 - "no character" - and there is
+  // nowhere else to look: the embedded cmap covers only what the subsetter kept
+  // and `post` 3.0 carries no glyph names. So a hyphen simply is not there, and
+  // the page reads "C1DC111A 0012". The file it arrived in knows.
+  it('takes the spelling from the filename when every readable character agrees', () => {
+    expect(findDocumentNumber('Invoice number C1DC111A 0012', 'Invoice-C1DC111A-0012.pdf')).toBe(
+      'C1DC111A-0012',
+    )
+  })
+
+  it('works when the gap closed up rather than became a space', () => {
+    expect(findDocumentNumber('Invoice No INV0042', 'INV-0042.pdf')).toBe('INV-0042')
+  })
+
+  it('leaves it alone when the filename says nothing', () => {
+    expect(findDocumentNumber('Invoice number C1DC111A 0012', 'scan001.pdf')).toBe('C1DC111A 0012')
+    expect(findDocumentNumber('Invoice No INV-77', 'invoice.pdf')).toBe('INV-77')
+  })
+
+  it('refuses a filename that disagrees on a character we could read', () => {
+    // One digit different is a different invoice, not different punctuation.
+    expect(findDocumentNumber('Invoice number C1DC111A 0012', 'Invoice-C1DC111A-0013.pdf')).toBe(
+      'C1DC111A 0012',
+    )
+  })
+
+  it('refuses to take the tail of a longer number out of a filename', () => {
+    // "0012" inside "990012" is somebody else's reference, not ours.
+    expect(findDocumentNumber('Invoice No 0012', 'Invoice-990012.pdf')).toBe('0012')
+  })
+
+  it('does not match on a key too short to mean anything', () => {
+    expect(findDocumentNumber('Invoice No 12', 'Statement-1-2.pdf')).toBe('12')
+  })
+})
+
 describe('who it is from', () => {
   const layout = (extra: { cells: string[]; size?: number }[] = []) =>
     page([
