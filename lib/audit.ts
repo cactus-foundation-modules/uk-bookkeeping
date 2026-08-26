@@ -25,6 +25,13 @@ export type AuditAction =
   | 'transaction.posted'
   | 'attachment.added'
   | 'attachment.removed'
+  // An unfiled document being given an entry to belong to, and taken off one
+  // again. Separate from added/removed because the file itself does not move -
+  // what changes is what it is evidence FOR, which is the interesting fact.
+  | 'attachment.filed'
+  | 'attachment.unfiled'
+  | 'attachment.reading-corrected'
+  | 'attachment.reread'
   | 'category.created'
   | 'category.updated'
   | 'category.archived'

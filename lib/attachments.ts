@@ -50,7 +50,11 @@ export async function getAttachment(id: string): Promise<BkAttachmentRow | null>
 }
 
 export type AttachmentInput = {
-  transactionId: string
+  /**
+   * Null for a document uploaded into the inbox before anybody has said what it
+   * belongs to. See lib/documents.ts, which is the other half of this.
+   */
+  transactionId: string | null
   name: string
   filename: string
   url: string
@@ -66,8 +70,11 @@ export async function createAttachment(
   input: AttachmentInput,
   user: SessionUser | null,
 ): Promise<BkAttachmentRow> {
-  await assertTransactionMutable(input.transactionId)
+  if (input.transactionId) await assertTransactionMutable(input.transactionId)
 
+  // `= NULL` matches nothing, so an inbox upload starts at position 0 and stays
+  // there. Position only orders the evidence ON an entry; the inbox is ordered
+  // by when it arrived.
   const [next] = await prisma.$queryRaw<{ position: number }[]>`
     SELECT COALESCE(MAX("position") + 1, 0)::int AS position
     FROM "bk_attachments" WHERE "transaction_id" = ${input.transactionId}
@@ -87,9 +94,11 @@ export async function createAttachment(
 
   await appendAudit({
     action: 'attachment.added',
-    entityType: 'transaction',
-    entityId: input.transactionId,
-    summary: `Evidence “${input.name}” attached`,
+    entityType: input.transactionId ? 'transaction' : 'attachment',
+    entityId: input.transactionId ?? rows[0]!.id,
+    summary: input.transactionId
+      ? `Evidence “${input.name}” attached`
+      : `Document “${input.name}” added to the inbox`,
     detail: { filename: input.filename, size: input.size, sha256: input.sha256 },
     user,
   })
@@ -107,7 +116,7 @@ export async function deleteAttachment(id: string, user: SessionUser | null): Pr
       409,
     )
   }
-  await assertTransactionMutable(attachment.transaction_id)
+  if (attachment.transaction_id) await assertTransactionMutable(attachment.transaction_id)
 
   // The row goes; the blob does not. A file may be attached elsewhere, and it is
   // in the media library under the site owner's own control - deleting somebody
@@ -116,9 +125,11 @@ export async function deleteAttachment(id: string, user: SessionUser | null): Pr
 
   await appendAudit({
     action: 'attachment.removed',
-    entityType: 'transaction',
-    entityId: attachment.transaction_id,
-    summary: `Evidence “${attachment.name}” removed`,
+    entityType: attachment.transaction_id ? 'transaction' : 'attachment',
+    entityId: attachment.transaction_id ?? attachment.id,
+    summary: attachment.transaction_id
+      ? `Evidence “${attachment.name}” removed`
+      : `Document “${attachment.name}” removed from the inbox`,
     detail: { filename: attachment.filename },
     user,
   })

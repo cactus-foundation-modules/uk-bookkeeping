@@ -4,6 +4,7 @@ import type { SessionUser } from '@/lib/auth/session'
 import { appendAudit } from './audit'
 import { BookkeepingError, NotFoundError } from './errors'
 import { formatMoney, formatPounds, toMoney } from './money'
+import { nameSimilarity } from './name-matching'
 import type { MatchMethod, Money } from './types'
 
 // Reconciliation: tying what the bank says to what the books say.
@@ -32,35 +33,10 @@ export type MatchCandidate = {
 /** How far either side of the statement date an entry may sit and still be the same payment. */
 const DATE_WINDOW_DAYS = 10
 
-/**
- * A word from a counterparty name that is worth comparing on.
- *
- * The company-form words are dropped because every third supplier is a limited
- * company and matching on "ltd" would make them all look like each other.
- */
-const STOP_WORDS = new Set([
-  'ltd', 'limited', 'plc', 'llp', 'inc', 'co', 'company', 'the', 'uk', 'gb',
-  'payment', 'card', 'transfer', 'bill', 'direct', 'debit', 'ref', 'to', 'from',
-])
-
-function significantWords(value: string): Set<string> {
-  return new Set(
-    value
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, ' ')
-      .split(' ')
-      .filter((word) => word.length >= 3 && !STOP_WORDS.has(word)),
-  )
-}
-
-function nameSimilarity(a: string, b: string): number {
-  const left = significantWords(a)
-  const right = significantWords(b)
-  if (left.size === 0 || right.size === 0) return 0
-  let shared = 0
-  for (const word of left) if (right.has(word)) shared += 1
-  return shared / Math.min(left.size, right.size)
-}
+// Name comparison moved to lib/name-matching.ts when the document inbox needed
+// the same arithmetic. Same word list, same rule, one copy - three private
+// versions that drifted apart would show up as a receipt matching a statement
+// line on one screen and not on another.
 
 /** What a statement line looks like to the matcher, whether or not it is saved yet. */
 export type MatchableLine = {

@@ -191,6 +191,7 @@ export function PeriodStatusBadge({
 const TABS = [
   { key: 'overview', label: 'Overview' },
   { key: 'transactions', label: 'Entries' },
+  { key: 'documents', label: 'Receipts' },
   { key: 'journals', label: 'Journals' },
   { key: 'reconcile', label: 'Reconcile' },
   { key: 'director-loan', label: 'Director’s loan' },
@@ -207,7 +208,7 @@ const TABS = [
  * than a hardcoded /cactus-admin/, because the admin path is whatever the owner
  * renamed it to.
  *
- * Core's TabStrip, same as every other module: eleven tabs do not fit a narrow
+ * Core's TabStrip, same as every other module: twelve tabs do not fit a narrow
  * window, and wrapping them onto a second row pushed the page down and left the
  * strip looking like two half-finished ones. It scrolls sideways instead.
  */

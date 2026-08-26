@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
+import DocumentPicker from './DocumentPicker'
+import { type UnfiledDocument } from './documents-shared'
 import { ErrorNotice } from './Notices'
 import {
   addStrings,
@@ -188,9 +190,16 @@ export type TransactionFormValue = {
 export default function TransactionForm({
   initial,
   correcting,
+  initialDocumentId,
 }: {
   initial?: TransactionFormValue
   correcting?: { id: string; counterparty: string; taxPointDate: string } | null
+  /**
+   * A receipt already in the inbox that this entry is being written FROM -
+   * "Record an entry" on the Receipts tab arrives here. The form fills itself in
+   * from it and attaches it once the entry has an id to attach it to.
+   */
+  initialDocumentId?: string | null
 }) {
   const adminPath = useAdminPath()
   // Whether this form is filling in a fresh entry or editing a saved one. The
@@ -201,6 +210,10 @@ export default function TransactionForm({
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [knownCounterparties, setKnownCounterparties] = useState<string[]>([])
+  // Receipts picked out of the inbox while typing. Held rather than attached:
+  // there is nothing to attach them TO until the entry has been saved and has an
+  // id, and a link posted before then would file a receipt against nothing.
+  const [chosenDocuments, setChosenDocuments] = useState<UnfiledDocument[]>([])
   // Once a human has chosen a category, the counterparty suggestion keeps its
   // hands off - a guess must never overwrite a decision.
   const [categoryTouched, setCategoryTouched] = useState(!!initial)
@@ -320,6 +333,108 @@ export default function TransactionForm({
     }
   }
 
+  /**
+   * Fill the form in from a receipt.
+   *
+   * Nothing already typed is overwritten. A blank box is a box nobody has
+   * answered and a guess is welcome in it; a box with something in it is a
+   * decision, and a document is not allowed to argue with one.
+   *
+   * The exception is the invoice date, which the document is simply better
+   * placed to know than a form that defaulted to today - and which is the tax
+   * point the VAT period is decided on.
+   */
+  function applyDocument(document: UnfiledDocument) {
+    setChosenDocuments((prev) =>
+      prev.some((held) => held.id === document.id) ? prev : [...prev, document],
+    )
+
+    setValue((prev) => {
+      const next: TransactionFormValue = { ...prev }
+      if (isNewEntry && document.guessed_direction) next.direction = document.guessed_direction
+      if (!prev.counterparty.trim() && document.guessed_counterparty) {
+        next.counterparty = document.guessed_counterparty
+      }
+      if (document.guessed_document_date) next.taxPointDate = document.guessed_document_date
+      if (!prev.reference.trim() && document.guessed_document_number) {
+        next.reference = document.guessed_document_number
+      }
+
+      // Amounts only into a single line nobody has typed a figure into. A
+      // receipt cannot sensibly be spread across a split that somebody has
+      // already worked out by hand.
+      const only = prev.lines.length === 1 ? prev.lines[0]! : null
+      const total = document.guessed_total
+      if (only && total && pence(only.grossAmount) === 0) {
+        const net = document.guessed_net
+        const vat = document.guessed_vat
+        const impliedZero = vat !== null && vat !== undefined && pence(vat) === 0
+        const rateCode = document.guessed_vat_rate_code ?? (impliedZero ? 'zero' : null)
+
+        if (net && vat && pence(net) + pence(vat) === pence(total)) {
+          // The supplier's own split, exactly as printed. Their rounding is the
+          // record; re-deriving it from a rate is a coin flip we do not need to
+          // take when they have told us.
+          const code = rateCode ?? only.vatRateCode
+          next.lines = [
+            {
+              ...only,
+              anchor: 'gross',
+              vatRateCode: code,
+              vatRatePercent: RATE_PERCENTS[code] ?? only.vatRatePercent,
+              netAmount: net,
+              vatAmount: vat,
+              grossAmount: total,
+            },
+          ]
+        } else {
+          // A total and nothing else. Split it at whatever rate the document
+          // implied, or at none, which is the honest reading of a document that
+          // never mentioned VAT.
+          const code = rateCode ?? 'zero'
+          const percent = RATE_PERCENTS[code] ?? '0.00'
+          const derived = netForGross(total, percent)
+          next.lines = [
+            {
+              ...only,
+              anchor: 'gross',
+              vatRateCode: code,
+              vatRatePercent: percent,
+              netAmount: derived,
+              vatAmount: fromPence(pence(total) - pence(derived)),
+              grossAmount: total,
+            },
+          ]
+        }
+      }
+      return next
+    })
+
+    if (document.guessed_counterparty) suggestCategory(document.guessed_counterparty)
+  }
+
+  // "Record an entry" on the Receipts tab lands here with one already chosen.
+  useEffect(() => {
+    if (!initialDocumentId) return
+    let cancelled = false
+    fetch(`/api/m/uk-bookkeeping/admin/documents/${initialDocumentId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.document || data.document.transaction_id) return
+        applyDocument(data.document)
+      })
+      .catch(() => {
+        // The form still works without it; the receipt can be picked by hand.
+      })
+    return () => {
+      cancelled = true
+    }
+    // Once, for the id it was given. applyDocument closes over state that moves
+    // as the form is typed into, and re-running this on every keystroke would
+    // undo what somebody had just changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialDocumentId])
+
   const totals = useMemo(
     () =>
       value.lines.reduce(
@@ -429,6 +544,35 @@ export default function TransactionForm({
       }
 
       const saved = await response.json()
+
+      // The receipts picked out of the inbox, wired to the entry now that it has
+      // an id. One at a time and never fatally: the entry is saved, and a
+      // receipt that would not attach is a thing to say, not a reason to leave
+      // somebody staring at a form that appears not to have worked.
+      const stubborn: string[] = []
+      for (const document of chosenDocuments) {
+        try {
+          const attached = await fetch(
+            `/api/m/uk-bookkeeping/admin/documents/${document.id}/attach`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ transactionId: saved.id }),
+            },
+          )
+          if (!attached.ok) stubborn.push(document.name)
+        } catch {
+          stubborn.push(document.name)
+        }
+      }
+      if (stubborn.length > 0) {
+        setError(
+          `The entry is saved, but ${stubborn.join(' and ')} could not be attached to it. ${stubborn.length === 1 ? 'It is' : 'They are'} still in Receipts - try again from the entry itself.`,
+        )
+        setSaving(false)
+        return
+      }
+
       window.location.href = `/${adminPath}/m/uk-bookkeeping/transactions/${saved.id}`
     } catch {
       // A dropped connection must not leave "Saving…" disabled forever with no
@@ -457,6 +601,23 @@ export default function TransactionForm({
           {correcting.taxPointDate}. It goes on the current open return, not on the one already filed
           - which is how HMRC expects a mistake on a past return to be put right.
         </div>
+      )}
+
+      {/*
+        Only while the entry is being written. Once it is saved, its evidence is
+        managed on the entry's own page, where the receipts already on it are
+        listed alongside the ones still waiting - two places offering to attach
+        the same file would be two places to get it wrong.
+      */}
+      {isNewEntry && (
+        <DocumentPicker
+          chosen={chosenDocuments}
+          onChoose={applyDocument}
+          onRelease={(id) =>
+            setChosenDocuments((prev) => prev.filter((document) => document.id !== id))
+          }
+          disabled={saving}
+        />
       )}
 
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1rem' }}>

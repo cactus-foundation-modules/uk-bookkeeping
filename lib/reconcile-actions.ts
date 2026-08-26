@@ -11,8 +11,15 @@ import {
   stampSettlementFromLines,
   suggestMatchesForLines,
 } from './reconciliation'
+import { getDocument, learnFromDocumentFiling } from './documents'
 import { insertTransactionRows, type BulkOutcome } from './transactions'
-import { VAT_RATE_PERCENTS, type Money, type TransactionStatus, type VatRateCode } from './types'
+import {
+  VAT_RATE_PERCENTS,
+  type Direction,
+  type Money,
+  type TransactionStatus,
+  type VatRateCode,
+} from './types'
 
 // Explaining statement lines, one at a time or forty at a time.
 //
@@ -866,4 +873,211 @@ export async function settleBankLine(
     difference: formatMoney(shortfall.negated()),
     differenceTransactionId,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Recording an entry from an unfiled document
+// ---------------------------------------------------------------------------
+
+export type RecordFromDocumentInput = {
+  documentId: string
+  categoryId: string
+  /**
+   * Overrides the rate the document implied. Only used where the document did
+   * not give us a VAT figure of its own - if it did, that figure IS the answer
+   * and no rate is applied over the top of it.
+   */
+  vatRateCode?: VatRateCode | null
+  status: TransactionStatus
+}
+
+export type RecordFromDocumentOutcome = {
+  transactionId: string
+  /** True when the net and VAT came off the document rather than being split at a rate. */
+  usedDocumentFigures: boolean
+}
+
+/**
+ * One statement line, one unfiled invoice, one finished entry.
+ *
+ * This is the flow the inbox exists for. The bank knows the amount and the date
+ * the money moved; the document knows the supplier, the invoice number, the tax
+ * point and - the part nothing else has - whether there was VAT on it and how
+ * much. Neither half is enough on its own, and typing the second half in by hand
+ * while looking at a PDF in another tab is the job people give up on.
+ *
+ * The VAT rule is the one worth stating plainly. Where the document's total
+ * agrees with the payment to the penny and the document also gives a net and a
+ * VAT figure, THOSE ARE USED, exactly as printed - not re-derived from a rate.
+ * A supplier's own rounding is the record, and re-splitting their £61.70 and
+ * £12.34 at 20% to get £12.34 is a coin flip we do not need to take: they told
+ * us. Where the document says nothing about VAT, the chosen rate splits the
+ * payment as it always did.
+ *
+ * Everything is written in ONE database transaction, the document included, so
+ * there is no state where the entry exists and its evidence is still sitting in
+ * the inbox.
+ */
+export async function recordEntryFromDocument(
+  bankLineId: string,
+  input: RecordFromDocumentInput,
+  user: SessionUser | null,
+): Promise<RecordFromDocumentOutcome> {
+  const [category] = await prisma.$queryRaw<
+    { id: string; name: string; direction: string; archived: boolean }[]
+  >`
+    SELECT "id", "name", "direction", "archived" FROM "bk_categories"
+    WHERE "id" = ${input.categoryId} LIMIT 1
+  `
+  if (!category) throw new NotFoundError('That category')
+  if (category.archived) {
+    throw new BookkeepingError('invalid', `${category.name} has been archived, so nothing new can be filed under it.`)
+  }
+
+  const line = (await loadBankLines([bankLineId])).get(bankLineId)
+  if (!line) throw new NotFoundError('That statement line')
+  if (line.status === 'ignored') {
+    throw new BookkeepingError('invalid', 'That line has been set aside. Put it back first if it needs an entry.')
+  }
+
+  const remaining = line.amount.minus(line.matched)
+  if (remaining.isZero()) {
+    throw new BookkeepingError('invalid', 'That line is already explained in full.')
+  }
+
+  const document = await getDocument(input.documentId)
+  if (!document) throw new NotFoundError('That document')
+  if (document.transaction_id) {
+    throw new BookkeepingError(
+      'already_filed',
+      'That document is already filed against an entry. Take it off that one first.',
+      409,
+    )
+  }
+  if (document.locked_period_id) {
+    throw new BookkeepingError(
+      'locked',
+      'That document is evidence for a VAT return that has been filed, so it stays where it is.',
+      409,
+    )
+  }
+
+  const direction: Direction = remaining.isPositive() ? 'income' : 'expense'
+  if (category.direction !== 'both' && category.direction !== direction) {
+    throw new BookkeepingError(
+      'invalid',
+      `${category.name} is for ${category.direction === 'income' ? 'money in' : 'money out'}, and this line is money ${direction === 'income' ? 'in' : 'out'}.`,
+    )
+  }
+
+  const gross = remaining.abs()
+  const settledDate = line.date.toISOString().slice(0, 10)
+  // The tax point is the INVOICE's date where the document gave us one - that is
+  // what the VAT period is decided on under the accrual scheme, and the day the
+  // bank moved the money is a different fact that goes in its own column.
+  const taxPointDate = document.guessed_document_date
+    ? document.guessed_document_date.toISOString().slice(0, 10)
+    : settledDate
+
+  // The supplier's own figures, but only when their total is this payment. A
+  // document for £180 cannot lend its VAT split to a £150 payment.
+  const documentTotal = document.guessed_total
+  const useDocumentFigures =
+    documentTotal !== null &&
+    documentTotal.abs().equals(gross) &&
+    document.guessed_net !== null &&
+    document.guessed_vat !== null &&
+    document.guessed_net.plus(document.guessed_vat).equals(documentTotal.abs())
+
+  const rateCode: VatRateCode = useDocumentFigures
+    ? document.guessed_vat_rate_code ?? (document.guessed_vat!.isZero() ? 'zero' : 'standard')
+    : input.vatRateCode ?? document.guessed_vat_rate_code ?? 'zero'
+
+  const split = useDocumentFigures
+    ? {
+        net: document.guessed_net!,
+        vat: document.guessed_vat!,
+        percent: VAT_RATE_PERCENTS[rateCode],
+      }
+    : splitGross(gross, rateCode)
+
+  const counterparty =
+    document.guessed_counterparty?.trim() || line.counterparty.trim() || line.details.trim() || 'Unnamed'
+
+  if (input.status === 'posted') {
+    await assertDatesNotClosed(await loadClosedRanges(), new Date(taxPointDate), line.date)
+  }
+
+  const transactionId = await prisma.$transaction(async (tx) => {
+    const id = await insertTransactionRows(
+      tx,
+      {
+        direction,
+        taxPointDate,
+        settledDate,
+        counterparty,
+        description: line.details.trim() === counterparty ? '' : line.details.trim(),
+        // The supplier's own invoice number, which is what this column is for
+        // and what nothing but the document ever knew.
+        reference: document.guessed_document_number ?? line.reference,
+        status: input.status,
+        source: 'reconcile',
+        sourceRef: line.id,
+        bankAccountId: line.bank_account_id,
+        statementId: line.statement_id,
+        lines: [
+          {
+            categoryId: input.categoryId,
+            vatTreatment: rateCode === 'outside_scope' ? 'outside_scope' : 'domestic',
+            vatRateCode: rateCode,
+            vatRatePercent: split.percent,
+            netAmount: formatMoney(split.net),
+            vatAmount: formatMoney(split.vat),
+            grossAmount: formatMoney(split.net.plus(split.vat)),
+          },
+        ],
+      },
+      user,
+    )
+
+    await insertReconciliations(
+      tx,
+      [{ bankTransactionId: line.id, transactionId: id, amount: remaining }],
+      'manual',
+      user,
+    )
+    await refreshBankTransactionStatuses(tx, [line.id])
+
+    // In the same transaction as the entry, on purpose: there is no moment where
+    // the entry exists and its evidence is still sitting in the inbox.
+    await tx.$executeRaw`
+      UPDATE "bk_attachments" SET "transaction_id" = ${id}, "position" = 0
+      WHERE "id" = ${document.id} AND "transaction_id" IS NULL
+    `
+    return id
+  })
+
+  // Learned afterwards and quietly. The connection between what the document
+  // calls this supplier and what the books call them is now known for certain,
+  // because a human just confirmed it - but nobody clicking "record this" wants
+  // an error about a lookup table.
+  await learnFromDocumentFiling(document.guessed_counterparty, counterparty, user)
+
+  await appendAudit({
+    action: 'reconciliation.recorded',
+    entityType: 'bank_transaction',
+    entityId: line.id,
+    summary: `Recorded from “${document.name}” as ${category.name}${input.status === 'draft' ? ', left as a draft for review' : ''}`,
+    detail: {
+      attachmentId: document.id,
+      transactionId,
+      category: category.name,
+      vatRateCode: rateCode,
+      usedDocumentFigures: useDocumentFigures,
+      total: formatMoney(gross),
+    },
+    user,
+  })
+
+  return { transactionId, usedDocumentFigures: useDocumentFigures }
 }

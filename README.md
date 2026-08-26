@@ -31,6 +31,19 @@ computation follows the same rule.
   seen before and pre-picks the category their entries usually land in.
 - **Evidence.** Receipts and invoices attached to an entry, stored through the
   site's own media provider and never tidied away by the media clean-up.
+- **Receipts, before the entry exists.** Paperwork arrives on the day and gets
+  typed up when the statement turns up, so a receipt can be dropped in with no
+  entry to attach it to yet. A PDF is read as it lands - who it is from, the
+  invoice number, the tax point, the net, the VAT and the supplier's VAT
+  registration - and everything read is a guess a human can correct. Correcting
+  one is what teaches the module that "SQ *THE COFFEE SHOP" on a statement and
+  "The Coffee Shop Limited" on an invoice are the same business, and every later
+  document and statement line gets that for free. When the statement is
+  imported, unfiled receipts are offered against the payments they match, and
+  confirming one writes the entry - supplier, invoice number, tax point and the
+  VAT exactly as the supplier printed it - with the receipt attached to it.
+  There is no OCR: a photograph is kept and filed like anything else, it simply
+  arrives with nothing read off it.
 - **VAT returns.** Periods, the nine boxes computed in one SQL statement,
   each expandable to the exact entries behind it, and a frozen snapshot of both
   the figures and the workings at the moment you finalise. HMRC's declaration is

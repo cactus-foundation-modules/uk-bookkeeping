@@ -20,7 +20,7 @@ export default async function NewTransactionPage({
   }
 
   const settings = await getSettings()
-  const { correcting: correctingId } = await searchParams
+  const { correcting: correctingId, document: documentId } = await searchParams
 
   // Correcting a filed entry: the new one lands in the current open period and
   // points back at the locked original, which is how HMRC expects a mistake on a
@@ -35,6 +35,10 @@ export default async function NewTransactionPage({
         <h1 className="page-title">{original ? 'Post a correction' : 'Record an entry'}</h1>
       </div>
       <TransactionForm
+        // "Record an entry" on the Receipts tab arrives with a receipt named.
+        // The form reads it, fills itself in from it, and attaches it once the
+        // entry has an id to attach it to.
+        initialDocumentId={documentId ?? null}
         correcting={
           original
             ? {

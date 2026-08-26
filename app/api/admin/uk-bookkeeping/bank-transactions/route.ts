@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { toErrorResponse } from '@/modules/uk-bookkeeping/lib/errors'
 import { listBankTransactions } from '@/modules/uk-bookkeeping/lib/bank-transactions'
+import { aliasMap } from '@/modules/uk-bookkeeping/lib/counterparty-aliases'
+import { suggestDocumentsForLines } from '@/modules/uk-bookkeeping/lib/document-matching'
 import { suggestMatchesForLines, summariseReconciliation } from '@/modules/uk-bookkeeping/lib/reconciliation'
 import { formatMoney } from '@/modules/uk-bookkeeping/lib/money'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
@@ -9,6 +11,12 @@ import type { BankTransactionStatus } from '@/modules/uk-bookkeeping/lib/types'
 
 // The reconciliation screen's one read: the statement lines, what is matched to
 // each, and - for the ones still open - what might explain them.
+//
+// Two kinds of "what might explain them", and they are different questions.
+// `suggestions` are entries already in the books, and accepting one ties the two
+// together. `documentSuggestions` are receipts sitting unfiled in the inbox that
+// nobody has typed up yet, and accepting one WRITES the entry, from what the
+// document says, with the document attached to it.
 
 export async function GET(request: NextRequest) {
   const gate = await requireBookkeepingUser('bookkeeping.access')
@@ -33,19 +41,28 @@ export async function GET(request: NextRequest) {
     // A reconciled line needs no suggestions, and asking for them per row is how
     // this page would spend its sixty seconds.
     const open = list.rows.filter((row) => row.status === 'unreconciled')
-    const suggestions = await suggestMatchesForLines(
-      open.map((row) => ({
-        date: row.date.toISOString().slice(0, 10),
-        amount: formatMoney(row.amount),
-        counterparty: row.counterparty,
-        details: row.details,
-        reference: row.reference,
-      })),
-    )
+    const matchable = open.map((row) => ({
+      date: row.date.toISOString().slice(0, 10),
+      amount: formatMoney(row.amount),
+      counterparty: row.counterparty,
+      details: row.details,
+      reference: row.reference,
+    }))
+    const suggestions = await suggestMatchesForLines(matchable)
 
     const byId: Record<string, unknown> = {}
     open.forEach((row, index) => {
       byId[row.id] = suggestions.get(index) ?? []
+    })
+
+    // Unfiled paperwork that might be what each of these payments was for. One
+    // read of the inbox for the whole page, then arithmetic - same rule as the
+    // entry matcher above.
+    const documents = await suggestDocumentsForLines(matchable, await aliasMap())
+    const documentsById: Record<string, unknown> = {}
+    open.forEach((row, index) => {
+      const found = documents.byLine.get(index)
+      if (found?.length) documentsById[row.id] = found
     })
 
     // What each of these counterparties was filed under last time, so the screen
@@ -62,6 +79,8 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       ...list,
       suggestions: byId,
+      documentSuggestions: documentsById,
+      documentsTruncated: documents.truncated,
       categoryGuesses,
       summary: bankAccountId
         ? await summariseReconciliation(bankAccountId, params.get('from'), params.get('to'))

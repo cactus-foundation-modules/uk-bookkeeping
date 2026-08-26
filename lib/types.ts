@@ -152,9 +152,19 @@ export type BkTransactionLineRow = {
   locked_period_id: string | null
 }
 
+/** What we made of a document we read. See migrations/016_document_inbox.sql. */
+export type AttachmentScanStatus = 'not_scanned' | 'read' | 'no_text' | 'unreadable'
+
 export type BkAttachmentRow = {
   id: string
-  transaction_id: string
+  /**
+   * NULL while the document is still in the inbox waiting to be filed. Evidence
+   * exists before the entry does far more often than after it - the receipt
+   * arrives by email on the day, the entry gets typed when the statement turns
+   * up - so an attachment is allowed to stand on its own until somebody says
+   * what it belongs to.
+   */
+  transaction_id: string | null
   name: string
   filename: string
   url: string
@@ -168,6 +178,22 @@ export type BkAttachmentRow = {
   locked_period_id: string | null
   uploaded_by_user_id: string | null
   created_at: Date
+  // --- What we read off it. Guesses, every one, and never an accounting figure
+  // --- on its own: they pre-fill a form somebody then presses Save on.
+  scan_status: AttachmentScanStatus
+  scanned_at: Date | null
+  guessed_counterparty: string | null
+  counterparty_confidence: number
+  guessed_direction: Direction | null
+  guessed_document_date: Date | null
+  guessed_document_number: string | null
+  guessed_net: Money | null
+  guessed_vat: Money | null
+  guessed_total: Money | null
+  guessed_vat_rate_code: VatRateCode | null
+  guessed_vat_number: string | null
+  reading_confirmed: boolean
+  extracted_text: string | null
 }
 
 export type BkVatPeriodRow = {

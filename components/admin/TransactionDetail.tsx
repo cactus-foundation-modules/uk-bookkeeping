@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
 import { BookkeepingNav, ErrorNotice, LockedNotice, SandboxBanner } from './Notices'
+import DocumentPicker from './DocumentPicker'
 import EvidenceDropzone from './EvidenceDropzone'
+import { type UnfiledDocument } from './documents-shared'
 import TransactionForm, { type TransactionFormValue } from './TransactionForm'
 import { formatDate, poundsFromString, toDateInput } from './format'
 
@@ -65,6 +67,12 @@ export default function TransactionDetail({
   const [bankAccountNames, setBankAccountNames] = useState<Record<string, string>>({})
   const [editing, setEditing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Bumped after a receipt is filed from here, so the picker drops the one that
+  // has just gone. Filing on this screen happens straight away - the entry
+  // already exists, so there is nothing to hold anything back for.
+  const [pickerKey, setPickerKey] = useState(0)
+  const [pickerError, setPickerError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -313,6 +321,39 @@ export default function TransactionDetail({
         canRecord={canRecord}
         onChange={load}
       />
+
+      {canRecord && !locked && !finalised && (
+        <>
+          <ErrorNotice message={pickerError} />
+          <DocumentPicker
+            chosen={[]}
+            reloadKey={pickerKey}
+            onRelease={() => undefined}
+            onChoose={async (document: UnfiledDocument) => {
+              setPickerError(null)
+              try {
+                const response = await fetch(
+                  `/api/m/uk-bookkeeping/admin/documents/${document.id}/attach`,
+                  {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ transactionId: transaction.id }),
+                  },
+                )
+                if (!response.ok) {
+                  const payload = await response.json().catch(() => ({}))
+                  setPickerError(payload.error ?? 'That receipt could not be attached.')
+                  return
+                }
+                setPickerKey((key) => key + 1)
+                load()
+              } catch {
+                setPickerError('That did not reach the server. Check the connection and try again.')
+              }
+            }}
+          />
+        </>
+      )}
     </div>
   )
 }

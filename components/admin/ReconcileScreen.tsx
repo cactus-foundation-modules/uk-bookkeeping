@@ -78,10 +78,36 @@ type BankAccount = {
   }
 }
 
+/**
+ * A receipt sitting unfiled in the inbox that might be what this payment was
+ * for. Different from a MatchCandidate in the one way that matters: accepting a
+ * MatchCandidate ties this line to an entry that already exists, whereas
+ * accepting one of these WRITES the entry, from what the document says, with
+ * the document attached to it.
+ */
+type DocumentCandidate = {
+  documentId: string
+  name: string
+  scanStatus: string
+  counterparty: string | null
+  counterpartyConfidence: number
+  documentDate: string | null
+  documentNumber: string | null
+  net: string | null
+  vat: string | null
+  total: string | null
+  vatRateCode: string | null
+  direction: 'income' | 'expense' | null
+  score: number
+  reasons: string[]
+}
+
 type Feed = {
   rows: BankTransaction[]
   total: number
   suggestions: Record<string, MatchCandidate[]>
+  documentSuggestions: Record<string, DocumentCandidate[]>
+  documentsTruncated?: boolean
   categoryGuesses: Record<string, string>
   summary: Summary | null
 }
@@ -309,6 +335,57 @@ export default function ReconcileScreen({
     }
   }
 
+  /**
+   * "That invoice is what this was." One click, one finished entry.
+   *
+   * The amount and the day the money moved come from the bank; the supplier, the
+   * invoice number, the tax point and the VAT come from the document; the
+   * category comes from whichever one is showing on the row. The document ends
+   * up attached to the entry it paid for.
+   */
+  async function recordFromDocument(rowId: string, documentId: string, categoryId: string) {
+    setBusy(true)
+    setError(null)
+    setOutcome(null)
+    try {
+      const response = await fetch(
+        `/api/m/uk-bookkeeping/admin/bank-transactions/${rowId}/record-from-document`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            documentId,
+            categoryId,
+            vatRateCode,
+            status: leaveForReview ? 'draft' : 'posted',
+          }),
+        },
+      )
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        setError(payload.error ?? 'That could not be recorded.')
+        return
+      }
+      setOutcome({
+        done: 1,
+        failed: [],
+        // Worth saying out loud which way the VAT went: a figure taken off the
+        // supplier's own invoice and a figure worked out from a rate are two
+        // different claims about box 4.
+        what: payload.usedDocumentFigures
+          ? 'recorded, with the VAT exactly as the invoice has it'
+          : 'recorded from the receipt',
+        attempted: 1,
+        leftNote: 'were left as they were',
+      })
+      await load()
+    } catch {
+      setError('That did not reach the server. Check the connection and try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function openMatches(id: string) {
     setOpenLine(openLine === id ? null : id)
     if (matches[id]) return
@@ -363,6 +440,28 @@ export default function ReconcileScreen({
       <BookkeepingNav active="reconcile" />
       <SandboxBanner environment={environment} />
       <ErrorNotice message={error} />
+
+      {/*
+        Said out loud rather than swallowed. A cap that quietly stops looking
+        reads as "there is no invoice for this payment", which is a different
+        and much worse statement than "we did not look at all of them".
+      */}
+      {feed?.documentsTruncated && (
+        <div
+          className="card"
+          style={{
+            padding: '0.75rem 1rem',
+            marginBottom: '1rem',
+            fontSize: 'var(--text-sm)',
+            color: 'var(--color-text-muted, var(--color-text))',
+          }}
+          role="status"
+        >
+          There are more unfiled receipts than we look through in one go, so only the most recent
+          few hundred were offered against these lines. Filing some of them from the Receipts tab
+          will bring the rest into view.
+        </div>
+      )}
 
       {outcome && <Outcome outcome={outcome} rows={rows} onDismiss={() => setOutcome(null)} />}
 
@@ -598,6 +697,7 @@ export default function ReconcileScreen({
                   key={row.id}
                   row={row}
                   suggestions={feed?.suggestions[row.id] ?? []}
+                  documents={feed?.documentSuggestions?.[row.id] ?? []}
                   matched={matches[row.id] ?? []}
                   categories={categories}
                   categoryId={rowCategory[row.id] ?? ''}
@@ -622,6 +722,9 @@ export default function ReconcileScreen({
                   onSettleToggle={() => setSettleLine(settleLine === row.id ? null : row.id)}
                   onAct={(body) => act(row.id, body)}
                   onBulk={(body, what, leftNote) => bulk([row.id], body, what, leftNote)}
+                  onRecordFromDocument={(documentId, categoryId) =>
+                    recordFromDocument(row.id, documentId, categoryId)
+                  }
                 />
               ))}
             </tbody>
@@ -791,9 +894,132 @@ function Position({ account, summary }: { account: BankAccount; summary: Summary
   )
 }
 
+/**
+ * Every unfiled receipt, for the line the matcher had nothing to say about.
+ *
+ * The suggestions above this are the ones that agree on the amount or the name.
+ * They are the common case and not the only one: a supplier who invoices £180
+ * and takes £150 on account, a photograph nothing could be read off, a receipt
+ * whose date is months from the payment. None of those should be OFFERED - a
+ * plausible wrong match is the one failure worth designing against - but all of
+ * them are things a human can look at and know.
+ *
+ * Compact on purpose. It opens inside a table cell, and the thing being decided
+ * is one row of it.
+ */
+function PickReceipt({
+  onPick,
+  onClose,
+  disabled,
+}: {
+  onPick: (documentId: string) => void
+  onClose: () => void
+  disabled: boolean
+}) {
+  const [rows, setRows] = useState<DocumentCandidate[] | null>(null)
+  const [search, setSearch] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    const timer = setTimeout(() => {
+      const query = new URLSearchParams({ unfiled: '1', limit: '50' })
+      if (search.trim()) query.set('search', search.trim())
+      fetch(`/api/m/uk-bookkeeping/admin/documents?${query}`)
+        .then((response) => (response.ok ? response.json() : { rows: [] }))
+        .then((data) => {
+          if (cancelled) return
+          setRows(
+            (data.rows ?? []).map((row: Record<string, unknown>) => ({
+              documentId: row.id as string,
+              name: row.name as string,
+              scanStatus: row.scan_status as string,
+              counterparty: (row.guessed_counterparty as string | null) ?? null,
+              counterpartyConfidence: (row.counterparty_confidence as number) ?? 0,
+              documentDate: (row.guessed_document_date as string | null) ?? null,
+              documentNumber: (row.guessed_document_number as string | null) ?? null,
+              net: (row.guessed_net as string | null) ?? null,
+              vat: (row.guessed_vat as string | null) ?? null,
+              total: (row.guessed_total as string | null) ?? null,
+              vatRateCode: (row.guessed_vat_rate_code as string | null) ?? null,
+              direction: (row.guessed_direction as 'income' | 'expense' | null) ?? null,
+              score: 0,
+              reasons: [],
+            })),
+          )
+        })
+        .catch(() => {
+          if (!cancelled) setRows([])
+        })
+    }, search ? 250 : 0)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [search])
+
+  return (
+    <div style={{ border: '1px solid var(--color-border)', borderRadius: 6, padding: '0.5rem' }}>
+      <input
+        style={{ ...controlStyle, width: '100%', marginBottom: '0.5rem' }}
+        placeholder="Search receipts by supplier, number or filename"
+        value={search}
+        onChange={(event) => setSearch(event.target.value)}
+      />
+      {rows === null && <div style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>Loading…</div>}
+      {rows !== null && rows.length === 0 && (
+        <div style={{ fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
+          Nothing unfiled matches that.
+        </div>
+      )}
+      {(rows ?? []).map((candidate) => (
+        <div
+          key={candidate.documentId}
+          style={{
+            display: 'flex',
+            gap: '0.5rem',
+            alignItems: 'baseline',
+            flexWrap: 'wrap',
+            padding: '0.25rem 0',
+            borderTop: '1px solid var(--color-border)',
+          }}
+        >
+          <a
+            href={`/api/m/uk-bookkeeping/admin/attachments/${candidate.documentId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {candidate.counterparty ?? candidate.name}
+          </a>
+          <span style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
+            {[
+              candidate.documentNumber && `no. ${candidate.documentNumber}`,
+              candidate.documentDate && formatDate(candidate.documentDate),
+              candidate.total && poundsFromString(candidate.total),
+            ]
+              .filter(Boolean)
+              .join(' · ') || 'nothing read off it'}
+          </span>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={disabled}
+            onClick={() => onPick(candidate.documentId)}
+          >
+            Use this one
+          </button>
+        </div>
+      ))}
+      <button type="button" className="btn btn-sm" style={{ marginTop: '0.5rem' }} onClick={onClose}>
+        Close
+      </button>
+    </div>
+  )
+}
+
 function StatementRow({
   row,
   suggestions,
+  documents,
   matched,
   categories,
   categoryId,
@@ -811,9 +1037,11 @@ function StatementRow({
   onSettleToggle,
   onAct,
   onBulk,
+  onRecordFromDocument,
 }: {
   row: BankTransaction
   suggestions: MatchCandidate[]
+  documents: DocumentCandidate[]
   matched: MatchedEntry[]
   categories: Category[]
   categoryId: string
@@ -831,11 +1059,13 @@ function StatementRow({
   onSettleToggle: () => void
   onAct: (body: Record<string, unknown>) => void
   onBulk: (body: Record<string, unknown>, what: string, leftNote: string) => void
+  onRecordFromDocument: (documentId: string, categoryId: string) => void
 }) {
   const direction = row.amount.startsWith('-') ? 'expense' : 'income'
   const usable = categories.filter(
     (category) => category.direction === 'both' || category.direction === direction,
   )
+  const [pickingReceipt, setPickingReceipt] = useState(false)
 
   return (
     <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
@@ -923,6 +1153,69 @@ function StatementRow({
               </div>
             ))}
 
+            {/*
+              Paperwork nobody has typed up yet. Above the category picker on
+              purpose: if the invoice is sitting right there, coding the line by
+              hand is the slower way round AND the one that loses the receipt.
+            */}
+            {documents.map((candidate) => (
+              <div
+                key={candidate.documentId}
+                style={{
+                  display: 'flex',
+                  gap: '0.5rem',
+                  alignItems: 'baseline',
+                  flexWrap: 'wrap',
+                  padding: '0.375rem 0.5rem',
+                  borderRadius: 6,
+                  border: '1px solid var(--color-border)',
+                }}
+              >
+                <span aria-hidden="true">📎</span>
+                <a
+                  href={`/api/m/uk-bookkeeping/admin/attachments/${candidate.documentId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {candidate.counterparty ?? candidate.name}
+                  {candidate.documentNumber ? ` · no. ${candidate.documentNumber}` : ''}
+                </a>
+                <span style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
+                  {candidate.reasons.join(', ')}
+                  {candidate.vat !== null &&
+                    (candidate.vat === '0.00'
+                      ? ' · no VAT on it'
+                      : ` · ${poundsFromString(candidate.vat)} VAT`)}
+                </span>
+                {canRecord && (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    disabled={busy || !categoryId}
+                    title={
+                      categoryId
+                        ? undefined
+                        : 'Choose what it was for first - the invoice knows the supplier and the VAT, not what you spent it on.'
+                    }
+                    onClick={() => onRecordFromDocument(candidate.documentId, categoryId)}
+                  >
+                    That is the invoice
+                  </button>
+                )}
+              </div>
+            ))}
+
+            {canRecord && pickingReceipt && (
+              <PickReceipt
+                disabled={busy || !categoryId}
+                onPick={(documentId) => {
+                  setPickingReceipt(false)
+                  onRecordFromDocument(documentId, categoryId)
+                }}
+                onClose={() => setPickingReceipt(false)}
+              />
+            )}
+
             {canRecord && (
               <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
                 <select
@@ -951,6 +1244,23 @@ function StatementRow({
                   }
                 >
                   Record it as this
+                </button>
+                {/*
+                  For when the right receipt is in the pile but was not offered -
+                  a part payment, a photograph nothing could be read off, an
+                  invoice dated months from the payment. None of those should be
+                  suggested, and all of them are things a human can recognise.
+                */}
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={busy || !categoryId}
+                  title={
+                    categoryId ? undefined : 'Choose what it was for first.'
+                  }
+                  onClick={() => setPickingReceipt(!pickingReceipt)}
+                >
+                  {pickingReceipt ? 'Never mind' : 'Pick a receipt'}
                 </button>
                 <button
                   type="button"
