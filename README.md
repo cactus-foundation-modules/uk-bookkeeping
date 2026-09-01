@@ -174,6 +174,28 @@ with a real request and reports what they said - which is the evidence their
 approval process asks for, available in seconds rather than after a ten working
 day wait.
 
+### Gov-Client-Public-Port, and what to tell HMRC
+
+Their checker reports this one as missing on hosting that terminates the
+browser's connection at an edge - Vercel among them - because the source port is
+consumed there and never reaches the application. The module reads it where the
+hosting does pass it on (an RFC 7239 `Forwarded` header, or a source port
+appended to `X-Forwarded-For`) and omits it otherwise, rather than sending a
+server port dressed up as a client one.
+
+HMRC's own instruction in that situation is to write to them. Wording that says
+the true thing:
+
+> Our software runs as a web application behind a hosted edge network. The end
+> user's TCP connection is terminated at the edge and only the client's public IP
+> address is forwarded to our application; the client's source port is not
+> available to us at any point. We therefore cannot populate
+> Gov-Client-Public-Port. Every other header for the WEB_APP_VIA_SERVER
+> connection method is sent.
+
+Send it to the software developer support team alongside your production
+approval application.
+
 Grant `bookkeeping.access` to whichever roles should see the section,
 `bookkeeping.record` to those who record entries, `bookkeeping.submit` to those
 who may finalise and file, and `bookkeeping.settings` to those who may change

@@ -8,6 +8,8 @@ import {
   keyValueHeader,
   percentEncode,
 } from './fraud-spec'
+import { parseForwardedHeader, splitAddress, type ForwardedClient } from './forwarded'
+import { getVendorLicenceId, hashLicenceId, VENDOR_LICENCE_SOFTWARE_NAME } from './vendor-licence'
 import manifest from '../../cactus.module.json'
 
 // Assembling the Gov-* headers on the server.
@@ -36,6 +38,8 @@ export type FraudBag = {
 export type FraudRequestInfo = {
   /** Every value on the incoming x-forwarded-for, in order. */
   forwardedFor: string[]
+  /** The leftmost `for=` on an RFC 7239 Forwarded header, address and port. */
+  forwarded: ForwardedClient
   /** x-real-ip, where the platform sets one. */
   realIp: string | null
   /** The host the browser asked for, used to work out the vendor's public IP. */
@@ -49,6 +53,7 @@ export function readRequestInfo(request: Request): FraudRequestInfo {
       .split(',')
       .map((value) => value.trim())
       .filter(Boolean),
+    forwarded: parseForwardedHeader(request.headers.get('forwarded')),
     realIp: request.headers.get('x-real-ip'),
     host: request.headers.get('host'),
   }
@@ -63,7 +68,21 @@ export function readRequestInfo(request: Request): FraudRequestInfo {
  * to anybody looking for fraud.
  */
 export function clientPublicIp(info: FraudRequestInfo): string | null {
-  return info.forwardedFor[0] ?? info.realIp ?? null
+  const fromForwardedFor = splitAddress(info.forwardedFor[0] ?? '').ip
+  return fromForwardedFor ?? info.forwarded.ip ?? splitAddress(info.realIp ?? '').ip
+}
+
+/**
+ * Gov-Client-Public-Port: the source port the browser opened the connection
+ * from, where the hosting in front of us passes it on.
+ *
+ * Vercel's edge does not, so on that hosting the header is absent and HMRC's own
+ * instruction applies: tell them why. It is read here rather than assumed away,
+ * because hosting behind a proxy that does set it should send the real value
+ * rather than inherit somebody else's limitation.
+ */
+export function clientPublicPort(info: FraudRequestInfo): number | null {
+  return splitAddress(info.forwardedFor[0] ?? '').port ?? info.forwarded.port ?? null
 }
 
 /**
@@ -123,6 +142,17 @@ export async function buildFraudHeaders(
 
   const publicIp = clientPublicIp(info)
   if (publicIp) headers['Gov-Client-Public-IP'] = publicIp
+
+  const publicPort = clientPublicPort(info)
+  if (publicPort) headers['Gov-Client-Public-Port'] = String(publicPort)
+
+  // Gov-Vendor-License-IDs. Always sent: HMRC's validator treats its absence as
+  // a missing header regardless of what their page says about values that
+  // cannot be collected. The identifier is minted once per install and only its
+  // hash travels - see lib/hmrc/vendor-licence.ts.
+  headers['Gov-Vendor-License-IDs'] = keyValueHeader({
+    [VENDOR_LICENCE_SOFTWARE_NAME]: hashLicenceId(await getVendorLicenceId()),
+  })
 
   if (input.bag.deviceId) headers['Gov-Client-Device-ID'] = input.bag.deviceId
   if (input.bag.userAgent) headers['Gov-Client-Browser-JS-User-Agent'] = input.bag.userAgent
@@ -207,10 +237,13 @@ export function describeMissingHeaders(headers: Record<string, string>): string[
   if (!headers['Gov-Client-Multi-Factor']) {
     notes.push('This sign-in did not use a second factor, so none was declared.')
   }
-  // Never sent, and this is not an oversight: the browser's own source port is
-  // not visible to a serverless function, and HMRC's own specification allows
-  // for a value that cannot be collected. Said out loud so nobody spends an
-  // afternoon looking for where it went.
-  notes.push('The port your browser connected from is not something this hosting can see, so it is left out.')
+  if (!headers['Gov-Client-Public-Port']) {
+    // Only some hosting passes the browser's source port through to the app.
+    // Where it does not, HMRC's own instruction is to tell them why rather than
+    // to invent a number, and the wording for that is in the README.
+    notes.push(
+      'The port your browser connected from is not passed on by this site’s hosting, so it is left out. HMRC ask to be told why - the wording to send them is in this module’s notes.',
+    )
+  }
   return notes
 }

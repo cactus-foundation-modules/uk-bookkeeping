@@ -352,6 +352,10 @@ CREATE TABLE IF NOT EXISTS "bk_settings" (
   -- Optional override for Gov-Vendor-Public-IP. Left empty the module resolves
   -- the site's own hostname instead; see lib/hmrc/fraud-headers.ts.
   "vendor_public_ip"        TEXT,
+  -- The install's own licence identifier, minted once. Gov-Vendor-License-IDs
+  -- carries a SHA-256 of it, never the value itself; see migrations/018 and
+  -- lib/hmrc/vendor-licence.ts for why it must never be rotated.
+  "vendor_license_id"       TEXT DEFAULT gen_random_uuid()::text,
   "created_at"              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   "updated_at"              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT "bk_settings_pkey" PRIMARY KEY ("id"),

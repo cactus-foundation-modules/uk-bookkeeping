@@ -26,6 +26,7 @@ const FALLBACK: BkSettingsRow = {
   attachment_max_bytes: 15_728_640,
   retention_years: 6,
   vendor_public_ip: null,
+  vendor_license_id: null,
   // 31 March, which is what a company incorporated without a thought about it
   // ends up with often enough to be the least surprising default.
   year_end_month: 3,

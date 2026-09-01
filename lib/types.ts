@@ -453,6 +453,8 @@ export type BkSettingsRow = {
   attachment_max_bytes: number
   retention_years: number
   vendor_public_ip: string | null
+  /** Raw install licence identifier. Hashed before it goes anywhere near HMRC. */
+  vendor_license_id: string | null
   /** The accounting year end, as a month and a day: "31 March", not a date. */
   year_end_month: number
   year_end_day: number
