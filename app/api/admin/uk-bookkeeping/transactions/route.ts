@@ -24,7 +24,9 @@ export async function GET(request: NextRequest) {
     const list = await listTransactions({
       from: query.get('from'),
       to: query.get('to'),
-      direction: (query.get('direction') as 'income' | 'expense' | null) || null,
+      // 'transfer' is not a direction on the row - it selects the journals that
+      // are transfers instead. See lib/transactions.ts.
+      direction: (query.get('direction') as 'income' | 'expense' | 'transfer' | null) || null,
       categoryId: query.get('categoryId'),
       vatRateCode: (query.get('vatRateCode') as never) || null,
       counterparty: query.get('counterparty'),

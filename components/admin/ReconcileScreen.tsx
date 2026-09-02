@@ -45,7 +45,9 @@ type BankTransaction = {
 }
 
 type MatchedEntry = {
-  transactionId: string
+  /** Null when what is matched is a transfer rather than an entry. */
+  transactionId: string | null
+  journalId: string | null
   counterparty: string
   date: string
   amount: string
@@ -102,11 +104,29 @@ type DocumentCandidate = {
   reasons: string[]
 }
 
+/**
+ * The other half of a movement between two of the business's own accounts,
+ * already recorded. Accepting one ties this line to that transfer - it does not
+ * write anything new, because the transfer itself already exists.
+ */
+type TransferCandidate = {
+  journalId: string
+  date: string
+  narrative: string
+  reference: string | null
+  amount: string
+  fromBankName: string
+  toBankName: string
+  side: 'out' | 'in'
+  daysApart: number
+}
+
 type Feed = {
   rows: BankTransaction[]
   total: number
   suggestions: Record<string, MatchCandidate[]>
   documentSuggestions: Record<string, DocumentCandidate[]>
+  transferSuggestions?: Record<string, TransferCandidate[]>
   documentsTruncated?: boolean
   categoryGuesses: Record<string, string>
   summary: Summary | null
@@ -698,6 +718,7 @@ export default function ReconcileScreen({
                   row={row}
                   suggestions={feed?.suggestions[row.id] ?? []}
                   documents={feed?.documentSuggestions?.[row.id] ?? []}
+                  transfers={feed?.transferSuggestions?.[row.id] ?? []}
                   matched={matches[row.id] ?? []}
                   categories={categories}
                   categoryId={rowCategory[row.id] ?? ''}
@@ -1020,6 +1041,7 @@ function StatementRow({
   row,
   suggestions,
   documents,
+  transfers,
   matched,
   categories,
   categoryId,
@@ -1042,6 +1064,7 @@ function StatementRow({
   row: BankTransaction
   suggestions: MatchCandidate[]
   documents: DocumentCandidate[]
+  transfers: TransferCandidate[]
   matched: MatchedEntry[]
   categories: Category[]
   categoryId: string
@@ -1131,6 +1154,43 @@ function StatementRow({
                 Only {poundsFromString(row.matched_total)} of this is explained so far.
               </div>
             )}
+
+            {transfers.map((candidate) => (
+              <div
+                key={candidate.journalId}
+                style={{
+                  display: 'flex',
+                  gap: '0.5rem',
+                  alignItems: 'baseline',
+                  flexWrap: 'wrap',
+                  padding: '0.375rem 0.5rem',
+                  borderRadius: 6,
+                  border: '1px solid var(--color-border)',
+                }}
+              >
+                <span aria-hidden="true">↔</span>
+                <a href={`/${adminPath}/m/uk-bookkeeping/transfers/${candidate.journalId}`}>
+                  {formatDate(candidate.date)} · {candidate.fromBankName} → {candidate.toBankName} ·{' '}
+                  {poundsFromString(candidate.amount)}
+                </a>
+                <span style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
+                  the {candidate.side === 'out' ? 'money leaving' : 'money arriving'} on a transfer
+                  you have already recorded
+                </span>
+                {canRecord && (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    disabled={busy}
+                    onClick={() =>
+                      onAct({ action: 'match-transfer', journalId: candidate.journalId, method: 'suggested' })
+                    }
+                  >
+                    That is what it is
+                  </button>
+                )}
+              </div>
+            ))}
 
             {suggestions.map((candidate) => (
               <div key={candidate.transactionId} style={{ display: 'flex', gap: '0.5rem', alignItems: 'baseline', flexWrap: 'wrap' }}>
@@ -1292,8 +1352,16 @@ function StatementRow({
         {open && matched.length > 0 && (
           <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.25rem' }}>
             {matched.map((entry) => (
-              <li key={entry.transactionId}>
-                <a href={`/${adminPath}/m/uk-bookkeeping/transactions/${entry.transactionId}`}>
+              // A transfer is a journal, so it links to the transfer form rather
+              // than to an entry page, and it comes off by its journal id.
+              <li key={entry.transactionId ?? entry.journalId}>
+                <a
+                  href={
+                    entry.journalId
+                      ? `/${adminPath}/m/uk-bookkeeping/transfers/${entry.journalId}`
+                      : `/${adminPath}/m/uk-bookkeeping/transactions/${entry.transactionId}`
+                  }
+                >
                   {formatDate(entry.date)} · {entry.counterparty}
                 </a>{' '}
                 {poundsFromString(entry.amount)}
@@ -1304,7 +1372,13 @@ function StatementRow({
                     className="btn btn-sm"
                     disabled={busy}
                     style={{ marginLeft: '0.5rem' }}
-                    onClick={() => onAct({ action: 'unmatch', transactionId: entry.transactionId })}
+                    onClick={() =>
+                      onAct(
+                        entry.journalId
+                          ? { action: 'unmatch', journalId: entry.journalId }
+                          : { action: 'unmatch', transactionId: entry.transactionId },
+                      )
+                    }
                   >
                     Not that one
                   </button>

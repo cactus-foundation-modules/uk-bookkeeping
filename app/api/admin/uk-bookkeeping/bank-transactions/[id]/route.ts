@@ -7,10 +7,13 @@ import {
 import {
   listMatches,
   matchTransaction,
+  matchTransfer,
   suggestMatches,
   unmatch,
+  unmatchTransfer,
 } from '@/modules/uk-bookkeeping/lib/reconciliation'
 import { settleBankLine } from '@/modules/uk-bookkeeping/lib/reconcile-actions'
+import { findTransferCandidates } from '@/modules/uk-bookkeeping/lib/transfers'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
 import { VAT_RATE_CODES, type VatRateCode } from '@/modules/uk-bookkeeping/lib/types'
 
@@ -27,6 +30,15 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
       line,
       matches: await listMatches(id),
       suggestions: line.status === 'unreconciled' ? await suggestMatches(id) : [],
+      transfers:
+        line.status === 'unreconciled'
+          ? await findTransferCandidates({
+              id: line.id,
+              bankAccountId: line.bank_account_id,
+              date: line.date.toISOString().slice(0, 10),
+              amount: line.amount.toFixed(2),
+            })
+          : [],
     })
   } catch (error) {
     return toErrorResponse(error)
@@ -86,9 +98,28 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           gate.user,
         )
         const line = await getBankTransaction(id)
-        return NextResponse.json({ line, matches: await listMatches(id), suggestions: [], settled })
+        return NextResponse.json({
+          line,
+          matches: await listMatches(id),
+          suggestions: [],
+          transfers: [],
+          settled,
+        })
+      }
+      case 'match-transfer': {
+        if (typeof body.journalId !== 'string') {
+          return NextResponse.json({ error: 'Which transfer should it be matched to?' }, { status: 400 })
+        }
+        await matchTransfer(id, body.journalId, gate.user, body.method === 'suggested' ? 'suggested' : 'manual')
+        break
       }
       case 'unmatch': {
+        // Either end of the pair comes off the same way. A transfer is named by
+        // its journal, an entry by its transaction - never both at once.
+        if (typeof body.journalId === 'string') {
+          await unmatchTransfer(id, body.journalId, gate.user)
+          break
+        }
         if (typeof body.transactionId !== 'string') {
           return NextResponse.json({ error: 'Which match should come off?' }, { status: 400 })
         }
@@ -110,6 +141,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       line,
       matches: await listMatches(id),
       suggestions: line?.status === 'unreconciled' ? await suggestMatches(id) : [],
+      transfers:
+        line && line.status === 'unreconciled'
+          ? await findTransferCandidates({
+              id: line.id,
+              bankAccountId: line.bank_account_id,
+              date: line.date.toISOString().slice(0, 10),
+              amount: line.amount.toFixed(2),
+            })
+          : [],
     })
   } catch (error) {
     return toErrorResponse(error)

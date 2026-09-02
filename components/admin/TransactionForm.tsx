@@ -197,6 +197,13 @@ export type TransactionFormValue = {
   reference: string
   correctsTransactionId?: string | null
   correctionReason?: string
+  /**
+   * Only meaningful when direction is 'transfer'. A transfer has one amount
+   * rather than lines, because there is nothing to split: no category, no VAT,
+   * and no part of it that could be treated differently from the rest.
+   */
+  transferToBankAccountId?: string
+  transferAmount?: string
   lines: Line[]
 }
 
@@ -253,6 +260,11 @@ export default function TransactionForm({
     }
     return { ...base, lines: base.lines.map((line) => ({ ...line, uid: line.uid ?? nextLineUid() })) }
   })
+
+  // A transfer between two of the business's own accounts. It writes a journal
+  // rather than an entry - see lib/transfers.ts - so most of this form does not
+  // apply to it, and the parts that do not are hidden rather than ignored.
+  const isTransfer = value.direction === 'transfer'
 
   useEffect(() => {
     fetch('/api/m/uk-bookkeeping/admin/categories')
@@ -569,6 +581,59 @@ export default function TransactionForm({
       : null
   }
 
+  /**
+   * A transfer goes somewhere else entirely: it writes a journal rather than an
+   * entry, so it has its own route, its own body, and no receipts to attach
+   * afterwards. Kept as its own function rather than five branches inside the
+   * one below, where the entry path would end up carrying checks that only ever
+   * mean something for the other kind.
+   */
+  async function saveTransfer() {
+    setSaving(true)
+    setError(null)
+
+    if (!value.bankAccountId || !value.transferToBankAccountId) {
+      setError('A transfer needs an account it came out of and one it went into.')
+      setSaving(false)
+      return
+    }
+
+    try {
+      const response = await fetch(
+        value.id
+          ? `/api/m/uk-bookkeeping/admin/transfers/${value.id}`
+          : '/api/m/uk-bookkeeping/admin/transfers',
+        {
+          method: value.id ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            date: value.taxPointDate,
+            amount: (value.transferAmount ?? '').trim(),
+            fromBankAccountId: value.bankAccountId,
+            toBankAccountId: value.transferToBankAccountId,
+            reference: value.reference || null,
+          }),
+        },
+      )
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        setError(payload.error ?? 'That could not be saved.')
+        setSaving(false)
+        return
+      }
+
+      // No detail page of its own: a transfer is shown in the list of what
+      // happened, alongside the entries, which is where somebody looking for it
+      // would go.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- adminPath is resolved server-side, so the admin shell has to render it again
+      window.location.href = `/${adminPath}/m/uk-bookkeeping/transactions?direction=transfer`
+    } catch {
+      setError('The save did not reach the server. Check the connection and try again - everything typed is still here.')
+      setSaving(false)
+    }
+  }
+
   async function save() {
     setSaving(true)
     setError(null)
@@ -650,7 +715,9 @@ export default function TransactionForm({
       style={{ maxWidth: 960 }}
       onSubmit={(e) => {
         e.preventDefault()
-        if (!saving) save()
+        if (saving) return
+        if (isTransfer) saveTransfer()
+        else save()
       }}
     >
       <ErrorNotice message={error} />
@@ -672,7 +739,7 @@ export default function TransactionForm({
         listed alongside the ones still waiting - two places offering to attach
         the same file would be two places to get it wrong.
       */}
-      {isNewEntry && (
+      {isNewEntry && !isTransfer && (
         <DocumentPicker
           chosen={chosenDocuments}
           onChoose={applyDocument}
@@ -695,10 +762,17 @@ export default function TransactionForm({
             >
               <option value="expense">Money out (an expense)</option>
               <option value="income">Money in (a sale)</option>
+              <option value="transfer">Internal transfer (between your own accounts)</option>
             </select>
+            {isTransfer && (
+              <p style={hint}>
+                Neither a sale nor a cost - the same money, somewhere else. It moves both balances
+                and touches nothing on the VAT return.
+              </p>
+            )}
           </div>
           <div>
-            <label style={label} htmlFor="bk-date">Invoice or receipt date</label>
+            <label style={label} htmlFor="bk-date">{isTransfer ? 'Date it moved' : 'Invoice or receipt date'}</label>
             <input
               id="bk-date"
               type="date"
@@ -707,6 +781,7 @@ export default function TransactionForm({
               onChange={(e) => setValue({ ...value, taxPointDate: e.target.value })}
             />
           </div>
+          {!isTransfer && (
           <div>
             <label style={label} htmlFor="bk-settled">Date it was paid</label>
             <input
@@ -722,10 +797,11 @@ export default function TransactionForm({
               this in.
             </p>
           </div>
+          )}
           {bankAccounts.length > 0 && (
             <div>
               <label style={label} htmlFor="bk-bank-account">
-                {value.direction === 'income' ? 'Paid into' : 'Paid from'}
+                {isTransfer ? 'Out of' : value.direction === 'income' ? 'Paid into' : 'Paid from'}
               </label>
               <select
                 id="bk-bank-account"
@@ -750,6 +826,47 @@ export default function TransactionForm({
               </select>
             </div>
           )}
+          {isTransfer && (
+            <div>
+              <label style={label} htmlFor="bk-transfer-to">Into</label>
+              <select
+                id="bk-transfer-to"
+                style={input}
+                value={value.transferToBankAccountId ?? ''}
+                onChange={(e) => setValue({ ...value, transferToBankAccountId: e.target.value })}
+              >
+                <option value="">Choose an account</option>
+                {bankAccounts
+                  // Never the account it came out of. Offering it would only
+                  // ever produce a refusal from the server a moment later.
+                  .filter((account) => account.id !== value.bankAccountId)
+                  .map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.name}
+                      {BANK_KIND_LABELS[account.kind] ? ` (${BANK_KIND_LABELS[account.kind]})` : ''}
+                    </option>
+                  ))}
+              </select>
+            </div>
+          )}
+          {isTransfer && (
+            <div>
+              <label style={label} htmlFor="bk-transfer-amount">How much moved</label>
+              <input
+                id="bk-transfer-amount"
+                style={input}
+                inputMode="decimal"
+                placeholder="0.00"
+                value={value.transferAmount ?? ''}
+                onChange={(e) => setValue({ ...value, transferAmount: e.target.value })}
+                aria-describedby="bk-transfer-amount-hint"
+              />
+              <p id="bk-transfer-amount-hint" style={hint}>
+                Always a positive figure. To send it the other way, swap the two accounts over.
+              </p>
+            </div>
+          )}
+          {!isTransfer && (
           <div>
             <label style={label} htmlFor="bk-counterparty">Who it was with</label>
             <input
@@ -767,8 +884,11 @@ export default function TransactionForm({
               ))}
             </datalist>
           </div>
+          )}
           <div>
-            <label style={label} htmlFor="bk-reference">Their invoice number</label>
+            <label style={label} htmlFor="bk-reference">
+              {isTransfer ? 'Reference, if it had one' : 'Their invoice number'}
+            </label>
             <input
               id="bk-reference"
               style={input}
@@ -789,6 +909,7 @@ export default function TransactionForm({
           )}
         </div>
 
+        {!isTransfer && (
         <label
           style={{
             display: 'flex',
@@ -819,8 +940,15 @@ export default function TransactionForm({
             </span>
           </span>
         </label>
+        )}
       </div>
 
+      {/*
+        No lines on a transfer. There is nothing to split it into: no category,
+        no VAT rate, and no part of it that could be treated differently from the
+        rest. One amount, two accounts, and that is the whole of it.
+      */}
+      {!isTransfer && (
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>What it was made up of</h3>
         <p style={{ margin: '0 0 1rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
@@ -1029,9 +1157,10 @@ export default function TransactionForm({
           <span>Total: <strong>{poundsFromString(totals.gross)}</strong></span>
         </div>
       </div>
+      )}
 
       <button type="submit" className="btn btn-primary" disabled={saving}>
-        {saving ? 'Saving…' : value.id ? 'Save changes' : 'Record this'}
+        {saving ? 'Saving…' : value.id ? 'Save changes' : isTransfer ? 'Record this transfer' : 'Record this'}
       </button>
     </form>
   )

@@ -413,6 +413,146 @@ export async function matchTransaction(input: MatchInput, user: SessionUser | nu
   })
 }
 
+/**
+ * Tie a statement line to a transfer between two of the business's own accounts.
+ *
+ * The sign is taken from which END of the transfer this line is, never from the
+ * browser: the account the money left gets the negative, the account it arrived
+ * in gets the positive. Get that backwards and the line reads as explained while
+ * the amount outstanding on it doubles.
+ *
+ * A transfer is always matched whole. Unlike an invoice, it cannot be settled in
+ * instalments - one movement of money produced exactly one line on each
+ * statement, for exactly the amount that moved.
+ */
+export async function matchTransfer(
+  bankTransactionId: string,
+  journalId: string,
+  user: SessionUser | null,
+  method: MatchMethod = 'manual',
+): Promise<void> {
+  const [line] = await prisma.$queryRaw<
+    { id: string; amount: Prisma.Decimal; bank_account_id: string }[]
+  >`
+    SELECT "id", "amount", "bank_account_id" FROM "bk_bank_transactions"
+    WHERE "id" = ${bankTransactionId} LIMIT 1
+  `
+  if (!line) throw new NotFoundError('That statement line')
+
+  const [transfer] = await prisma.$queryRaw<
+    {
+      id: string
+      status: string
+      locked_period_id: string | null
+      from_bank_account_id: string
+      to_bank_account_id: string
+      amount: Prisma.Decimal
+      from_name: string
+      to_name: string
+    }[]
+  >`
+    SELECT j."id", j."status", j."locked_period_id",
+           j."from_bank_account_id", j."to_bank_account_id",
+           COALESCE(SUM(l."debit"), 0)::numeric AS amount,
+           f."name" AS from_name, t."name" AS to_name
+    FROM "bk_journals" j
+    JOIN "bk_journal_lines" l ON l."journal_id" = j."id"
+    JOIN "bk_bank_accounts" f ON f."id" = j."from_bank_account_id"
+    JOIN "bk_bank_accounts" t ON t."id" = j."to_bank_account_id"
+    WHERE j."id" = ${journalId} AND j."kind" = 'transfer'
+    GROUP BY j."id", f."name", t."name"
+  `
+  if (!transfer) throw new NotFoundError('That transfer')
+  if (transfer.status !== 'posted') {
+    throw new BookkeepingError(
+      'invalid',
+      'That transfer is still a draft, so there is nothing to tick off against yet. Post it first.',
+    )
+  }
+  if (transfer.locked_period_id) {
+    throw new BookkeepingError(
+      'locked',
+      'That transfer falls in a period that has been closed, so how it is matched to the bank can no longer be changed.',
+      409,
+    )
+  }
+
+  // Which end of it this line is. A line on neither account is somebody else's
+  // money movement that happens to be for the same amount.
+  const isFrom = line.bank_account_id === transfer.from_bank_account_id
+  const isTo = line.bank_account_id === transfer.to_bank_account_id
+  if (!isFrom && !isTo) {
+    throw new BookkeepingError(
+      'invalid',
+      `That transfer is between ${transfer.from_name} and ${transfer.to_name}, and this statement line is on neither of them.`,
+    )
+  }
+
+  const expected = isFrom ? transfer.amount.negated() : transfer.amount
+  if (!line.amount.equals(expected)) {
+    throw new BookkeepingError(
+      'invalid',
+      `That transfer is for ${formatPounds(transfer.amount)} ${isFrom ? 'out of' : 'into'} this account, and the statement line is for ${formatPounds(line.amount.abs())}. One of the two is wrong, and it is worth knowing which.`,
+    )
+  }
+
+  const alreadyOnLine = await sumMatched('bank_transaction_id', bankTransactionId)
+  if (!alreadyOnLine.isZero()) {
+    throw new BookkeepingError(
+      'invalid',
+      'Something is already matched to that statement line. Take that off first - a transfer accounts for the whole line or none of it.',
+    )
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      INSERT INTO "bk_reconciliations"
+        ("bank_transaction_id", "journal_id", "amount", "match_method", "created_by_user_id")
+      VALUES (${bankTransactionId}, ${journalId}, ${formatMoney(expected)}::numeric,
+              ${method}, ${user?.id ?? null})
+      ON CONFLICT ("bank_transaction_id", "journal_id") WHERE "journal_id" IS NOT NULL
+        DO UPDATE SET "amount" = EXCLUDED."amount", "match_method" = EXCLUDED."match_method"
+    `
+    await refreshBankTransactionStatus(tx, bankTransactionId)
+  })
+
+  await appendAudit({
+    action: 'reconciliation.matched',
+    entityType: 'bank_transaction',
+    entityId: bankTransactionId,
+    summary: `${formatPounds(line.amount.abs())} on the statement matched to the transfer between ${transfer.from_name} and ${transfer.to_name}`,
+    detail: { journalId, amount: formatMoney(expected), method },
+    user,
+  })
+}
+
+export async function unmatchTransfer(
+  bankTransactionId: string,
+  journalId: string,
+  user: SessionUser | null,
+): Promise<void> {
+  const [existing] = await prisma.$queryRaw<{ id: string; amount: Prisma.Decimal }[]>`
+    SELECT "id", "amount" FROM "bk_reconciliations"
+    WHERE "bank_transaction_id" = ${bankTransactionId} AND "journal_id" = ${journalId}
+    LIMIT 1
+  `
+  if (!existing) throw new NotFoundError('That match')
+
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`DELETE FROM "bk_reconciliations" WHERE "id" = ${existing.id}`
+    await refreshBankTransactionStatus(tx, bankTransactionId)
+  })
+
+  await appendAudit({
+    action: 'reconciliation.unmatched',
+    entityType: 'bank_transaction',
+    entityId: bankTransactionId,
+    summary: `A transfer match of ${formatPounds(existing.amount)} was taken off a statement line`,
+    detail: { journalId },
+    user,
+  })
+}
+
 async function sumMatched(column: 'bank_transaction_id' | 'transaction_id', id: string): Promise<Money> {
   const [row] = await prisma.$queryRaw<{ total: Prisma.Decimal }[]>`
     SELECT COALESCE(SUM("amount"), 0)::numeric AS total
@@ -452,7 +592,9 @@ export async function unmatch(
 }
 
 export type MatchedEntry = {
-  transactionId: string
+  /** Null on a transfer, which is a journal rather than an entry. */
+  transactionId: string | null
+  journalId: string | null
   counterparty: string
   date: string
   amount: string
@@ -463,7 +605,8 @@ export type MatchedEntry = {
 export async function listMatches(bankTransactionId: string): Promise<MatchedEntry[]> {
   const rows = await prisma.$queryRaw<
     {
-      transaction_id: string
+      transaction_id: string | null
+      journal_id: string | null
       counterparty: string
       tax_point_date: Date
       amount: Prisma.Decimal
@@ -471,15 +614,19 @@ export async function listMatches(bankTransactionId: string): Promise<MatchedEnt
       locked_period_id: string | null
     }[]
   >`
-    SELECT r."transaction_id", r."amount", r."match_method",
-           t."counterparty", t."tax_point_date", t."locked_period_id"
+    SELECT r."transaction_id", r."journal_id", r."amount", r."match_method",
+           COALESCE(t."counterparty", j."narrative") AS counterparty,
+           COALESCE(t."tax_point_date", j."date")    AS tax_point_date,
+           COALESCE(t."locked_period_id", j."locked_period_id") AS locked_period_id
     FROM "bk_reconciliations" r
-    JOIN "bk_transactions" t ON t."id" = r."transaction_id"
+    LEFT JOIN "bk_transactions" t ON t."id" = r."transaction_id"
+    LEFT JOIN "bk_journals" j     ON j."id" = r."journal_id"
     WHERE r."bank_transaction_id" = ${bankTransactionId}
     ORDER BY r."created_at" ASC
   `
   return rows.map((row) => ({
     transactionId: row.transaction_id,
+    journalId: row.journal_id,
     counterparty: row.counterparty,
     date: row.tax_point_date.toISOString().slice(0, 10),
     amount: formatMoney(row.amount),

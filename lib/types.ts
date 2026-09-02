@@ -304,7 +304,9 @@ export type BkBankTransactionRow = {
 export type BkReconciliationRow = {
   id: string
   bank_transaction_id: string
-  transaction_id: string
+  /** Exactly one of these two is set - see 020_transfers.sql. */
+  transaction_id: string | null
+  journal_id: string | null
   amount: Money
   match_method: MatchMethod
   created_by_user_id: string | null
@@ -417,12 +419,22 @@ export type BkAccountRow = {
   updated_at: Date
 }
 
+/**
+ * An ordinary journal, or the one special shape of journal that has its own
+ * form: money moved between two accounts the business already owns.
+ */
+export type JournalKind = 'journal' | 'transfer'
+
 export type BkJournalRow = {
   id: string
   date: Date
   reference: string | null
   narrative: string
   status: JournalStatus
+  kind: JournalKind
+  /** Both set on a transfer, both null on anything else. */
+  from_bank_account_id: string | null
+  to_bank_account_id: string | null
   source: string
   reverses_journal_id: string | null
   reversed_by_journal_id: string | null

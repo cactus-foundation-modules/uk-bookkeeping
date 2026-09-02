@@ -161,7 +161,13 @@ function validateInput(input: TransactionInput): void {
 export type TransactionFilter = {
   from?: string | null
   to?: string | null
-  direction?: Direction | null
+  /**
+   * 'transfer' is not a direction on the row - it cannot be, see
+   * migrations/020_transfers.sql - but it is one of the things somebody picks
+   * from the same menu, so the filter carries it and the query below sorts out
+   * what that means.
+   */
+  direction?: Direction | 'transfer' | null
   categoryId?: string | null
   vatRateCode?: VatRateCode | null
   counterparty?: string | null
@@ -174,12 +180,27 @@ export type TransactionFilter = {
   offset?: number
 }
 
-export type TransactionListRow = BkTransactionRow & {
+export type TransactionListRow = Omit<BkTransactionRow, 'direction'> & {
+  /**
+   * Null on a transfer, which is neither money in nor money out - it is the same
+   * money, somewhere else. Anything rendering this has to say so rather than
+   * falling back to "expense", which is what a default would quietly do.
+   */
+  direction: Direction | null
   net_total: Prisma.Decimal
   vat_total: Prisma.Decimal
   gross_total: Prisma.Decimal
   line_count: number
   attachment_count: number
+  /**
+   * Which of the two tables this row came out of. 'transfer' rows are journals
+   * wearing an entry's clothes: they have a date, an amount and two accounts,
+   * and none of the rest of it.
+   */
+  entry_kind: 'entry' | 'transfer'
+  /** Set on a transfer row only, for the "Current → Savings" line on screen. */
+  transfer_from_name: string | null
+  transfer_to_name: string | null
 }
 
 export type TransactionList = {
@@ -202,10 +223,24 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
   const to = filter.to ? parseDate(filter.to, 'The "to" date') : null
   const counterparty = filter.counterparty?.trim() ? `%${filter.counterparty.trim().toLowerCase()}%` : null
 
+  // A transfer is neither income nor an expense, so asking for one of those
+  // rules them out; so does any filter that only an entry can answer - a
+  // category, a VAT rate, whether a receipt is attached. What is left is the
+  // plain view of "what happened", which is where they belong.
+  const entryOnlyFilter =
+    (filter.direction != null && filter.direction !== 'transfer') ||
+    filter.categoryId != null ||
+    filter.vatRateCode != null ||
+    filter.hasEvidence != null ||
+    filter.evidenceNotRequired != null
+  const wantsTransfers = filter.direction === 'transfer' || !entryOnlyFilter
+  const wantsEntries = filter.direction !== 'transfer'
+
   const where = Prisma.sql`
     WHERE (${from}::date IS NULL OR t."tax_point_date" >= ${from}::date)
       AND (${to}::date IS NULL OR t."tax_point_date" <= ${to}::date)
-      AND (${filter.direction ?? null}::text IS NULL OR t."direction" = ${filter.direction ?? null})
+      AND (${filter.direction === 'transfer' ? null : (filter.direction ?? null)}::text IS NULL
+           OR t."direction" = ${filter.direction === 'transfer' ? null : (filter.direction ?? null)})
       AND (${filter.status ?? null}::text IS NULL OR t."status" = ${filter.status ?? null})
       AND (${counterparty}::text IS NULL OR lower(t."counterparty") LIKE ${counterparty})
       AND (${filter.locked ?? null}::boolean IS NULL
@@ -226,41 +261,154 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
            OR t."evidence_not_required" = ${filter.evidenceNotRequired ?? null}::boolean)
   `
 
-  const rows = await prisma.$queryRaw<TransactionListRow[]>`
-    SELECT t.*,
-      COALESCE(l."net_total", 0)::numeric   AS net_total,
-      COALESCE(l."vat_total", 0)::numeric   AS vat_total,
-      COALESCE(l."gross_total", 0)::numeric AS gross_total,
-      COALESCE(l."line_count", 0)::int      AS line_count,
-      COALESCE(a."attachment_count", 0)::int AS attachment_count
-    FROM "bk_transactions" t
-    LEFT JOIN LATERAL (
-      SELECT SUM("net_amount") AS net_total, SUM("vat_amount") AS vat_total,
-             SUM("gross_amount") AS gross_total, COUNT(*) AS line_count
-      FROM "bk_transaction_lines" WHERE "transaction_id" = t."id"
-    ) l ON TRUE
-    LEFT JOIN LATERAL (
-      SELECT COUNT(*) AS attachment_count FROM "bk_attachments" WHERE "transaction_id" = t."id"
-    ) a ON TRUE
-    ${where}
-    ORDER BY t."tax_point_date" DESC, t."created_at" DESC
+  // Transfers live in bk_journals, so one page of "what happened" is two tables.
+  // Paginating a merge in TypeScript would be wrong at every page boundary, and
+  // union-ing the full rows would mean writing out every column of
+  // bk_transactions by hand and quietly dropping the next one somebody adds.
+  //
+  // So the union carries identity and sort key only. It picks the page; the two
+  // hydrating queries below fill it in, each in the shape its own table has.
+  const paged = Prisma.sql`
+    SELECT id, kind, sort_date, sort_created FROM (
+      ${
+        wantsEntries
+          ? Prisma.sql`
+        SELECT t."id" AS id, 'entry'::text AS kind,
+               t."tax_point_date" AS sort_date, t."created_at" AS sort_created
+        FROM "bk_transactions" t
+        ${where}`
+          : Prisma.sql`
+        SELECT NULL::text AS id, NULL::text AS kind,
+               NULL::date AS sort_date, NULL::timestamptz AS sort_created
+        WHERE FALSE`
+      }
+      UNION ALL
+      ${
+        wantsTransfers
+          ? Prisma.sql`
+        SELECT j."id" AS id, 'transfer'::text AS kind,
+               j."date" AS sort_date, j."created_at" AS sort_created
+        FROM "bk_journals" j
+        WHERE j."kind" = 'transfer'
+          AND (${from}::date IS NULL OR j."date" >= ${from}::date)
+          AND (${to}::date IS NULL OR j."date" <= ${to}::date)
+          AND (${filter.status ?? null}::text IS NULL OR j."status" = ${filter.status ?? null})
+          AND (${counterparty}::text IS NULL OR lower(j."narrative") LIKE ${counterparty})
+          AND (${filter.locked ?? null}::boolean IS NULL
+               OR (${filter.locked ?? null}::boolean = TRUE AND j."locked_period_id" IS NOT NULL)
+               OR (${filter.locked ?? null}::boolean = FALSE AND j."locked_period_id" IS NULL))`
+          : Prisma.sql`
+        SELECT NULL::text AS id, NULL::text AS kind,
+               NULL::date AS sort_date, NULL::timestamptz AS sort_created
+        WHERE FALSE`
+      }
+    ) both
+  `
+
+  const page = await prisma.$queryRaw<{ id: string; kind: 'entry' | 'transfer' }[]>`
+    ${paged}
+    ORDER BY sort_date DESC, sort_created DESC
     LIMIT ${limit} OFFSET ${offset}
   `
 
+  const entryIds = page.filter((row) => row.kind === 'entry').map((row) => row.id)
+  const transferIds = page.filter((row) => row.kind === 'transfer').map((row) => row.id)
+
+  const entryRows = entryIds.length
+    ? await prisma.$queryRaw<TransactionListRow[]>`
+        SELECT t.*,
+          COALESCE(l."net_total", 0)::numeric   AS net_total,
+          COALESCE(l."vat_total", 0)::numeric   AS vat_total,
+          COALESCE(l."gross_total", 0)::numeric AS gross_total,
+          COALESCE(l."line_count", 0)::int      AS line_count,
+          COALESCE(a."attachment_count", 0)::int AS attachment_count,
+          'entry'::text AS entry_kind,
+          NULL::text AS transfer_from_name,
+          NULL::text AS transfer_to_name
+        FROM "bk_transactions" t
+        LEFT JOIN LATERAL (
+          SELECT SUM("net_amount") AS net_total, SUM("vat_amount") AS vat_total,
+                 SUM("gross_amount") AS gross_total, COUNT(*) AS line_count
+          FROM "bk_transaction_lines" WHERE "transaction_id" = t."id"
+        ) l ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS attachment_count FROM "bk_attachments" WHERE "transaction_id" = t."id"
+        ) a ON TRUE
+        WHERE t."id" = ANY(${entryIds}::text[])
+      `
+    : []
+
+  // A transfer has no VAT and no category, so the money columns carry the amount
+  // as gross and leave net and VAT at zero rather than inventing a split. It is
+  // shown as "moved", not as a sale or a cost, and it is left out of the totals
+  // below for the same reason.
+  const transferRows = transferIds.length
+    ? await prisma.$queryRaw<TransactionListRow[]>`
+        SELECT j."id",
+          'normal'::text  AS entry_type,
+          NULL::text AS direction,
+          j."date" AS tax_point_date,
+          j."date" AS settled_date,
+          j."narrative" AS counterparty,
+          ''::text AS description,
+          j."reference",
+          j."status",
+          TRUE AS evidence_not_required,
+          j."source",
+          NULL::text AS source_ref,
+          NULL::text AS import_batch_id,
+          j."from_bank_account_id" AS bank_account_id,
+          NULL::text AS statement_id,
+          NULL::text AS corrects_transaction_id,
+          NULL::text AS correction_reason,
+          j."finalised_period_id",
+          j."locked_period_id",
+          j."locked_at",
+          j."created_by_user_id",
+          j."updated_by_user_id",
+          j."created_at",
+          j."updated_at",
+          0::numeric AS net_total,
+          0::numeric AS vat_total,
+          COALESCE(SUM(l."debit"), 0)::numeric AS gross_total,
+          0::int AS line_count,
+          0::int AS attachment_count,
+          'transfer'::text AS entry_kind,
+          f."name" AS transfer_from_name,
+          b."name" AS transfer_to_name
+        FROM "bk_journals" j
+        JOIN "bk_journal_lines" l ON l."journal_id" = j."id"
+        LEFT JOIN "bk_bank_accounts" f ON f."id" = j."from_bank_account_id"
+        LEFT JOIN "bk_bank_accounts" b ON b."id" = j."to_bank_account_id"
+        WHERE j."id" = ANY(${transferIds}::text[])
+        GROUP BY j."id", f."name", b."name"
+      `
+    : []
+
+  const hydrated = new Map<string, TransactionListRow>(
+    [...entryRows, ...transferRows].map((row) => [row.id, row]),
+  )
+  // The page decided the order; the hydration only filled it in.
+  const rows = page.map((row) => hydrated.get(row.id)).filter((row): row is TransactionListRow => !!row)
+
   const [counted] = await prisma.$queryRaw<{ count: bigint }[]>`
-    SELECT COUNT(*)::bigint AS count FROM "bk_transactions" t ${where}
+    SELECT COUNT(*)::bigint AS count FROM (${paged}) counted
   `
 
-  const [totals] = await prisma.$queryRaw<
-    { net: Prisma.Decimal; vat: Prisma.Decimal; gross: Prisma.Decimal }[]
-  >`
-    SELECT COALESCE(SUM(l."net_amount"), 0)::numeric   AS net,
-           COALESCE(SUM(l."vat_amount"), 0)::numeric   AS vat,
-           COALESCE(SUM(l."gross_amount"), 0)::numeric AS gross
-    FROM "bk_transactions" t
-    JOIN "bk_transaction_lines" l ON l."transaction_id" = t."id"
-    ${where}
-  `
+  // Entries only. A transfer has no net and no VAT, and adding its amount to the
+  // gross would say the business spent money it merely moved.
+  const [totals] = wantsEntries
+    ? await prisma.$queryRaw<
+        { net: Prisma.Decimal; vat: Prisma.Decimal; gross: Prisma.Decimal }[]
+      >`
+        SELECT COALESCE(SUM(l."net_amount"), 0)::numeric   AS net,
+               COALESCE(SUM(l."vat_amount"), 0)::numeric   AS vat,
+               COALESCE(SUM(l."gross_amount"), 0)::numeric AS gross
+        FROM "bk_transactions" t
+        JOIN "bk_transaction_lines" l ON l."transaction_id" = t."id"
+        ${where}
+      `
+    : []
 
   return {
     rows,

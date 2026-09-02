@@ -50,7 +50,9 @@ type Data = {
     id: string
     date: string
     counterparty: string
-    direction: string
+    /** Null on a transfer, which is neither in nor out. */
+    direction: string | null
+    kind: 'entry' | 'transfer'
     status: string
     gross: string
     locked: boolean
@@ -348,7 +350,9 @@ export default function DashboardScreen({
                       fontVariantNumeric: 'tabular-nums',
                     }}
                   >
-                    {row.direction === 'expense' ? '-' : ''}
+                    {/* Neither sign belongs on a transfer: nothing was spent or
+                        earned, it only went somewhere else. */}
+                    {row.kind === 'transfer' ? '↔ ' : row.direction === 'expense' ? '-' : ''}
                     {poundsFromString(row.gross)}
                   </td>
                   <td style={{ padding: '0.5rem 0.75rem', width: '2rem' }}>

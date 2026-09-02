@@ -72,8 +72,9 @@ const HEADERS: Record<ExportKind, string[]> = {
     'id', 'transaction_id', 'name', 'filename', 'mime_type', 'size', 'sha256', 'url', 'created_at',
   ],
   journals: [
-    'id', 'date', 'reference', 'narrative', 'status', 'source', 'reverses_journal_id',
-    'reversed_by_journal_id', 'locked_period_id', 'created_at',
+    'id', 'date', 'kind', 'from_bank_account_id', 'to_bank_account_id', 'reference', 'narrative',
+    'status', 'source', 'reverses_journal_id', 'reversed_by_journal_id', 'locked_period_id',
+    'created_at',
   ],
   'journal-lines': [
     'id', 'journal_id', 'position', 'account_code', 'account_name', 'description',
@@ -86,7 +87,8 @@ const HEADERS: Record<ExportKind, string[]> = {
     'ignored_reason', 'created_at',
   ],
   reconciliations: [
-    'id', 'bank_transaction_id', 'transaction_id', 'amount', 'match_method', 'created_at',
+    'id', 'bank_transaction_id', 'transaction_id', 'journal_id', 'amount', 'match_method',
+    'created_at',
   ],
   periods: [
     'id', 'period_key', 'start_date', 'end_date', 'due_date', 'status', 'scheme',
@@ -158,7 +160,8 @@ async function fetchPage(kind: ExportKind, cursor: string | bigint | null): Prom
     case 'journals': {
       const after = (cursor as string | null) ?? ''
       const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
-        SELECT "id", "date", "reference", "narrative", "status", "source",
+        SELECT "id", "date", "kind", "from_bank_account_id", "to_bank_account_id",
+               "reference", "narrative", "status", "source",
                "reverses_journal_id", "reversed_by_journal_id", "locked_period_id", "created_at"
         FROM "bk_journals" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
       `
@@ -198,7 +201,8 @@ async function fetchPage(kind: ExportKind, cursor: string | bigint | null): Prom
     case 'reconciliations': {
       const after = (cursor as string | null) ?? ''
       const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
-        SELECT "id", "bank_transaction_id", "transaction_id", "amount", "match_method", "created_at"
+        SELECT "id", "bank_transaction_id", "transaction_id", "journal_id", "amount",
+               "match_method", "created_at"
         FROM "bk_reconciliations" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
       `
       return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }

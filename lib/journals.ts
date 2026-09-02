@@ -5,7 +5,14 @@ import { assertNotInClosedYear } from './guards'
 import { appendAudit } from './audit'
 import { BookkeepingError, LockedRecordError, NotFoundError } from './errors'
 import { formatMoney, formatPounds, toMoney } from './money'
-import type { BkAccountRow, BkJournalLineRow, BkJournalRow, JournalStatus, Money } from './types'
+import type {
+  BkAccountRow,
+  BkJournalLineRow,
+  BkJournalRow,
+  JournalKind,
+  JournalStatus,
+  Money,
+} from './types'
 
 // Journals: the entries that are not money moving.
 //
@@ -22,7 +29,7 @@ import type { BkAccountRow, BkJournalLineRow, BkJournalRow, JournalStatus, Money
 // ever typed by a human" is the guarantee this whole module exists to make, and
 // a journal that could reach box 1 would be precisely such a figure.
 
-type TxClient = Omit<typeof prisma, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+export type TxClient = Omit<typeof prisma, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
 
 export type JournalLineInput = {
   accountId: string
@@ -51,7 +58,7 @@ export type JournalWithLines = BkJournalRow & {
 // Validation
 // ---------------------------------------------------------------------------
 
-function parseDate(value: string, field: string): Date {
+export function parseJournalDate(value: string, field: string): Date {
   const parsed = new Date(`${value.slice(0, 10)}T00:00:00.000Z`)
   if (Number.isNaN(parsed.getTime())) {
     throw new BookkeepingError('invalid', `${field} is not a date we can read.`)
@@ -61,9 +68,9 @@ function parseDate(value: string, field: string): Date {
 
 const LARGEST = new Prisma.Decimal('99999999.99')
 
-type CheckedLine = { accountId: string; description: string; debit: Money; credit: Money }
+export type CheckedLine = { accountId: string; description: string; debit: Money; credit: Money }
 
-function checkLines(lines: JournalLineInput[], posted: boolean): CheckedLine[] {
+export function checkLines(lines: JournalLineInput[], posted: boolean): CheckedLine[] {
   if (!lines?.length) {
     throw new BookkeepingError('invalid', 'A journal needs at least two lines - one on each side.')
   }
@@ -118,7 +125,7 @@ function checkLines(lines: JournalLineInput[], posted: boolean): CheckedLine[] {
   return checked
 }
 
-async function checkAccountsExist(accountIds: string[]): Promise<void> {
+export async function checkAccountsExist(accountIds: string[]): Promise<void> {
   const unique = [...new Set(accountIds)]
   const rows = await prisma.$queryRaw<{ id: string; archived: boolean; name: string }[]>`
     SELECT "id", "archived", "name" FROM "bk_accounts" WHERE "id" = ANY(${unique}::text[])
@@ -140,6 +147,8 @@ async function checkAccountsExist(accountIds: string[]): Promise<void> {
 export type JournalFilter = {
   from?: string | null
   to?: string | null
+  /** Ordinary journals, transfers, or (the default) both. */
+  kind?: JournalKind | null
   status?: JournalStatus | null
   accountId?: string | null
   search?: string | null
@@ -156,14 +165,15 @@ export type JournalListRow = BkJournalRow & {
 export async function listJournals(filter: JournalFilter): Promise<{ rows: JournalListRow[]; total: number }> {
   const limit = Math.min(Math.max(filter.limit ?? 50, 1), 500)
   const offset = Math.max(filter.offset ?? 0, 0)
-  const from = filter.from ? parseDate(filter.from, 'The "from" date') : null
-  const to = filter.to ? parseDate(filter.to, 'The "to" date') : null
+  const from = filter.from ? parseJournalDate(filter.from, 'The "from" date') : null
+  const to = filter.to ? parseJournalDate(filter.to, 'The "to" date') : null
   const search = filter.search?.trim() ? `%${filter.search.trim().toLowerCase()}%` : null
 
   const where = Prisma.sql`
     WHERE (${from}::date IS NULL OR j."date" >= ${from}::date)
       AND (${to}::date IS NULL OR j."date" <= ${to}::date)
       AND (${filter.status ?? null}::text IS NULL OR j."status" = ${filter.status ?? null})
+      AND (${filter.kind ?? null}::text IS NULL OR j."kind" = ${filter.kind ?? null})
       AND (${search}::text IS NULL
            OR lower(j."narrative") LIKE ${search}
            OR lower(COALESCE(j."reference", '')) LIKE ${search})
@@ -240,6 +250,16 @@ async function assertJournalMutable(id: string): Promise<BkJournalRow> {
   `
   const journal = rows[0]
   if (!journal) throw new NotFoundError(`Journal ${id}`)
+  // A transfer is a journal underneath, but its two sides have to stay pointing
+  // at the two bank accounts named on it. The general journal editor cannot know
+  // that, so it is sent to the form that does rather than allowed to break it.
+  if (journal.kind === 'transfer') {
+    throw new BookkeepingError(
+      'wrong_form',
+      'That one is a transfer between your own accounts, so it is changed on the transfer itself rather than here.',
+      409,
+    )
+  }
   if (journal.locked_period_id) throw new LockedRecordError(id, journal.locked_period_id)
   if (journal.reversed_by_journal_id) {
     throw new BookkeepingError(
@@ -251,7 +271,7 @@ async function assertJournalMutable(id: string): Promise<BkJournalRow> {
   return journal
 }
 
-async function insertLines(tx: TxClient, journalId: string, lines: CheckedLine[]): Promise<void> {
+export async function insertLines(tx: TxClient, journalId: string, lines: CheckedLine[]): Promise<void> {
   if (lines.length === 0) return
   await tx.$executeRaw`
     INSERT INTO "bk_journal_lines" ("journal_id", "position", "account_id", "description", "debit", "credit")
@@ -277,7 +297,7 @@ export async function createJournal(input: JournalInput, user: SessionUser | nul
   }
   const lines = checkLines(input.lines, status === 'posted')
   await checkAccountsExist(lines.map((line) => line.accountId))
-  const date = parseDate(input.date, 'The journal date')
+  const date = parseJournalDate(input.date, 'The journal date')
   // A closed financial year has had its accounts drawn up and its profit taken
   // to reserves. Another journal dated inside it would restate them.
   await assertNotInClosedYear(date)
@@ -318,7 +338,7 @@ export async function updateJournal(
   const status = input.status ?? before.status
   const lines = checkLines(input.lines, status === 'posted')
   await checkAccountsExist(lines.map((line) => line.accountId))
-  const date = parseDate(input.date, 'The journal date')
+  const date = parseJournalDate(input.date, 'The journal date')
   // Both dates: one stops a journal being moved INTO a closed year, the other
   // stops one being dragged OUT of it, which would restate it just as surely.
   await assertNotInClosedYear(date, before.date)
@@ -445,6 +465,16 @@ export async function reverseJournal(
   user: SessionUser | null,
 ): Promise<JournalWithLines> {
   const original = await requireJournal(id)
+  // A transfer has two statement lines tied to it and a form of its own. A
+  // reversal would leave both ends still ticked off against something the books
+  // now say was undone, which reads as reconciled and is not.
+  if (original.kind === 'transfer') {
+    throw new BookkeepingError(
+      'wrong_form',
+      'That one is a transfer between your own accounts. Change it or delete it on the transfer itself rather than reversing it here.',
+      409,
+    )
+  }
   if (original.status !== 'posted') {
     throw new BookkeepingError('invalid', 'Only a posted journal needs reversing. Edit this one instead.')
   }
@@ -452,7 +482,7 @@ export async function reverseJournal(
     throw new BookkeepingError('invalid', 'That journal has already been reversed.')
   }
 
-  const reversalDate = parseDate(date, 'The reversal date')
+  const reversalDate = parseJournalDate(date, 'The reversal date')
   const lines: CheckedLine[] = original.lines.map((line) => ({
     accountId: line.account_id,
     description: line.description,

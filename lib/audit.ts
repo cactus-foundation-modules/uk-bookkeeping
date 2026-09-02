@@ -63,6 +63,12 @@ export type AuditAction =
   | 'journal.deleted'
   | 'journal.posted'
   | 'journal.reversed'
+  // A transfer is a journal underneath, but kept apart in the log: "money moved
+  // between your own accounts" is a different question from "somebody posted a
+  // journal", and an accountant reading the log wants to sort them.
+  | 'transfer.created'
+  | 'transfer.updated'
+  | 'transfer.deleted'
   | 'accounting_period.created'
   | 'accounting_period.updated'
   | 'accounting_period.deleted'

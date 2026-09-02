@@ -15,7 +15,12 @@ import { formatDate, poundsFromString } from './format'
 type Row = {
   id: string
   entry_type: string
-  direction: string
+  /** Null on a transfer, which is neither money in nor money out. */
+  direction: string | null
+  /** Whether this row is an entry or a transfer between the business's own accounts. */
+  entry_kind: 'entry' | 'transfer'
+  transfer_from_name: string | null
+  transfer_to_name: string | null
   tax_point_date: string
   counterparty: string
   description: string
@@ -261,9 +266,10 @@ export default function TransactionsScreen({
         <div>
           <label htmlFor="bk-f-direction" style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)' }}>In or out</label>
           <select id="bk-f-direction" style={input} value={filters.direction} onChange={(e) => { setOffset(0); setFilters({ ...filters, direction: e.target.value }) }}>
-            <option value="">Both</option>
+            <option value="">All of it</option>
             <option value="income">Money in</option>
             <option value="expense">Money out</option>
+            <option value="transfer">Internal transfers</option>
           </select>
         </div>
         <div>
@@ -431,6 +437,7 @@ export default function TransactionsScreen({
                 <tr key={row.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
                   {draftMode && (
                     <td style={{ padding: '0.5rem 0.75rem' }}>
+                      {row.entry_kind === 'transfer' ? null : (
                       <input
                         type="checkbox"
                         aria-label={`Tick the entry for ${row.counterparty}`}
@@ -442,13 +449,27 @@ export default function TransactionsScreen({
                           setSelected(next)
                         }}
                       />
+                      )}
                     </td>
                   )}
                   <td style={{ padding: '0.5rem 0.75rem', whiteSpace: 'nowrap' }}>
                     {formatDate(row.tax_point_date)}
                   </td>
                   <td style={{ padding: '0.5rem 0.75rem' }}>
-                    <a href={`/${adminPath}/m/uk-bookkeeping/transactions/${row.id}`}>{row.counterparty}</a>
+                    <a
+                      href={
+                        row.entry_kind === 'transfer'
+                          ? `/${adminPath}/m/uk-bookkeeping/transfers/${row.id}`
+                          : `/${adminPath}/m/uk-bookkeeping/transactions/${row.id}`
+                      }
+                    >
+                      {row.counterparty}
+                    </a>
+                    {row.entry_kind === 'transfer' && (
+                      <span style={{ marginLeft: '0.5rem', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
+                        transfer
+                      </span>
+                    )}
                     {row.status === 'draft' && (
                       <span style={{ marginLeft: '0.5rem', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-warning, var(--color-text))' }}>
                         waiting for review
@@ -458,12 +479,20 @@ export default function TransactionsScreen({
                       <span style={{ marginLeft: '0.5rem', fontSize: 'var(--text-xs, 0.75rem)' }}>correction</span>
                     )}
                   </td>
-                  <td style={{ padding: '0.5rem 0.75rem' }}>{row.description || row.reference || '—'}</td>
-                  <td style={money}>
-                    {row.direction === 'income' ? '' : '-'}
-                    {poundsFromString(row.net_total)}
+                  <td style={{ padding: '0.5rem 0.75rem' }}>
+                    {row.entry_kind === 'transfer'
+                      ? `${row.transfer_from_name ?? '?'} → ${row.transfer_to_name ?? '?'}`
+                      : row.description || row.reference || '—'}
                   </td>
-                  <td style={money}>{poundsFromString(row.vat_total)}</td>
+                  <td style={money}>
+                    {row.entry_kind === 'transfer' ? '—' : (
+                      <>
+                        {row.direction === 'income' ? '' : '-'}
+                        {poundsFromString(row.net_total)}
+                      </>
+                    )}
+                  </td>
+                  <td style={money}>{row.entry_kind === 'transfer' ? '—' : poundsFromString(row.vat_total)}</td>
                   <td style={money}>{poundsFromString(row.gross_total)}</td>
                   <td style={{ padding: '0.5rem 0.75rem' }}>
                     {row.attachment_count > 0 ? (

@@ -52,7 +52,9 @@ export type DashboardData = {
     id: string
     date: string
     counterparty: string
-    direction: string
+    /** Null on a transfer, which is neither money in nor money out. */
+    direction: string | null
+    kind: 'entry' | 'transfer'
     status: string
     gross: string
     locked: boolean
@@ -185,7 +187,9 @@ export async function getDashboard(): Promise<DashboardData> {
       id: row.id,
       date: toDateOnly(row.tax_point_date),
       counterparty: row.counterparty,
+      // Null on a transfer: the same money somewhere else, so neither sign fits.
       direction: row.direction,
+      kind: row.entry_kind,
       status: row.status,
       gross: formatMoney(row.gross_total),
       locked: !!row.locked_period_id,

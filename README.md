@@ -147,6 +147,14 @@ computation follows the same rule.
   form, with reversal rather than editing once posted. A journal reaches no VAT
   box, ever - anything with VAT on it is a receipt or a sale and belongs with the
   entries.
+- **Internal transfers.** Money moved between two accounts the business already
+  owns, recorded from the same form as everything else - "Money in or out" has a
+  third setting for it. Neither a sale nor a cost, so no category, no VAT and no
+  receipt; underneath it is a journal debiting the account that received it and
+  crediting the one it came from. Both statement lines can be ticked off against
+  it on Reconcile, one at each end, which is the difference between the balances
+  being right and both of them being wrong by the same amount in opposite
+  directions.
 - **Director's loan account.** What the company owes you, or you owe the company,
   stated in those words rather than as a sign. Fed by both bank transfers and
   journals, with the year-end position, the section 455 date and the benefit-in-

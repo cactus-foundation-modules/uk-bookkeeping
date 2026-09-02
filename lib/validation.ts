@@ -48,6 +48,25 @@ export const TransactionBody = z.object({
   lines: z.array(LineBody).min(1),
 })
 
+/**
+ * Money moved between two accounts the business already owns.
+ *
+ * Deliberately its own shape rather than a variant of TransactionBody: a
+ * transfer has no counterparty, no category, no VAT and no lines, and letting it
+ * share a body would mean five optional fields that must be absent, checked by
+ * hand, in a place where forgetting one posts a VAT figure nobody typed.
+ */
+export const TransferBody = z.object({
+  date: z.string().min(8),
+  /** Always positive. To send it the other way, swap the two accounts over. */
+  amount: z.string().regex(/^\d{1,10}(\.\d{1,2})?$/, 'Give the amount as a number, like 250.00.'),
+  fromBankAccountId: z.string().min(1),
+  toBankAccountId: z.string().min(1),
+  reference: z.string().nullable().optional(),
+  description: z.string().nullable().optional(),
+  status: z.enum(['draft', 'posted']).optional(),
+})
+
 /** What the browser's fraud collector sends. Everything optional - a value we
  * could not collect is a header we do not send, not a request we refuse. */
 export const FraudBagBody = z.object({

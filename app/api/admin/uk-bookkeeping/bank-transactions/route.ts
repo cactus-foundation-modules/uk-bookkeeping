@@ -7,6 +7,7 @@ import { suggestMatchesForLines, summariseReconciliation } from '@/modules/uk-bo
 import { formatMoney } from '@/modules/uk-bookkeeping/lib/money'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
 import { suggestCategoriesForCounterparties } from '@/modules/uk-bookkeeping/lib/transactions'
+import { findTransferCandidatesForLines } from '@/modules/uk-bookkeeping/lib/transfers'
 import type { BankTransactionStatus } from '@/modules/uk-bookkeeping/lib/types'
 
 // The reconciliation screen's one read: the statement lines, what is matched to
@@ -16,7 +17,9 @@ import type { BankTransactionStatus } from '@/modules/uk-bookkeeping/lib/types'
 // `suggestions` are entries already in the books, and accepting one ties the two
 // together. `documentSuggestions` are receipts sitting unfiled in the inbox that
 // nobody has typed up yet, and accepting one WRITES the entry, from what the
-// document says, with the document attached to it.
+// document says, with the document attached to it. `transferSuggestions` are
+// movements between two of the business's own accounts, where the line is one
+// half of something already recorded on the other side.
 
 export async function GET(request: NextRequest) {
   const gate = await requireBookkeepingUser('bookkeeping.access')
@@ -65,6 +68,21 @@ export async function GET(request: NextRequest) {
       if (found?.length) documentsById[row.id] = found
     })
 
+    // Money moved between two of the business's own accounts, where this line is
+    // one half of it. Same one-query-for-the-page rule as the two above.
+    const transfers = await findTransferCandidatesForLines(
+      open.map((row) => ({
+        id: row.id,
+        bankAccountId: row.bank_account_id,
+        date: row.date.toISOString().slice(0, 10),
+        amount: formatMoney(row.amount),
+      })),
+    )
+    const transfersById: Record<string, unknown> = {}
+    for (const [id, found] of transfers) {
+      if (found.length) transfersById[id] = found
+    }
+
     // What each of these counterparties was filed under last time, so the screen
     // opens with a category already picked on most lines. One query for the page.
     const nameOf = (row: (typeof open)[number]): string =>
@@ -80,6 +98,7 @@ export async function GET(request: NextRequest) {
       ...list,
       suggestions: byId,
       documentSuggestions: documentsById,
+      transferSuggestions: transfersById,
       documentsTruncated: documents.truncated,
       categoryGuesses,
       summary: bankAccountId

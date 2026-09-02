@@ -24,6 +24,12 @@ type AccountKind = 'asset' | 'liability' | 'equity' | 'income' | 'expense'
 type JournalRow = {
   id: string
   date: string
+  /**
+   * A transfer between two of the business's own accounts is a journal
+   * underneath, and shows here so an accountant reading the journals sees all of
+   * them - but it is changed on its own form, not in the editor below.
+   */
+  kind: 'journal' | 'transfer'
   reference: string | null
   narrative: string
   status: 'draft' | 'posted'
@@ -851,6 +857,7 @@ export default function JournalsScreen({
               {list.rows.map((row) => {
                 const locked = !!row.locked_period_id
                 const reversed = !!row.reversed_by_journal_id
+                const isTransfer = row.kind === 'transfer'
                 return (
                   <tr key={row.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
                     <td style={{ ...cell, whiteSpace: 'nowrap' }}>{formatDate(row.date)}</td>
@@ -864,6 +871,7 @@ export default function JournalsScreen({
                         )}
                       </div>
                       {row.reference && <div style={quiet}>{row.reference}</div>}
+                      {isTransfer && <div style={quiet}>between your own accounts</div>}
                       {reversed && <div style={quiet}>reversed</div>}
                       {row.reverses_journal_id && <div style={quiet}>reversal of an earlier journal</div>}
                     </td>
@@ -875,18 +883,25 @@ export default function JournalsScreen({
                         <div style={{ display: 'flex', gap: '0.375rem', flexWrap: 'wrap' }}>
                           {/* Locked and reversed journals are refused by the
                               server, so the buttons that would only produce that
-                              refusal are not offered. */}
-                          {!locked && !reversed && (
+                              refusal are not offered. Nor is a transfer offered
+                              the editor here, which would refuse it for a
+                              different reason - it has a form of its own. */}
+                          {isTransfer && !locked && (
+                            <a className="btn btn-sm" href={`/${adminPath}/m/uk-bookkeeping/transfers/${row.id}`}>
+                              Open the transfer
+                            </a>
+                          )}
+                          {!isTransfer && !locked && !reversed && (
                             <button type="button" className="btn btn-sm" onClick={() => openExisting(row.id)}>
                               Edit
                             </button>
                           )}
-                          {row.status === 'draft' && !locked && (
+                          {!isTransfer && row.status === 'draft' && !locked && (
                             <button type="button" className="btn btn-sm" disabled={busy} onClick={() => post(row.id)}>
                               Post
                             </button>
                           )}
-                          {row.status === 'posted' && !reversed && (
+                          {!isTransfer && row.status === 'posted' && !reversed && (
                             <button
                               type="button"
                               className="btn btn-sm"
@@ -898,7 +913,7 @@ export default function JournalsScreen({
                               Reverse
                             </button>
                           )}
-                          {!locked && !reversed && (
+                          {!isTransfer && !locked && !reversed && (
                             <button type="button" className="btn btn-sm" disabled={busy} onClick={() => remove(row)}>
                               Delete
                             </button>
