@@ -4,6 +4,7 @@ import { buildReadingContext, saveReading } from '@/modules/uk-bookkeeping/lib/d
 import { readDocument } from '@/modules/uk-bookkeeping/lib/document-reading'
 import { toErrorResponse } from '@/modules/uk-bookkeeping/lib/errors'
 import { readEvidenceUpload, storeEvidence } from '@/modules/uk-bookkeeping/lib/evidence-upload'
+import { kindForTransaction } from '@/modules/uk-bookkeeping/lib/filing'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
 import { getSettings } from '@/modules/uk-bookkeeping/lib/settings'
 import { getTransaction } from '@/modules/uk-bookkeeping/lib/transactions'
@@ -38,9 +39,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const form = await request.formData().catch(() => null)
     const upload = await readEvidenceUpload(form, settings.attachment_max_bytes)
 
-    // The entry's own tax point decides the folder here - the entry is the fact,
-    // and whatever date the reader thinks it can see on the paper is not.
-    const stored = await storeEvidence(upload, transaction.tax_point_date, gate.user.id)
+    // The entry decides the whole address here - its tax point, its direction,
+    // its counterparty and its reference. The entry is the fact; whatever the
+    // reader thinks it can see on the paper is a guess, and a guess does not get
+    // to overrule one.
+    const stored = await storeEvidence(upload, transaction.tax_point_date, gate.user.id, {
+      kind: kindForTransaction(transaction),
+      parts: {
+        counterparty: transaction.counterparty,
+        documentNumber: transaction.reference,
+      },
+    })
 
     const attachment = await createAttachment(
       {

@@ -266,6 +266,20 @@ export type BkBankStatementRow = {
   mapping: unknown
   created_by_user_id: string | null
   created_at: Date
+  // --- The file itself. See migrations/019_statement_files.sql. Null on any
+  // --- statement imported before that existed, and on a site with no file
+  // --- storage set up.
+  url: string | null
+  media_provider: string | null
+  media_key: string | null
+  media_id: string | null
+  mime_type: string | null
+  size: number
+  sha256: string | null
+  updated_at: Date
+  updated_by_user_id: string | null
+  /** How many times this statement has been brought in again to correct it. */
+  update_count: number
 }
 
 export type BkBankTransactionRow = {

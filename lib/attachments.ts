@@ -4,6 +4,7 @@ import { getOrCreateFolderByPath, resolveFolderPath } from '@/lib/media/organise
 import type { SessionUser } from '@/lib/auth/session'
 import { appendAudit } from './audit'
 import { BookkeepingError, NotFoundError } from './errors'
+import { filingFolderNames, type FilingKind } from './filing'
 import { assertTransactionMutable } from './guards'
 import type { BkAttachmentRow } from './types'
 
@@ -19,11 +20,18 @@ import type { BkAttachmentRow } from './types'
 // unused clutter in the first place. HMRC expects records kept six years; the
 // media tidy-up must not be the thing that loses them.
 
-/** Media library folder these land in: Bookkeeping / <year> / <month>. */
-export async function resolveEvidenceFolderId(date: Date): Promise<string | null> {
-  const year = String(date.getUTCFullYear())
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0')
-  return getOrCreateFolderByPath(['Bookkeeping', year, month])
+/**
+ * Media library folder these land in: Bookkeeping / <year> / <month> / <kind>.
+ *
+ * The kind folder - Customer Invoices, Purchase Receipts and the rest - is
+ * lib/filing.ts's business, and is left off entirely when nothing has said what
+ * the document is yet. See that file for the whole layout.
+ */
+export async function resolveEvidenceFolderId(
+  date: Date,
+  kind: FilingKind | null = null,
+): Promise<string | null> {
+  return getOrCreateFolderByPath(filingFolderNames(date, kind))
 }
 
 export async function evidenceFolderPath(folderId: string | null): Promise<string> {

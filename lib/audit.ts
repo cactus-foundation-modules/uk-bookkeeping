@@ -50,6 +50,8 @@ export type AuditAction =
   | 'hmrc.submission-failed'
   | 'import.created'
   | 'statement.imported'
+  | 'statement.updated'
+  | 'documents.refiled'
   | 'reconciliation.matched'
   | 'reconciliation.unmatched'
   | 'reconciliation.recorded'

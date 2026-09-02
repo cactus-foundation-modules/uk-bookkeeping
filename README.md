@@ -31,6 +31,19 @@ computation follows the same rule.
   seen before and pre-picks the category their entries usually land in.
 - **Evidence.** Receipts and invoices attached to an entry, stored through the
   site's own media provider and never tidied away by the media clean-up.
+- **A filing cabinet, not a heap.** Everything kept lands in the media library
+  under `Bookkeeping / <year> / <month> / <what it is>`, named the way a person
+  would name it: a customer invoice under its own number in **Customer
+  Invoices**, a credit note in **Customer Credit Notes**, a supplier's receipt as
+  `Supplier-Number` in **Purchase Receipts**, and the statement itself as the
+  account's own name in **Bank Statements**. Which drawer a document goes in
+  follows whatever is actually known about it - the entry it belongs to if it has
+  one, otherwise what was read off it - and it moves to the right drawer the
+  moment somebody corrects a reading or files it against an entry. A document
+  nobody has worked out yet waits in the month's folder rather than being
+  guessed into a drawer. There is a button on the receipts screen that walks
+  everything already uploaded and moves it to match; it can be run as often as
+  you like and only ever moves files the module itself put there.
 - **Receipts, before the entry exists.** Paperwork arrives on the day and gets
   typed up when the statement turns up, so a receipt can be dropped in with no
   entry to attach it to yet. A PDF is read as it lands - who it is from, the
@@ -95,6 +108,12 @@ computation follows the same rule.
   Importing keeps the bank's lines and stops there: you are never asked what two
   hundred of them were for before a single one is saved, because that is the job
   nobody finishes, and an import abandoned halfway has kept nothing at all.
+  The statement file itself is kept too, filed under the month it covers and
+  named after the account, so "show me the statement that line came off" has an
+  answer six years later. Importing the same period again offers to bring that
+  statement up to date rather than filing a second copy of the same month:
+  anything new is added, anything the old version had and the new one does not is
+  dropped, and a line somebody has already explained stays exactly where it is.
 - **Reconciliation.** Where a statement is turned into a set of books. The bank's
   own lines are kept as the bank wrote them, and each is either tied to the
   entries that explain it or still open - and it is only ticked off when the match

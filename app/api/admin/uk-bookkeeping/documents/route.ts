@@ -10,16 +10,20 @@ import {
 import { readDocument } from '@/modules/uk-bookkeeping/lib/document-reading'
 import { toErrorResponse } from '@/modules/uk-bookkeeping/lib/errors'
 import { readEvidenceUpload, storeEvidence } from '@/modules/uk-bookkeeping/lib/evidence-upload'
+import { kindForDocument } from '@/modules/uk-bookkeeping/lib/filing'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
 import { getSettings } from '@/modules/uk-bookkeeping/lib/settings'
 
 // The inbox: receipts and invoices that have arrived but have not been filed.
 //
 // The order of the POST matters and is not the obvious one. The file is READ
-// before it is uploaded, because what we read off it includes the invoice date,
-// and the invoice date decides which Bookkeeping / year / month folder it
-// belongs in. Uploading first and reading second would file August's invoice
-// under whatever month somebody got round to dealing with it.
+// before it is uploaded, because everything about where it goes comes off the
+// reading: the invoice date picks the Bookkeeping / year / month folder, whether
+// it is money in or money out picks Customer Invoices or Purchase Receipts, and
+// the supplier and invoice number are what the file is named. Uploading first
+// and reading second would file August's invoice under whatever month somebody
+// got round to dealing with it, under whatever the sender happened to call the
+// attachment.
 
 export async function GET(request: NextRequest) {
   const gate = await requireBookkeepingUser('bookkeeping.access')
@@ -64,7 +68,16 @@ export async function POST(request: NextRequest) {
     const filedUnder = reading.documentDate
       ? new Date(`${reading.documentDate}T00:00:00Z`)
       : new Date()
-    const stored = await storeEvidence(upload, filedUnder, gate.user.id)
+    const stored = await storeEvidence(upload, filedUnder, gate.user.id, {
+      // An unread document has no direction, so it gets no kind folder and
+      // keeps its uploaded name. Correcting the reading afterwards re-files it -
+      // see updateDocumentReading.
+      kind: kindForDocument(reading.direction),
+      parts: {
+        counterparty: reading.counterparty,
+        documentNumber: reading.documentNumber,
+      },
+    })
 
     const document = await createAttachment(
       {

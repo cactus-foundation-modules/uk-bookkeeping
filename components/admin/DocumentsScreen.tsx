@@ -101,6 +101,11 @@ export default function DocumentsScreen({
   // row opens a small panel of its own instead.
   const [discarding, setDiscarding] = useState<string | null>(null)
   const [discardFile, setDiscardFile] = useState(false)
+  // Tidying the filing cabinet: moving everything already uploaded into the
+  // Bookkeeping / year / month / kind folders. Runs a batch at a time and keeps
+  // going, so a few hundred receipts do not need one enormous request.
+  const [tidying, setTidying] = useState(false)
+  const [tidyReport, setTidyReport] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -131,6 +136,59 @@ export default function DocumentsScreen({
     const timer = setTimeout(load, search ? 250 : 0)
     return () => clearTimeout(timer)
   }, [load, search])
+
+  /**
+   * Move every document already uploaded into the folder it belongs in.
+   *
+   * A loop of small requests rather than one big one: each batch moves a
+   * handful of files in storage and comes back with where it got to. Safe to
+   * stop and safe to run again - a file already in the right place is compared
+   * and left alone.
+   */
+  async function tidyFiling() {
+    setTidying(true)
+    setTidyReport(null)
+    setError(null)
+
+    let after: string | null = null
+    let moved = 0
+    let examined = 0
+    const problems: string[] = []
+
+    try {
+      // Bounded so a fault that never advances the cursor cannot spin forever.
+      for (let pass = 0; pass < 200; pass++) {
+        const response: Response = await fetch('/api/m/uk-bookkeeping/admin/documents/refile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ after }),
+        })
+        const payload = await response.json().catch(() => ({}))
+        if (!response.ok) {
+          setError(payload.error ?? 'The folders could not be tidied.')
+          return
+        }
+        moved += payload.moved ?? 0
+        examined += payload.examined ?? 0
+        for (const problem of payload.problems ?? []) {
+          if (!problems.includes(problem)) problems.push(problem)
+        }
+        after = payload.cursor ?? null
+        if (!after) break
+      }
+
+      setTidyReport(
+        `${examined} document${examined === 1 ? '' : 's'} looked at, ${moved} moved.` +
+          (moved === 0 ? ' Everything was already where it belongs.' : '') +
+          (problems.length ? ` ${problems.join(' ')}` : ''),
+      )
+      await load()
+    } catch {
+      setError('That did not reach the server. Check the connection and try again.')
+    } finally {
+      setTidying(false)
+    }
+  }
 
   async function upload(files: FileList | null) {
     if (!files || files.length === 0) return
@@ -338,7 +396,7 @@ export default function DocumentsScreen({
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginBottom: '1rem' }}>
+      <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap' }}>
         <input
           style={{ ...inputStyle, maxWidth: 320 }}
           placeholder="Search by supplier, number or filename"
@@ -348,7 +406,24 @@ export default function DocumentsScreen({
         <span style={mutedStyle}>
           {loading ? 'Loading…' : `${total} waiting to be filed`}
         </span>
+        {canRecord && (
+          <button
+            type="button"
+            className="btn btn-sm"
+            style={{ marginLeft: 'auto' }}
+            disabled={tidying}
+            onClick={tidyFiling}
+          >
+            {tidying ? 'Tidying the folders…' : 'Tidy the folders'}
+          </button>
+        )}
       </div>
+
+      {tidyReport && (
+        <div className="card" role="status" style={{ padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: 'var(--text-sm)' }}>
+          {tidyReport}
+        </div>
+      )}
 
       {!loading && documents.length === 0 && (
         <EmptyState title={search ? 'Nothing matches that' : 'Nothing waiting'}>

@@ -1,7 +1,13 @@
 import { getActiveMediaProvider, isMediaProviderConfigured } from '@/lib/config/env'
-import { saveMediaRecord, uploadMedia, validateNonImageUpload } from '@/lib/media/upload'
+import {
+  buildLibraryUploadKey,
+  saveMediaRecord,
+  uploadMedia,
+  validateNonImageUpload,
+} from '@/lib/media/upload'
 import { evidenceFolderPath, resolveEvidenceFolderId } from './attachments'
 import { BookkeepingError } from './errors'
+import { filingFilename, type FilingKind, type FilingNameParts } from './filing'
 import {
   HEIC_MESSAGE,
   formatSize,
@@ -100,6 +106,16 @@ export type StoredEvidence = {
 }
 
 /**
+ * What a document is, so it can be filed under the right heading and given the
+ * name a person would give it. Null kind means nobody knows yet - see
+ * lib/filing.ts.
+ */
+export type FilingIntent = {
+  kind: FilingKind | null
+  parts?: FilingNameParts
+}
+
+/**
  * Put the bytes where the site keeps its media, and record them in the library.
  *
  * `filedUnder` is the date that decides which Bookkeeping / year / month folder
@@ -107,11 +123,21 @@ export type StoredEvidence = {
  * document in the inbox it is whatever date we read off the document, falling
  * back to today - which is why the reading happens before the upload rather
  * than after it.
+ *
+ * `filing` decides the rest of the address: which of the four folders inside
+ * that month, and what the file is called when it gets there. Both are allowed
+ * to be unknown, and an unknown one is not a failure - an unreadable photograph
+ * of a receipt keeps the name it was uploaded under and waits in the month
+ * folder until somebody says what it is.
  */
 export async function storeEvidence(
   upload: EvidenceUpload,
   filedUnder: Date,
-  uploadedById: string,
+  // Null for a document a publisher handed over rather than a person uploading
+  // one: Media.uploadedById is a foreign key to a real user, and inventing one
+  // would be worse than leaving it empty.
+  uploadedById: string | null,
+  filing: FilingIntent = { kind: null },
 ): Promise<StoredEvidence> {
   const provider = await getActiveMediaProvider()
   if (!provider || !isMediaProviderConfigured(provider)) {
@@ -122,14 +148,28 @@ export async function storeEvidence(
     )
   }
 
-  const folderId = await resolveEvidenceFolderId(filedUnder)
+  const folderId = await resolveEvidenceFolderId(filedUnder, filing.kind)
   const folderPath = await evidenceFolderPath(folderId)
+
+  // The name it is filed under, where the filing scheme can produce one:
+  // "INV-1042.pdf", "Screwfix-8817342.pdf". The key is settled BEFORE the upload
+  // by buildLibraryUploadKey, which is what makes a second invoice of the same
+  // number land as "-2" rather than writing over the first one.
+  const filedAs =
+    filing.kind && filingFilename(filing.kind, filing.parts ?? {}, upload.filename)
+  const storedName = filedAs || upload.filename
+  const presetKey = filedAs
+    ? await buildLibraryUploadKey(provider, upload.mimeType, filedAs, folderPath || undefined)
+    : undefined
+
   const result = await uploadMedia(
     upload.buffer,
     upload.mimeType,
     provider,
-    upload.filename,
+    storedName,
     folderPath || undefined,
+    false,
+    presetKey,
   )
 
   // Recorded in the core library as well as in our own table, so the receipt
@@ -142,8 +182,8 @@ export async function storeEvidence(
     provider,
     mimeType: result.mimeType,
     sizeBytes: result.sizeBytes,
-    uploadedById,
-    originalName: upload.filename || undefined,
+    uploadedById: uploadedById ?? undefined,
+    originalName: storedName || undefined,
     folderId,
   })
 

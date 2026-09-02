@@ -13,6 +13,7 @@ import {
 import { BookkeepingError, NotFoundError } from './errors'
 import { assertTransactionMutable } from './guards'
 import { formatMoney, isMoneyString } from './money'
+import { refileAttachment } from './refiling'
 import { getSettings } from './settings'
 import { listKnownCounterparties } from './transactions'
 import { VAT_TREATMENTS, type BkAttachmentRow, type Direction, type VatRateCode, type VatTreatment } from './types'
@@ -272,6 +273,11 @@ export async function attachDocument(
   // nobody filing a receipt wants to be asked about it.
   await learnFromDocumentFiling(document.guessed_counterparty, target.counterparty, user)
 
+  // And the moment the entry's own direction, counterparty and reference become
+  // the truth about this document, so the file goes to the drawer they name.
+  // Best effort by design - see lib/refiling.ts.
+  await refileAttachment(id)
+
   await appendAudit({
     action: 'attachment.filed',
     entityType: 'transaction',
@@ -410,6 +416,12 @@ export async function updateDocumentReading(
   if (counterparty && document.guessed_counterparty && document.guessed_counterparty !== counterparty) {
     await learnFromDocumentFiling(document.guessed_counterparty, counterparty, user)
   }
+
+  // A confirmed reading is the first time anybody actually knows whether this is
+  // a sale or a purchase and what number is on it, which is exactly what decides
+  // where the file lives. So it moves now rather than staying where the guess
+  // put it.
+  await refileAttachment(id)
 
   await appendAudit({
     action: 'attachment.reading-corrected',

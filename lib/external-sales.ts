@@ -1,15 +1,9 @@
 import { prisma } from '@/lib/db/prisma'
 import { getActiveMediaProvider, isMediaProviderConfigured } from '@/lib/config/env'
-import { saveMediaRecord, uploadMedia } from '@/lib/media/upload'
-import {
-  createAttachment,
-  evidenceFolderPath,
-  hashBytes,
-  listAttachments,
-  resolveEvidenceFolderId,
-} from './attachments'
+import { createAttachment, hashBytes, listAttachments } from './attachments'
 import { getCategory, getCategoryByCode } from './categories'
 import { BackdatedIntoClosedPeriodError } from './errors'
+import { storeEvidence, type FilingIntent } from './evidence-upload'
 import { sniffMimeType } from './file-kinds'
 import { formatMoney } from './money'
 import { getSettings } from './settings'
@@ -293,10 +287,24 @@ async function existingEntry(source: string, ref: string): Promise<string | null
  * publisher's "send to the books again" button tries the attachment again -
  * which is why this is idempotent on the filename.
  */
+/** Where an invoice goes, and what it is called when it gets there. */
+const INVOICE_FILING = (invoiceNumber: string): FilingIntent => ({
+  kind: 'sales-invoice',
+  parts: { documentNumber: invoiceNumber },
+})
+
+/** The same for a credit note, which is a document in its own right with its
+ *  own number and its own drawer. */
+const CREDIT_FILING = (creditNoteNumber: string): FilingIntent => ({
+  kind: 'sales-credit-note',
+  parts: { documentNumber: creditNoteNumber },
+})
+
 async function fileDocument(
   transactionId: string,
   taxPointDate: Date,
   document: ExternalSaleDocument | undefined,
+  filing: FilingIntent,
 ): Promise<string> {
   if (!document) return ''
   try {
@@ -325,29 +333,28 @@ async function fileDocument(
       return ' The invoice itself is too big to keep as evidence, so nothing is attached to it.'
     }
 
-    const folderId = await resolveEvidenceFolderId(taxPointDate)
-    const folderPath = await evidenceFolderPath(folderId)
-    const result = await uploadMedia(buffer, actual, provider, document.filename, folderPath || undefined)
-    const record = await saveMediaRecord({
-      key: result.key,
-      url: result.url,
-      provider,
-      mimeType: result.mimeType,
-      sizeBytes: result.sizeBytes,
-      originalName: document.filename,
-      folderId,
-    })
+    // Same storing, same folders and same naming as a receipt somebody drags in
+    // by hand - so an owner opening Customer Invoices for the month finds the
+    // shop's invoices sitting in it under their own numbers, not a pile of
+    // whatever the printer called them.
+    const stored = await storeEvidence(
+      { buffer, mimeType: actual, filename: document.filename, name: document.filename },
+      taxPointDate,
+      null,
+      filing,
+    )
+
     await createAttachment(
       {
         transactionId,
-        name: 'Invoice',
+        name: filing.kind === 'sales-credit-note' ? 'Credit note' : 'Invoice',
         filename: document.filename,
-        url: result.url,
-        mediaProvider: provider,
-        mediaKey: result.key,
-        mediaId: record?.id ?? null,
+        url: stored.url,
+        mediaProvider: stored.provider,
+        mediaKey: stored.key,
+        mediaId: stored.mediaId,
         mimeType: actual,
-        size: result.sizeBytes,
+        size: stored.size,
         sha256: hashBytes(buffer),
       },
       null,
@@ -394,7 +401,9 @@ export async function recordExternalSale(payload: ExternalSalePayload): Promise<
       // The re-send button lands here. Nothing is recorded twice, but a document
       // that never made it the first time gets another go.
       const existingTx = await getTransaction(already)
-      const filed = existingTx ? await fileDocument(already, existingTx.tax_point_date, payload.document) : ''
+      const filed = existingTx
+        ? await fileDocument(already, existingTx.tax_point_date, payload.document, INVOICE_FILING(ref))
+        : ''
       return { ok: true, message: `Already in the books - nothing recorded twice.${filed}` }
     }
 
@@ -444,7 +453,12 @@ export async function recordExternalSale(payload: ExternalSalePayload): Promise<
 
     try {
       const created = await createTransaction(input, null)
-      const filed = await fileDocument(created.id, created.tax_point_date, payload.document)
+      const filed = await fileDocument(
+        created.id,
+        created.tax_point_date,
+        payload.document,
+        INVOICE_FILING(ref),
+      )
       return {
         ok: true,
         message: (input.status === 'draft'
@@ -460,7 +474,12 @@ export async function recordExternalSale(payload: ExternalSalePayload): Promise<
       // the person who files the returns.
       if (error instanceof BackdatedIntoClosedPeriodError) {
         const draft = await createTransaction({ ...input, status: 'draft' }, null)
-        const filed = await fileDocument(draft.id, draft.tax_point_date, payload.document)
+        const filed = await fileDocument(
+          draft.id,
+          draft.tax_point_date,
+          payload.document,
+          INVOICE_FILING(ref),
+        )
         return {
           ok: false,
           message:
@@ -735,7 +754,14 @@ export async function recordExternalCredit(payload: ExternalSaleCreditPayload): 
       // The re-send button lands here. Nothing is recorded twice, but a document
       // that never made it the first time gets another go.
       const existingTx = await getTransaction(already)
-      const filed = existingTx ? await fileDocument(already, existingTx.tax_point_date, payload.document) : ''
+      const filed = existingTx
+        ? await fileDocument(
+            already,
+            existingTx.tax_point_date,
+            payload.document,
+            CREDIT_FILING(creditNumber),
+          )
+        : ''
       return { ok: true, message: `Already in the books - nothing recorded twice.${filed}` }
     }
 
@@ -806,7 +832,12 @@ export async function recordExternalCredit(payload: ExternalSaleCreditPayload): 
 
     try {
       const created = await createTransaction(input, null)
-      const filed = await fileDocument(created.id, created.tax_point_date, payload.document)
+      const filed = await fileDocument(
+        created.id,
+        created.tax_point_date,
+        payload.document,
+        CREDIT_FILING(creditNumber),
+      )
       return {
         ok: true,
         message:
@@ -819,7 +850,12 @@ export async function recordExternalCredit(payload: ExternalSaleCreditPayload): 
       // person who files the returns.
       if (error instanceof BackdatedIntoClosedPeriodError) {
         const draft = await createTransaction({ ...input, status: 'draft' }, null)
-        const filed = await fileDocument(draft.id, draft.tax_point_date, payload.document)
+        const filed = await fileDocument(
+          draft.id,
+          draft.tax_point_date,
+          payload.document,
+          CREDIT_FILING(creditNumber),
+        )
         return {
           ok: false,
           message:

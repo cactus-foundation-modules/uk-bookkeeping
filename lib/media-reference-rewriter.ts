@@ -15,6 +15,10 @@ import type { MediaReferenceChange } from '@/lib/media/reference-rewriters'
 // address is not. Without that carve-out, moving one filed receipt in the media
 // library would fail with an accounting error.
 //
+// Bank statement files go the same way, for the same reason: the row keeps the
+// url and the key, the media library is free to move the blob, and a statement
+// nobody can open is a statement we may as well not have kept.
+//
 // Equality, not substring: each column holds the whole value, so `= oldUrl` can
 // never touch an unrelated row.
 export async function ukBookkeepingMediaReferenceRewriter(
@@ -26,10 +30,16 @@ export async function ukBookkeepingMediaReferenceRewriter(
     await prisma.$executeRaw`
       UPDATE "bk_attachments" SET "url" = ${newUrl} WHERE "url" = ${oldUrl}
     `
+    await prisma.$executeRaw`
+      UPDATE "bk_bank_statements" SET "url" = ${newUrl} WHERE "url" = ${oldUrl}
+    `
   }
   if (oldKey && oldKey !== newKey) {
     await prisma.$executeRaw`
       UPDATE "bk_attachments" SET "media_key" = ${newKey} WHERE "media_key" = ${oldKey}
+    `
+    await prisma.$executeRaw`
+      UPDATE "bk_bank_statements" SET "media_key" = ${newKey} WHERE "media_key" = ${oldKey}
     `
   }
 }

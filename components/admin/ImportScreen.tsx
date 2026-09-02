@@ -47,6 +47,16 @@ type Preview = {
   mapping: Record<string, unknown>
   bankAccountId: string | null
   matchedBankAccount: { id: string; name: string } | null
+  covers: { from: string | null; to: string | null }
+  existingStatement: {
+    id: string
+    filename: string
+    importedAt: string
+    updatedAt: string
+    updateCount: number
+    lineCount: number
+    hasFile: boolean
+  } | null
   lines: PreparedLine[]
   duplicates: number
   warnings: string[]
@@ -82,9 +92,23 @@ export default function ImportScreen({
   const [preset, setPreset] = useState('')
   const [bankAccountId, setBankAccountId] = useState('')
   const [preview, setPreview] = useState<Preview | null>(null)
+  // The file itself is held on to, because the commit sends it back: the
+  // statement is kept now, not just read, and the bytes only exist here.
+  const [chosen, setChosen] = useState<File | null>(null)
+  // Whether a statement already held for this period gets brought up to date or
+  // is left alone with this one filed beside it. Updating is the answer nearly
+  // everybody wants, so it is the one already chosen.
+  const [replaceExisting, setReplaceExisting] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [done, setDone] = useState<{ linesKept: number; duplicates: number } | null>(null)
+  const [done, setDone] = useState<{
+    linesKept: number
+    duplicates: number
+    updated: boolean
+    removed: number
+    keptBecauseUsed: number
+    fileNote: string | null
+  } | null>(null)
   const [dragging, setDragging] = useState(false)
 
   useEffect(() => {
@@ -103,6 +127,8 @@ export default function ImportScreen({
     setBusy(true)
     setError(null)
     setDone(null)
+    setChosen(file)
+    setReplaceExisting(true)
 
     const body = new FormData()
     body.append('file', file)
@@ -116,6 +142,7 @@ export default function ImportScreen({
       if (!response.ok) {
         setError(payload.error ?? 'That file could not be read.')
         setPreview(null)
+        setChosen(null)
         return
       }
 
@@ -124,6 +151,7 @@ export default function ImportScreen({
     } catch {
       setError('The file did not reach the server. Check the connection and try again.')
       setPreview(null)
+      setChosen(null)
     } finally {
       setBusy(false)
       // Clear the input so choosing the SAME file again - a re-export under the
@@ -142,20 +170,28 @@ export default function ImportScreen({
     setBusy(true)
     setError(null)
 
+    // Multipart, so the file travels with the lines and a copy of the statement
+    // is kept beside them. Without the file this still imports - it just leaves
+    // nothing to show anybody who asks where a line came from.
+    const body = new FormData()
+    body.append(
+      'payload',
+      JSON.stringify({
+        filename: preview.filename,
+        format: preview.format,
+        bankAccountId,
+        preset: preset || null,
+        meta: preview.meta,
+        mapping: preview.mapping,
+        lines: preview.lines,
+        replaceStatementId:
+          replaceExisting && preview.existingStatement ? preview.existingStatement.id : null,
+      }),
+    )
+    if (chosen) body.append('file', chosen)
+
     try {
-      const response = await fetch('/api/m/uk-bookkeeping/admin/import', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: preview.filename,
-          format: preview.format,
-          bankAccountId,
-          preset: preset || null,
-          meta: preview.meta,
-          mapping: preview.mapping,
-          lines: preview.lines,
-        }),
-      })
+      const response = await fetch('/api/m/uk-bookkeeping/admin/import', { method: 'PUT', body })
       const payload = await response.json().catch(() => ({}))
       if (!response.ok) {
         setError(payload.error ?? 'Those could not be brought in.')
@@ -163,6 +199,7 @@ export default function ImportScreen({
       }
       setDone(payload)
       setPreview(null)
+      setChosen(null)
     } catch {
       setError('The import did not reach the server. Check the connection and try again - nothing has been brought in.')
     } finally {
@@ -171,6 +208,7 @@ export default function ImportScreen({
   }
 
   const fresh = preview ? preview.lines.length - preview.duplicates : 0
+  const updating = !!preview?.existingStatement && replaceExisting
 
   return (
     <div>
@@ -181,8 +219,25 @@ export default function ImportScreen({
       {done && (
         <div className="card" role="status" style={{ padding: '0.875rem 1rem', marginBottom: '1rem' }}>
           <strong>
-            {done.linesKept} statement line{done.linesKept === 1 ? '' : 's'} brought in.
+            {done.updated
+              ? `That statement has been brought up to date: ${done.linesKept} new line${done.linesKept === 1 ? '' : 's'}.`
+              : `${done.linesKept} statement line${done.linesKept === 1 ? '' : 's'} brought in.`}
           </strong>{' '}
+          {done.removed > 0 && (
+            <>
+              {done.removed} line{done.removed === 1 ? '' : 's'} that the old version had and this one
+              does not {done.removed === 1 ? 'has' : 'have'} gone.{' '}
+            </>
+          )}
+          {done.keptBecauseUsed > 0 && (
+            <>
+              {done.keptBecauseUsed}{' '}
+              {done.keptBecauseUsed === 1 ? 'line is' : 'lines are'} not in the new file but{' '}
+              {done.keptBecauseUsed === 1 ? 'has' : 'have'} already been explained, so{' '}
+              {done.keptBecauseUsed === 1 ? 'it has' : 'they have'} been left alone.{' '}
+            </>
+          )}
+          {done.fileNote && <>{done.fileNote} </>}
           {done.duplicates > 0 && (
             <>
               {done.duplicates}{' '}
@@ -298,6 +353,38 @@ export default function ImportScreen({
 
       {preview && <StatementSummary preview={preview} />}
 
+      {preview?.existingStatement && (
+        <div
+          className="card"
+          style={{ padding: '0.875rem 1rem', marginBottom: '1rem', fontSize: 'var(--text-sm)' }}
+        >
+          <p style={{ margin: '0 0 0.5rem' }}>
+            <strong>This period is already here.</strong> “{preview.existingStatement.filename}” was
+            brought in on {formatDate(preview.existingStatement.importedAt.slice(0, 10))} with{' '}
+            {preview.existingStatement.lineCount} line
+            {preview.existingStatement.lineCount === 1 ? '' : 's'}
+            {preview.existingStatement.updateCount > 0
+              ? `, and has been brought up to date ${preview.existingStatement.updateCount} time${preview.existingStatement.updateCount === 1 ? '' : 's'} since`
+              : ''}
+            .
+          </p>
+          <label style={{ display: 'block', marginBottom: '0.25rem' }}>
+            <input
+              type="checkbox"
+              checked={replaceExisting}
+              onChange={(event) => setReplaceExisting(event.target.checked)}
+              style={{ marginRight: '0.5rem' }}
+            />
+            Bring that statement up to date with this file
+          </label>
+          <p style={{ margin: 0, color: 'var(--color-text-muted, var(--color-text))' }}>
+            {replaceExisting
+              ? 'Anything new in this file is added, and anything the old version had that this one does not is dropped - unless you have already said what it was, in which case it stays put. This file becomes the copy we keep.'
+              : 'This will be filed as a second statement for the same period. Only do that if it really is a different statement.'}
+          </p>
+        </div>
+      )}
+
       {preview && preview.lines.length === 0 && (
         <EmptyState title="Nothing in that statement we could use.">
           <p style={{ margin: 0 }}>
@@ -371,15 +458,21 @@ export default function ImportScreen({
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={busy || !bankAccountId || fresh === 0}
+                disabled={busy || !bankAccountId || (fresh === 0 && !updating)}
                 onClick={commit}
               >
-                {busy ? 'Bringing in…' : `Bring in ${fresh} line${fresh === 1 ? '' : 's'}`}
+                {busy
+                  ? 'Bringing in…'
+                  : updating
+                    ? `Update this statement${fresh > 0 ? ` (${fresh} new line${fresh === 1 ? '' : 's'})` : ''}`
+                    : `Bring in ${fresh} line${fresh === 1 ? '' : 's'}`}
               </button>
               <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
-                {fresh === 0
+                {fresh === 0 && !updating
                   ? 'Every line in this file is already here.'
-                  : 'They go in as the bank wrote them. Nothing reaches your books, or a VAT return, until you say what each one was.'}
+                  : fresh === 0
+                    ? 'Every line is already here, so this replaces the copy of the statement we keep and tidies up anything the old version had that this one does not.'
+                    : 'They go in as the bank wrote them. Nothing reaches your books, or a VAT return, until you say what each one was.'}
               </span>
             </div>
           )}
