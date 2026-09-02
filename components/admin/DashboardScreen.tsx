@@ -304,7 +304,7 @@ export default function DashboardScreen({
             <a className="btn btn-sm btn-primary" href={`${base}/transactions/new`}>
               Record something
             </a>
-            <a className="btn btn-sm" href={`${base}/import`}>
+            <a className="btn btn-sm" href={`${base}/statements`}>
               Import a statement
             </a>
           </>
