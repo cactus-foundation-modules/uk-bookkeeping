@@ -302,7 +302,7 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
                NULL::date AS sort_date, NULL::timestamptz AS sort_created
         WHERE FALSE`
       }
-    ) both
+    ) merged
   `
 
   const page = await prisma.$queryRaw<{ id: string; kind: 'entry' | 'transfer' }[]>`
