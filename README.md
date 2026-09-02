@@ -114,6 +114,11 @@ computation follows the same rule.
   statement up to date rather than filing a second copy of the same month:
   anything new is added, anything the old version had and the new one does not is
   dropped, and a line somebody has already explained stays exactly where it is.
+  **Bank statements** lists every statement brought in - period, account, what
+  went in and out, how many lines are still to explain, and the file itself -
+  with importing as a panel opened from the corner. A month nobody imported
+  looks exactly like a month with nothing in it until somebody can read down a
+  list of the ones that are there.
 - **Reconciliation.** Where a statement is turned into a set of books. The bank's
   own lines are kept as the bank wrote them, and each is either tied to the
   entries that explain it or still open - and it is only ticked off when the match

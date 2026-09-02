@@ -425,7 +425,7 @@ export default function ReconcileScreen({
           <p style={{ margin: 0 }}>
             Add the account your money sits in under{' '}
             <a href={`/${adminPath}/settings?tab=uk-bookkeeping`}>the bookkeeping settings</a>, then{' '}
-            <a href={`/${adminPath}/m/uk-bookkeeping/import`}>import a statement</a> for it. Once there is
+            <a href={`/${adminPath}/m/uk-bookkeeping/statements`}>import a statement</a> for it. Once there is
             a statement to compare against, this is where you tick it off.
           </p>
         </EmptyState>

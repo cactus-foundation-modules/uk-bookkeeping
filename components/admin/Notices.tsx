@@ -200,7 +200,7 @@ const TABS = [
   { key: 'reports', label: 'Reports' },
   { key: 'year-end', label: 'Year end' },
   { key: 'corporation-tax', label: 'Corporation tax' },
-  { key: 'import', label: 'Import' },
+  { key: 'statements', label: 'Bank statements' },
 ]
 
 /**

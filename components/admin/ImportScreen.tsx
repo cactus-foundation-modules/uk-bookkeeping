@@ -2,10 +2,15 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
-import { BookkeepingNav, EmptyState, ErrorNotice, SandboxBanner } from './Notices'
+import { EmptyState, ErrorNotice } from './Notices'
 import { formatDate, poundsFromString } from './format'
 
 // Bringing a bank statement in.
+//
+// A panel on the Bank statements screen rather than a page of its own: the
+// question "what have I already imported" and the act of importing the next one
+// belong together, and putting importing behind its own tab meant the list of
+// what you hold was somewhere else entirely.
 //
 // The screen shows what was read and asks one question: does this look like the
 // statement. It does not ask what any of it was for. Saying that about two
@@ -78,11 +83,12 @@ const controlStyle: React.CSSProperties = {
 }
 
 export default function ImportScreen({
-  environment,
   canRecord,
+  onImported,
 }: {
-  environment: string
   canRecord: boolean
+  /** Told when something has actually landed, so the list behind can catch up. */
+  onImported?: () => void
 }) {
   const adminPath = useAdminPath()
   const fileInput = useRef<HTMLInputElement>(null)
@@ -200,6 +206,7 @@ export default function ImportScreen({
       setDone(payload)
       setPreview(null)
       setChosen(null)
+      onImported?.()
     } catch {
       setError('The import did not reach the server. Check the connection and try again - nothing has been brought in.')
     } finally {
@@ -212,8 +219,6 @@ export default function ImportScreen({
 
   return (
     <div>
-      <BookkeepingNav active="import" />
-      <SandboxBanner environment={environment} />
       <ErrorNotice message={error} />
 
       {done && (
