@@ -128,6 +128,7 @@ export default function TransactionDetail({
         setError(payload.error ?? 'That could not be deleted.')
         return
       }
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- adminPath is resolved server-side, so the admin shell has to render it again
       window.location.href = `/${adminPath}/m/uk-bookkeeping/transactions`
     } catch {
       setError('The delete did not reach the server. Check the connection and try again.')
@@ -216,6 +217,7 @@ export default function TransactionDetail({
         <LockedNotice
           periodId={transaction.locked_period_id!}
           onCorrect={() => {
+            // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- adminPath is resolved server-side, so the admin shell has to render it again
             window.location.href = `/${adminPath}/m/uk-bookkeeping/transactions/new?correcting=${transaction.id}`
           }}
         />

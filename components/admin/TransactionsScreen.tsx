@@ -332,6 +332,7 @@ export default function TransactionsScreen({
           <button
             className="btn btn-sm"
             onClick={() => {
+              // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- a file download endpoint, not a page - router.push would fetch it as RSC and download nothing
               window.location.href = '/api/m/uk-bookkeeping/admin/export/transactions'
             }}
           >

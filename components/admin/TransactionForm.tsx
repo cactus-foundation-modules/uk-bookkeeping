@@ -635,6 +635,7 @@ export default function TransactionForm({
         return
       }
 
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- adminPath is resolved server-side, so the admin shell has to render it again
       window.location.href = `/${adminPath}/m/uk-bookkeeping/transactions/${saved.id}`
     } catch {
       // A dropped connection must not leave "Saving…" disabled forever with no
