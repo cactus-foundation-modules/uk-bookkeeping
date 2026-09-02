@@ -9,10 +9,10 @@ import {
   dropStaleTestObjects,
   dropTestDatabase,
   dropTestRole,
-  vpsConfigFromEnv,
+  testServerFromEnv,
   type TestRole,
-  type VpsConfig,
-} from '@/lib/backup/vps-database'
+  type TestServer,
+} from '@/lib/backup/test-database'
 
 // The guards, against a real Postgres.
 //
@@ -34,23 +34,23 @@ if (ENABLED) {
     // credentials it has no business holding.
     ;(process as unknown as { loadEnvFile: (path: string) => void }).loadEnvFile('.env')
   } catch {
-    // No .env - vpsConfigFromEnv below fails the suite loudly rather than here.
+    // No .env - testServerFromEnv below fails the suite loudly rather than here.
   }
 }
 const suite = ENABLED ? describe : describe.skip
 
 suite('the ledger guards, against a real database', () => {
-  let config: VpsConfig
+  let server: TestServer
   let role: TestRole
   let client: Client
   const databaseName = `${'cactus_rt_ledger_'}${process.pid}`
   const roleName = `${'cactus_rt_role_ledger_'}${process.pid}`
 
   beforeAll(async () => {
-    config = vpsConfigFromEnv()
-    await dropStaleTestObjects(config)
-    role = await createTestRole(config, roleName)
-    await createTestDatabase(config, databaseName, role)
+    server = testServerFromEnv()
+    await dropStaleTestObjects(server)
+    role = await createTestRole(server, roleName)
+    await createTestDatabase(server, databaseName, role)
 
     // `pg` now reads sslmode=require as full certificate verification, and the
     // server's certificate is issued for the site's own hostname rather than for
@@ -58,7 +58,7 @@ suite('the ledger guards, against a real database', () => {
     // encrypted while asking it not to check a name that cannot match. This is a
     // throwaway database on a server we own; nothing else is reachable from it.
     client = new Client({
-      connectionString: `${connectionUri(config, databaseName, role)}&uselibpqcompat=true`,
+      connectionString: `${connectionUri(server, databaseName, role)}&uselibpqcompat=true`,
     })
     await client.connect()
 
@@ -75,9 +75,9 @@ suite('the ledger guards, against a real database', () => {
 
   afterAll(async () => {
     await client?.end().catch(() => undefined)
-    if (config) {
-      await dropTestDatabase(config, databaseName).catch(() => undefined)
-      await dropTestRole(config, roleName).catch(() => undefined)
+    if (server) {
+      await dropTestDatabase(server, databaseName).catch(() => undefined)
+      await dropTestRole(server, roleName).catch(() => undefined)
     }
   }, 120_000)
 

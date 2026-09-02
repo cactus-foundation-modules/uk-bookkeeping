@@ -9,10 +9,10 @@ import {
   dropStaleTestObjects,
   dropTestDatabase,
   dropTestRole,
-  vpsConfigFromEnv,
+  testServerFromEnv,
   type TestRole,
-  type VpsConfig,
-} from '@/lib/backup/vps-database'
+  type TestServer,
+} from '@/lib/backup/test-database'
 
 // Categories, the accounts behind them, and money held with a supplier.
 //
@@ -35,13 +35,13 @@ if (ENABLED) {
   try {
     ;(process as unknown as { loadEnvFile: (path: string) => void }).loadEnvFile('.env')
   } catch {
-    // No .env - vpsConfigFromEnv below fails the suite loudly rather than here.
+    // No .env - testServerFromEnv below fails the suite loudly rather than here.
   }
 }
 const suite = ENABLED ? describe : describe.skip
 
 suite('categories and the accounts behind them, against a real database', () => {
-  let config: VpsConfig
+  let server: TestServer
   let role: TestRole
   let admin: Client
   const databaseName = `cactus_rt_catacc_${process.pid}`
@@ -67,12 +67,12 @@ suite('categories and the accounts behind them, against a real database', () => 
     readdirSync(migrationsDirectory).filter((name) => name.endsWith('.sql')).sort()
 
   beforeAll(async () => {
-    config = vpsConfigFromEnv()
-    await dropStaleTestObjects(config)
-    role = await createTestRole(config, roleName)
-    await createTestDatabase(config, databaseName, role)
+    server = testServerFromEnv()
+    await dropStaleTestObjects(server)
+    role = await createTestRole(server, roleName)
+    await createTestDatabase(server, databaseName, role)
 
-    const uri = connectionUri(config, databaseName, role)
+    const uri = connectionUri(server, databaseName, role)
     admin = new Client({ connectionString: `${uri}&uselibpqcompat=true` })
     await admin.connect()
     await admin.query('CREATE EXTENSION IF NOT EXISTS pgcrypto')
@@ -102,9 +102,9 @@ suite('categories and the accounts behind them, against a real database', () => 
     const { prisma } = await import('@/lib/db/prisma')
     await prisma.$disconnect().catch(() => undefined)
     await admin?.end().catch(() => undefined)
-    if (config) {
-      await dropTestDatabase(config, databaseName).catch(() => undefined)
-      await dropTestRole(config, roleName).catch(() => undefined)
+    if (server) {
+      await dropTestDatabase(server, databaseName).catch(() => undefined)
+      await dropTestRole(server, roleName).catch(() => undefined)
     }
   }, 120_000)
 

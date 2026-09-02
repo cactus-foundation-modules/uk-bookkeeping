@@ -9,10 +9,10 @@ import {
   dropStaleTestObjects,
   dropTestDatabase,
   dropTestRole,
-  vpsConfigFromEnv,
+  testServerFromEnv,
   type TestRole,
-  type VpsConfig,
-} from '@/lib/backup/vps-database'
+  type TestServer,
+} from '@/lib/backup/test-database'
 import { LEDGER_SQL } from './ledger'
 
 // The posting projection, against a real Postgres.
@@ -38,25 +38,25 @@ if (ENABLED) {
   try {
     ;(process as unknown as { loadEnvFile: (path: string) => void }).loadEnvFile('.env')
   } catch {
-    // No .env - vpsConfigFromEnv below fails the suite loudly rather than here.
+    // No .env - testServerFromEnv below fails the suite loudly rather than here.
   }
 }
 const suite = ENABLED ? describe : describe.skip
 
 suite('the ledger projection, against a real database', () => {
-  let config: VpsConfig
+  let server: TestServer
   let role: TestRole
   let client: Client
   const databaseName = `cactus_rt_ledgerproj_${process.pid}`
   const roleName = `cactus_rt_role_ledgerproj_${process.pid}`
 
   beforeAll(async () => {
-    config = vpsConfigFromEnv()
-    await dropStaleTestObjects(config)
-    role = await createTestRole(config, roleName)
-    await createTestDatabase(config, databaseName, role)
+    server = testServerFromEnv()
+    await dropStaleTestObjects(server)
+    role = await createTestRole(server, roleName)
+    await createTestDatabase(server, databaseName, role)
     client = new Client({
-      connectionString: `${connectionUri(config, databaseName, role)}&uselibpqcompat=true`,
+      connectionString: `${connectionUri(server, databaseName, role)}&uselibpqcompat=true`,
     })
     await client.connect()
     await client.query('CREATE EXTENSION IF NOT EXISTS pgcrypto')
@@ -69,9 +69,9 @@ suite('the ledger projection, against a real database', () => {
 
   afterAll(async () => {
     await client?.end().catch(() => undefined)
-    if (config) {
-      await dropTestDatabase(config, databaseName).catch(() => undefined)
-      await dropTestRole(config, roleName).catch(() => undefined)
+    if (server) {
+      await dropTestDatabase(server, databaseName).catch(() => undefined)
+      await dropTestRole(server, roleName).catch(() => undefined)
     }
   }, 120_000)
 
