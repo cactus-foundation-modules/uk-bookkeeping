@@ -1,6 +1,6 @@
 {
   "name": "uk-bookkeeping",
-  "version": "0.2.32",
+  "version": "0.2.33",
   "tablePrefix": "bk_",
   "description": "UK bookkeeping with double-entry accounts, Making Tax Digital VAT returns and corporation tax. Records income and expenses with evidence, keeps one set of books behind them, and produces profit and loss accounts, balance sheets, VAT returns and a company tax computation from those records.",
   "permissions": [
@@ -14,7 +14,7 @@
     {
       "label": "Bookkeeping",
       "path": "/m/uk-bookkeeping/overview",
-      "icon": "<path d=\"M4 4h11l5 5v11H4z\"/><path d=\"M8 10h8M8 14h8M8 18h5\"/>",
+      "icon": "<path d=\"M5 4.5A2.5 2.5 0 0 1 7.5 2H20v18H7.5A2.5 2.5 0 0 0 5 22z\"/><path d=\"M15.2 7.6a2.9 2.9 0 0 0-5.1 1.9v3.6a2.4 2.4 0 0 1-1.3 2.1h7.9\"/><path d=\"M9.4 11.3h4.3\"/>",
       "permission": "bookkeeping.access"
     }
   ],
