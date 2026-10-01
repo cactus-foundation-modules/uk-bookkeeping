@@ -16,6 +16,14 @@ import { settleBankLine } from '@/modules/uk-bookkeeping/lib/reconcile-actions'
 import { findTransferCandidates } from '@/modules/uk-bookkeeping/lib/transfers'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
 import { VAT_RATE_CODES, type VatRateCode } from '@/modules/uk-bookkeeping/lib/types'
+import { z } from 'zod'
+
+/**
+ * Part payments on a settle: entry id to how much of it this line paid. Shape
+ * only - whether each amount is money, and fits what is still unpaid, is the
+ * settle's own job, because only it knows what is outstanding.
+ */
+const PART_AMOUNTS = z.record(z.string().min(1), z.string()).optional()
 
 export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const gate = await requireBookkeepingUser('bookkeeping.access')
@@ -86,10 +94,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         if (body.differenceVatRateCode && !VAT_RATE_CODES.includes(body.differenceVatRateCode)) {
           return NextResponse.json({ error: 'That VAT rate is not one we recognise.' }, { status: 400 })
         }
+        const amounts = PART_AMOUNTS.safeParse(body.amounts)
+        if (!amounts.success) {
+          return NextResponse.json({ error: 'The amounts for the entries could not be read.' }, { status: 400 })
+        }
         const settled = await settleBankLine(
           id,
           {
             transactionIds: body.transactionIds as string[],
+            amounts: amounts.data,
             differenceCategoryId:
               typeof body.differenceCategoryId === 'string' ? body.differenceCategoryId : null,
             differenceVatRateCode: (body.differenceVatRateCode as VatRateCode) ?? undefined,

@@ -1393,6 +1393,21 @@ function StatementRow({
 }
 
 /**
+ * A part-payment amount as typed, read strictly: a positive figure, at most two
+ * decimal places, and no more than is still outstanding on the entry. Null when
+ * it is not one, which holds the settle back rather than sending the server
+ * something it would only refuse.
+ */
+function readPart(typed: string, outstanding: string): string | null {
+  const cleaned = typed.replace(/[£,\s]/g, '')
+  if (!/^\d{1,10}(\.\d{1,2})?$/.test(cleaned)) return null
+  const value = addStrings(cleaned, '0')
+  if (value === '0.00') return null
+  if (addStrings(outstanding, negated(value)).startsWith('-')) return null
+  return value
+}
+
+/**
  * Settling one bank line against several entries, less what was kept out of it.
  *
  * This is the card-processor case and it is the reason the ordinary matcher
@@ -1423,6 +1438,10 @@ function SettlePanel({
 }) {
   const [view, setView] = useState<{ remaining: string; candidates: SettlementCandidate[] } | null>(null)
   const [picked, setPicked] = useState<Set<string>>(new Set())
+  // What was typed for an entry this line only paid part of - one invoice the
+  // customer paid in two goes, each in its own payout. No entry here means the
+  // whole of what is outstanding, which is the answer nearly every time.
+  const [parts, setParts] = useState<Record<string, string>>({})
   const [find, setFind] = useState('')
   // Null means "not chosen yet", which is not the same as "chosen nothing": the
   // default is worked out below rather than written into state by an effect,
@@ -1471,9 +1490,26 @@ function SettlePanel({
       )
     : view.candidates
 
-  const total = view.candidates
-    .filter((candidate) => picked.has(candidate.transactionId))
-    .reduce((sum, candidate) => addStrings(sum, candidate.contribution), '0.00')
+  // How much of each picked entry this line is paying, signed the way the bank
+  // sees it. Null where what was typed is not a usable amount.
+  const appliedFor = (candidate: SettlementCandidate): string | null => {
+    const typed = parts[candidate.transactionId]
+    const value = typed === undefined ? candidate.outstanding : readPart(typed, candidate.outstanding)
+    if (value === null) return null
+    return candidate.direction === 'income' ? value : negated(value)
+  }
+  const pickedCandidates = view.candidates.filter((candidate) => picked.has(candidate.transactionId))
+  const badPart = pickedCandidates.some((candidate) => appliedFor(candidate) === null)
+  const total = pickedCandidates.reduce((sum, candidate) => addStrings(sum, appliedFor(candidate) ?? '0.00'), '0.00')
+  // Only the ones that differ from the whole are sent: an entry not named is
+  // taken whole by the server, so the ordinary case sends nothing extra.
+  const amounts: Record<string, string> = {}
+  for (const candidate of pickedCandidates) {
+    const typed = parts[candidate.transactionId]
+    if (typed === undefined) continue
+    const value = readPart(typed, candidate.outstanding)
+    if (value !== null && value !== candidate.outstanding) amounts[candidate.transactionId] = value
+  }
   // Positive: less arrived than these come to, so somebody kept the difference.
   const difference = addStrings(total, negated(view.remaining))
   const settled = difference === '0.00' || difference === '-0.00'
@@ -1507,47 +1543,83 @@ function SettlePanel({
           />
 
           <div style={{ maxHeight: '15rem', overflowY: 'auto', border: '1px solid var(--color-border)', borderRadius: 6 }}>
-            {shown.map((candidate) => (
-              <label
-                key={candidate.transactionId}
-                style={{
-                  display: 'flex',
-                  gap: '0.5rem',
-                  alignItems: 'baseline',
-                  padding: '0.375rem 0.5rem',
-                  borderBottom: '1px solid var(--color-border)',
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={picked.has(candidate.transactionId)}
-                  onChange={(event) => {
-                    const next = new Set(picked)
-                    if (event.target.checked) next.add(candidate.transactionId)
-                    else next.delete(candidate.transactionId)
-                    setPicked(next)
+            {shown.map((candidate) => {
+              const isPicked = picked.has(candidate.transactionId)
+              const partIsBad = isPicked && appliedFor(candidate) === null
+              return (
+                <div
+                  key={candidate.transactionId}
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: '0.5rem',
+                    alignItems: 'baseline',
+                    padding: '0.375rem 0.5rem',
+                    borderBottom: '1px solid var(--color-border)',
                   }}
-                />
-                <span style={{ whiteSpace: 'nowrap' }}>{formatDate(candidate.date)}</span>
-                <a
-                  href={`/${adminPath}/m/uk-bookkeeping/transactions/${candidate.transactionId}`}
-                  style={{ flex: 1 }}
                 >
-                  {candidate.counterparty}
-                </a>
-                {candidate.reference && (
-                  <span style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
-                    {candidate.reference}
-                  </span>
-                )}
-                {candidate.status === 'draft' && (
-                  <span style={{ fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-warning, var(--color-text))' }}>
-                    waiting for review
-                  </span>
-                )}
-                <span style={{ whiteSpace: 'nowrap' }}>{poundsFromString(candidate.contribution)}</span>
-              </label>
-            ))}
+                  <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'baseline', flex: 1, minWidth: 0 }}>
+                    <input
+                      type="checkbox"
+                      checked={isPicked}
+                      onChange={(event) => {
+                        const next = new Set(picked)
+                        if (event.target.checked) next.add(candidate.transactionId)
+                        else next.delete(candidate.transactionId)
+                        setPicked(next)
+                        // Unticked and ticked again starts from the whole amount,
+                        // not from a part typed for a payout it turned out not to be.
+                        if (!event.target.checked && parts[candidate.transactionId] !== undefined) {
+                          const rest = { ...parts }
+                          delete rest[candidate.transactionId]
+                          setParts(rest)
+                        }
+                      }}
+                    />
+                    <span style={{ whiteSpace: 'nowrap' }}>{formatDate(candidate.date)}</span>
+                    <a
+                      href={`/${adminPath}/m/uk-bookkeeping/transactions/${candidate.transactionId}`}
+                      style={{ flex: 1 }}
+                    >
+                      {candidate.counterparty}
+                    </a>
+                    {candidate.reference && (
+                      <span style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
+                        {candidate.reference}
+                      </span>
+                    )}
+                    {candidate.status === 'draft' && (
+                      <span style={{ fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-warning, var(--color-text))' }}>
+                        waiting for review
+                      </span>
+                    )}
+                  </label>
+                  {isPicked ? (
+                    <span style={{ display: 'flex', gap: '0.375rem', alignItems: 'baseline', whiteSpace: 'nowrap' }}>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        aria-label={`How much of ${candidate.counterparty} this line paid`}
+                        aria-invalid={partIsBad}
+                        value={parts[candidate.transactionId] ?? candidate.outstanding}
+                        onChange={(event) => setParts({ ...parts, [candidate.transactionId]: event.target.value })}
+                        style={{
+                          ...controlStyle,
+                          width: '6.5rem',
+                          textAlign: 'right',
+                          borderColor: partIsBad ? 'var(--color-danger, var(--color-border))' : 'var(--color-border)',
+                        }}
+                      />
+                      <span style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
+                        of {poundsFromString(candidate.contribution)}
+                      </span>
+                    </span>
+                  ) : (
+                    <span style={{ whiteSpace: 'nowrap' }}>{poundsFromString(candidate.contribution)}</span>
+                  )}
+                </div>
+              )
+            })}
           </div>
 
           <p style={{ margin: '0.5rem 0 0.375rem' }}>
@@ -1564,6 +1636,20 @@ function SettlePanel({
               </strong>
             )}
           </p>
+
+          {picked.size > 0 && (
+            <p style={{ margin: '0 0 0.375rem', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
+              If this line only paid part of one, change its amount. The rest stays unpaid on it, ready for the payout that
+              brought the rest.
+            </p>
+          )}
+
+          {badPart && (
+            <p role="alert" style={{ margin: '0 0 0.375rem', color: 'var(--color-danger, var(--color-text))' }}>
+              One of those amounts will not do: it has to be more than nothing, and no more than is still unpaid on that
+              entry.
+            </p>
+          )}
 
           {!settled && picked.size > 0 && (
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '0.5rem' }}>
@@ -1599,11 +1685,12 @@ function SettlePanel({
           <button
             type="button"
             className="btn btn-sm btn-primary"
-            disabled={busy || picked.size === 0 || (!settled && !differenceCategoryId)}
+            disabled={busy || picked.size === 0 || badPart || (!settled && !differenceCategoryId)}
             onClick={() =>
               onSettle({
                 action: 'settle',
                 transactionIds: [...picked],
+                amounts,
                 differenceCategoryId: settled ? null : differenceCategoryId,
                 differenceVatRateCode,
                 leaveForReview,

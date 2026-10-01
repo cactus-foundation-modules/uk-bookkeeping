@@ -476,4 +476,117 @@ suite('importing a statement, against a real database', () => {
     const after = await lib.listBankTransactions({ bankAccountId })
     expect(after.rows.find((row) => row.id === line.id)!.status).toBe('unreconciled')
   })
+
+  it('settles one invoice paid in two goes, each in its own payout', async () => {
+    const sales = await lib.getCategoryByCode('sales')
+    const charges = await lib.getCategoryByCode('bank-charges')
+    const delta = await lib.createTransaction(
+      {
+        direction: 'income',
+        taxPointDate: '2026-08-05',
+        counterparty: 'Delta Ltd',
+        lines: [
+          {
+            categoryId: sales!.id,
+            vatTreatment: 'domestic',
+            vatRateCode: 'zero',
+            vatRatePercent: '0.00',
+            netAmount: '300.00',
+            vatAmount: '0.00',
+            grossAmount: '300.00',
+          },
+        ],
+      },
+      null,
+    )
+
+    // £300 invoiced. The customer paid £150 twice, and each payment reached the
+    // bank in its own payout, less £4.50 of fees.
+    const payouts = await lib.previewStatement(
+      {
+        filename: 'payouts-split.csv',
+        bytes: Buffer.from(
+          [
+            'Date,Description,Paid in,Paid out',
+            '06/08/2026,SQUARE PAYOUT T3AAA,145.50,',
+            '09/08/2026,SQUARE PAYOUT T3BBB,145.50,',
+          ].join('\n'),
+          'utf8',
+        ),
+      },
+      { bankAccountId },
+    )
+    await lib.commitStatement(
+      {
+        filename: 'payouts-split.csv',
+        format: 'csv',
+        bankAccountId,
+        meta: payouts.meta,
+        mapping: payouts.mapping,
+        lines: payouts.lines,
+      },
+      null,
+    )
+    const open = (await lib.listBankTransactions({ bankAccountId, status: 'unreconciled' })).rows
+    const onDay = (day: string) => open.find((row) => row.date.toISOString().slice(0, 10) === day)!
+    const first = onDay('2026-08-06')
+    const second = onDay('2026-08-09')
+
+    // An amount for an entry that was not picked is refused, not ignored.
+    await expect(
+      lib.settleBankLine(first.id, { transactionIds: [delta.id], amounts: { 'not-picked': '1.00' } }, null),
+    ).rejects.toThrow(/not picked/)
+
+    const settledFirst = await lib.settleBankLine(
+      first.id,
+      {
+        transactionIds: [delta.id],
+        amounts: { [delta.id]: '150.00' },
+        differenceCategoryId: charges!.id,
+        differenceVatRateCode: 'exempt',
+      },
+      null,
+    )
+    expect(settledFirst.difference).toBe('-4.50')
+
+    // The second payout is offered exactly what is left of the invoice.
+    const view = await lib.listSettlementCandidates(second.id)
+    const offered = view.candidates.find((candidate) => candidate.transactionId === delta.id)!
+    expect(offered.outstanding).toBe('150.00')
+
+    // More than is left is refused, and changes nothing.
+    await expect(
+      lib.settleBankLine(
+        second.id,
+        {
+          transactionIds: [delta.id],
+          amounts: { [delta.id]: '200.00' },
+          differenceCategoryId: charges!.id,
+          differenceVatRateCode: 'exempt',
+        },
+        null,
+      ),
+    ).rejects.toThrow(/still unpaid/)
+
+    const settledSecond = await lib.settleBankLine(
+      second.id,
+      { transactionIds: [delta.id], differenceCategoryId: charges!.id, differenceVatRateCode: 'exempt' },
+      null,
+    )
+    expect(settledSecond.difference).toBe('-4.50')
+
+    const after = await lib.listBankTransactions({ bankAccountId })
+    expect(after.rows.find((row) => row.id === first.id)!.status).toBe('reconciled')
+    expect(after.rows.find((row) => row.id === second.id)!.status).toBe('reconciled')
+
+    // Paid in full now, so a third payout would not be offered it at all.
+    const third = await lib.listSettlementCandidates(second.id)
+    expect(third.candidates.some((candidate) => candidate.transactionId === delta.id)).toBe(false)
+
+    // The entry records one settled date, the first payout's. The ledger posts an
+    // entry's money side on a single date, and the earlier one is the safe side
+    // of that for VAT on cash accounting.
+    const paid = (await lib.listTransactions({ counterparty: 'Delta Ltd' })).rows[0]!
+    expect(paid.settled_date?.toISOString().slice(0, 10)).toBe('2026-08-06')
+  })
 })

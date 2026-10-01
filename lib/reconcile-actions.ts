@@ -4,7 +4,7 @@ import type { SessionUser } from '@/lib/auth/session'
 import { appendAudit } from './audit'
 import { BookkeepingError, NotFoundError } from './errors'
 import { assertDatesNotClosed, loadClosedRanges } from './guards'
-import { formatMoney, formatPounds, netFromGross, ZERO } from './money'
+import { formatMoney, formatPounds, isMoneyString, netFromGross, toMoney, ZERO } from './money'
 import {
   confidentMatch,
   refreshBankTransactionStatuses,
@@ -654,6 +654,13 @@ export async function listSettlementCandidates(
 
 export type SettleInput = {
   transactionIds: string[]
+  /**
+   * How much of an entry this line paid, for an entry it only paid part of -
+   * one invoice the customer paid in two goes, each arriving in its own payout.
+   * Keyed by entry id. An entry not named here is taken whole: whatever is
+   * still outstanding on it.
+   */
+  amounts?: Record<string, string>
   /** Where the difference goes. Only needed when there is one. */
   differenceCategoryId?: string | null
   differenceVatRateCode?: VatRateCode
@@ -727,6 +734,12 @@ export async function settleBankLine(
   `
   const byId = new Map(entries.map((row) => [row.id, row]))
 
+  for (const id of Object.keys(input.amounts ?? {})) {
+    if (!chosen.includes(id)) {
+      throw new BookkeepingError('invalid', 'An amount was given for an entry that was not picked.')
+    }
+  }
+
   const pairs: { transactionId: string; amount: Money }[] = []
   let picked: Money = ZERO
 
@@ -753,11 +766,31 @@ export async function settleBankLine(
         `The entry for ${entry.counterparty} is already accounted for in full.`,
       )
     }
+    // The whole of what is left, unless this line only paid part of it. The rest
+    // stays outstanding on the entry, so the next payout is offered exactly
+    // that much of it and no more.
+    let applied = outstanding
+    const part = input.amounts?.[id]
+    if (part !== undefined) {
+      if (!isMoneyString(part)) {
+        throw new BookkeepingError('invalid', `The amount for ${entry.counterparty} is not an amount of money.`)
+      }
+      applied = toMoney(part)
+      if (applied.lessThanOrEqualTo(0)) {
+        throw new BookkeepingError('invalid', `The amount for ${entry.counterparty} has to be more than nothing.`)
+      }
+      if (applied.greaterThan(outstanding)) {
+        throw new BookkeepingError(
+          'invalid',
+          `Only ${formatPounds(outstanding)} of the entry for ${entry.counterparty} is still unpaid, so this line cannot have paid ${formatPounds(applied)} of it.`,
+        )
+      }
+    }
     // Signed the way the bank saw it, so a refund netted off a payout pulls the
     // total down instead of pushing it up.
     pairs.push({
       transactionId: id,
-      amount: entry.direction === 'income' ? outstanding : outstanding.negated(),
+      amount: entry.direction === 'income' ? applied : applied.negated(),
     })
     picked = picked.plus(pairs[pairs.length - 1]!.amount)
   }
@@ -858,6 +891,7 @@ export async function settleBankLine(
     summary: `${chosen.length} entr${chosen.length === 1 ? 'y' : 'ies'} settled against one statement line of ${formatPounds(line.amount)}${shortfall.isZero() ? '' : `, with ${formatPounds(shortfall.abs())} of difference recorded`}`,
     detail: {
       transactionIds: chosen,
+      partAmounts: input.amounts && Object.keys(input.amounts).length > 0 ? input.amounts : null,
       picked: formatMoney(picked),
       arrived: formatMoney(remaining),
       difference: formatMoney(shortfall.negated()),
