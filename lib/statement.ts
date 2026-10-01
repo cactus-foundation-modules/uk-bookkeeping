@@ -167,7 +167,14 @@ const NOISE_PATTERNS: RegExp[] = [
   /\bTide Card\s*:\s*[*\s\d]+/gi,
   /\bCard\s*(?:no\.?|number)?\s*:?\s*(?:\*{4}[\s*]*){2,}\d{4}/gi,
   /\bOn\s+\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}\b/gi,
-  /\bRef(?:erence)?\s*:?\s*/gi,
+  // A card payment in another currency: "Amount: USD -7.23. Exchange rate:
+  // 1.324176." Different every time, so left in it makes every month's Vercel
+  // bill a new supplier.
+  /\bAmount\s*:\s*[A-Z]{3}\s*-?[\d.,]+\.?\s*(?:Exchange rate\s*:\s*[\d.]+\.?)?/gi,
+  // How the money moved, which some banks print in brackets after the name:
+  // "SQUARE (Faster Payments)", "Chris Taylor-Guest (P2P Payment)". Not who.
+  /\((?:Faster Payments?|P2P Payments?|Direct Debit|Standing Order|Bank Transfer|BACS|CHAPS|Card Payment)\)/gi,
+  /\bRef(?:erence)?(?![a-z])\.?\s*:?\s*/gi,
 ]
 
 const TRAILING_JUNK = /[\s,;:\-–/|]+$/
@@ -183,7 +190,8 @@ export function readCounterparty(details: string): { counterparty: string; refer
   const collapsed = details.replace(/\s+/g, ' ').trim()
 
   let reference: string | null = null
-  const referenceMatch = /\bref(?:erence)?\s*:?\s*([^,/|]+)/i.exec(collapsed)
+  // "Ref" and "Reference", but not the start of "Refund" or "Refurbishment".
+  const referenceMatch = /\bref(?:erence)?(?![a-z])\.?\s*:?\s*([^,/|]+)/i.exec(collapsed)
   if (referenceMatch) reference = referenceMatch[1]!.trim().replace(TRAILING_JUNK, '') || null
 
   let who = collapsed
@@ -191,6 +199,12 @@ export function readCounterparty(details: string): { counterparty: string; refer
   // reference, whichever comes first.
   const cut = /\s(?:-|–|\/)\s/.exec(who)
   if (cut && cut.index > 2) who = who.slice(0, cut.index)
+  // And before the reference itself, where the bank printed one with no
+  // separator ahead of it. What follows "Reference:" is what the payment was
+  // for - an order number, an invoice - and a different one every time, so left
+  // on the name it turns one supplier into thirty.
+  const referenceAt = referenceMatch ? who.indexOf(referenceMatch[0]) : -1
+  if (referenceAt > 2) who = who.slice(0, referenceAt)
 
   for (const pattern of NOISE_PATTERNS) who = who.replace(pattern, ' ')
   who = who.replace(/\s+/g, ' ').replace(TRAILING_JUNK, '').trim()

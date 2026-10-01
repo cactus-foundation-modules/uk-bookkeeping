@@ -15,7 +15,32 @@ import { extractPdfText } from './pdf/text'
 // A minimal PDF, built the way the ones banks send are built
 // ---------------------------------------------------------------------------
 
-type Cell = { x: number; y: number; text: string; size?: number; hex?: boolean }
+type Cell = {
+  x: number
+  y: number
+  text: string
+  size?: number
+  hex?: boolean
+  /**
+   * Shown as separate strings one after another inside one text object, with no
+   * repositioning between them - the way a generator writes a word that switches
+   * font for one glyph. When set, these are what is drawn, and `text` only says
+   * what they should read as.
+   */
+  pieces?: string[]
+}
+
+type BuildOptions = {
+  /**
+   * Give the font advance widths: every glyph half an em, so a run of n
+   * characters at size s is n * s / 2 points wide. Without them the reader has
+   * nothing to measure with, which is its own case worth keeping.
+   */
+  widths?: boolean
+}
+
+/** The glyph code for a character. The ligature has a code of its own, mapped in the CMap. */
+const glyphCode = (character: string): number => (character === '\uFB03' ? 0x0100 : character.charCodeAt(0) & 0xff)
 
 /**
  * A one-page PDF with a Type0 font, Identity-H encoding and a ToUnicode CMap.
@@ -25,16 +50,16 @@ type Cell = { x: number; y: number; text: string; size?: number; hex?: boolean }
  * the CMap, so a reader that mishandles a code silently drops the glyph rather
  * than printing something obviously wrong.
  */
-function buildPdf(cells: Cell[], pages: Cell[][] = []): Buffer {
+function buildPdf(cells: Cell[], pages: Cell[][] = [], options: BuildOptions = {}): Buffer {
   const allPages = [cells, ...pages]
 
   const encode = (text: string, hex: boolean): string => {
     if (hex) {
-      return `<${[...text].map((c) => c.charCodeAt(0).toString(16).padStart(4, '0')).join('')}>`
+      return `<${[...text].map((c) => glyphCode(c).toString(16).padStart(4, '0')).join('')}>`
     }
     // A literal string in a two-byte encoding still has to escape the bytes that
     // mean something to the syntax, which is exactly where a naive reader trips.
-    const bytes = [...text].flatMap((c) => [0x00, c.charCodeAt(0) & 0xff])
+    const bytes = [...text].flatMap((c) => [glyphCode(c) >> 8, glyphCode(c) & 0xff])
     const escaped = bytes
       .map((b) => {
         const char = String.fromCharCode(b)
@@ -49,6 +74,15 @@ function buildPdf(cells: Cell[], pages: Cell[][] = []): Buffer {
   const contentFor = (pageCells: Cell[]): string =>
     pageCells
       .map((cell) => {
+        if (cell.pieces) {
+          return [
+            'BT',
+            `/F1 ${cell.size ?? 8} Tf`,
+            `1 0 0 1 ${cell.x} ${cell.y} Tm`,
+            ...cell.pieces.map((piece) => `${encode(piece, false)} Tj`),
+            'ET',
+          ].join('\n')
+        }
         // Written as a TJ array with a kern between the halves, so the reader has
         // to put a text run back together from pieces rather than reading one
         // string - which is how a real generator writes a line.
@@ -70,6 +104,7 @@ function buildPdf(cells: Cell[], pages: Cell[][] = []): Buffer {
     '/CMapName /Adobe-Identity-UCS def /CMapType 2 def',
     '1 begincodespacerange <0000> <FFFF> endcodespacerange',
     '1 beginbfrange <0020> <00FF> <0020> endbfrange',
+    '1 beginbfchar <0100> <FB03> endbfchar',
     'endcmap CMapName currentdict /CMap defineresource pop end end',
   ].join('\n')
 
@@ -79,7 +114,7 @@ function buildPdf(cells: Cell[], pages: Cell[][] = []): Buffer {
   objects[1] = '<< /Type /Catalog /Pages 2 0 R >>'
   objects[2] = `<< /Type /Pages /Kids [${pageObjectNumbers.map((n) => `${n} 0 R`).join(' ')}] /Count ${allPages.length} >>`
   objects[3] = `<< /Type /Font /Subtype /Type0 /BaseFont /Test-Regular /Encoding /Identity-H /DescendantFonts [4 0 R] /ToUnicode 5 0 R >>`
-  objects[4] = '<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Test-Regular /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> >>'
+  objects[4] = `<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Test-Regular${options.widths ? ' /W [32 256 500]' : ''} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> >>`
   objects[5] = `<< /Length ${cmap.length} >>\nstream\n${cmap}\nendstream`
 
   allPages.forEach((pageCells, index) => {
@@ -331,6 +366,144 @@ describe('statements running over more than one page', () => {
   })
 })
 
+/** Where a figure starts when it is set right-aligned to `edge`, under the test font's half-em glyphs. */
+const alignRight = (edge: number, text: string, size = 8): number => edge - (text.length * size) / 2
+
+/**
+ * A statement laid out the way Monzo lays one out, which is everything the
+ * column reader used to assume turned upside down:
+ *
+ * - the header is printed once, on the first page, and the table runs on down
+ *   the next pages without it;
+ * - figures are right-aligned under headers that start well to their left, so
+ *   a short figure's left edge is past the midpoint between two headers;
+ * - descriptions are centred on the dated row, one line above and one below,
+ *   and one of them carries on over the page break;
+ * - a merchant's town and country are placed as separate pieces far enough
+ *   right to cross into the amount column;
+ * - "Office" is printed as "O", a ligature glyph in another font, then "ce".
+ *
+ * Printed newest first. Running balance from 100.00.
+ */
+function monzoStyleStatement(): Buffer {
+  const money = (y: number, amount: string, balance: string): Cell[] => [
+    { x: alignRight(440, amount), y, text: amount },
+    { x: alignRight(525, balance), y, text: balance },
+  ]
+  return buildPdf(
+    [
+      { x: 280, y: 800, text: 'Business Account statement', size: 14 },
+      { x: 359, y: 780, text: '01/09/2026 - 30/09/2026' },
+      { x: 63, y: 740, text: 'Sort code: 04-00-06' },
+      { x: 63, y: 726, text: 'Account number: 12345678' },
+
+      { x: 70, y: 600, text: 'Date', size: 10 },
+      { x: 153, y: 600, text: 'Description', size: 10 },
+      { x: 380, y: 600, text: '(GBP) Amount', size: 10 },
+      { x: 460, y: 600, text: '(GBP) Balance', size: 10 },
+
+      { x: 70, y: 570, text: '30/09/2026' },
+      { x: 153, y: 570, text: 'OVHcloud London GBR' },
+      ...money(570, '-4.68', '154.49'),
+
+      { x: 70, y: 540.5, text: '29/09/2026' },
+      { x: 153, y: 540.5, text: 'A Customer (P2P Payment)' },
+      ...money(540.5, '-60.00', '159.17'),
+
+      { x: 153, y: 511, text: 'SQUARE (Faster Payments) Reference:' },
+      { x: 70, y: 504, text: '28/09/2026' },
+      ...money(504, '129.84', '219.17'),
+    ],
+    [
+      [
+        // The rest of the line above, carried over the page break.
+        { x: 153, y: 790, text: 'T3RM7VFYS3QNVAZ' },
+
+        { x: 70, y: 760.5, text: '28/09/2026' },
+        { x: 153, y: 760.5, text: 'A Customer (P2P Payment)' },
+        ...money(760.5, '4.05', '89.33'),
+
+        { x: 153, y: 731, text: 'Dynamic Office Seating Ltd (Faster', pieces: ['Dynamic O', '\uFB03', 'ce Seating Ltd (Faster'] },
+        { x: 70, y: 724, text: '27/09/2026' },
+        ...money(724, '-46.80', '85.28'),
+        { x: 153, y: 717, text: 'Payments) Reference: DESKWELL 8688' },
+
+        { x: 153, y: 687.5, text: 'SQUARE (Faster Payments) Reference:' },
+        { x: 70, y: 680.5, text: '26/09/2026' },
+        ...money(680.5, '47.08', '132.08'),
+        { x: 153, y: 673.5, text: 'T3EVF0EBV1772GN' },
+
+        { x: 70, y: 644, text: '25/09/2026' },
+        { x: 153, y: 644, text: 'ANTHROPIC* CLAUDE SUB ' },
+        { x: 241, y: 644, text: 'DUBLIN 4 ' },
+        { x: 277, y: 644, text: 'IRL' },
+        ...money(644, '-15.00', '85.00'),
+
+        // The bank's small print, close under the last line and running the
+        // width of the page.
+        { x: 70, y: 620, text: 'Example Bank Limited is a company registered in England. Registered' },
+        { x: 360, y: 620, text: 'office: 1 High Street' },
+      ],
+      [
+        { x: 63, y: 650, text: 'Important information about compensation' },
+        { x: 118, y: 620, text: "We're covered by the FSCS. " },
+        { x: 246, y: 620, text: 'The FSCS compensate depositors if a bank fails.' },
+      ],
+    ],
+    { widths: true },
+  )
+}
+
+describe('a statement laid out like Monzo', () => {
+  const parsed = parseStatementPdf(monzoStyleStatement())
+  const on = (date: string, amount: string) => parsed.lines.find((line) => line.date === date && line.amount === amount)!
+
+  it('reads every line on every page, and ties back to the running balance', () => {
+    expect(parsed.lines).toHaveLength(7)
+    expect(parsed.warnings).toEqual([])
+  })
+
+  it('puts a short right-aligned figure in its own column, not the next one', () => {
+    expect(on('2026-09-26', '47.08').balance).toBe('132.08')
+    expect(on('2026-09-28', '4.05').balance).toBe('89.33')
+    expect(on('2026-09-30', '-4.68').balance).toBe('154.49')
+  })
+
+  it('keeps the pieces of a long description out of the amount column', () => {
+    const anthropic = on('2026-09-25', '-15.00')
+    expect(anthropic.details).toBe('ANTHROPIC* CLAUDE SUB DUBLIN 4 IRL')
+  })
+
+  it('puts a word printed in pieces back together', () => {
+    const supplier = on('2026-09-27', '-46.80')
+    expect(supplier.details).toBe('Dynamic Office Seating Ltd (Faster Payments) Reference: DESKWELL 8688')
+    expect(supplier.counterparty).toBe('Dynamic Office Seating Ltd')
+    expect(supplier.reference).toBe('DESKWELL 8688')
+  })
+
+  it('finishes a description that ran over the page on the line it started on', () => {
+    expect(on('2026-09-28', '129.84').details).toBe('SQUARE (Faster Payments) Reference: T3RM7VFYS3QNVAZ')
+    expect(on('2026-09-28', '4.05').details).toBe('A Customer (P2P Payment)')
+  })
+
+  it('leaves the small print and the terms out of everybody', () => {
+    for (const line of parsed.lines) {
+      expect(line.details).not.toMatch(/registered|office: 1 High|FSCS/i)
+    }
+  })
+
+  it('puts the lines in the order they happened', () => {
+    expect(parsed.lines.map((line) => line.date)).toEqual([
+      '2026-09-25', '2026-09-26', '2026-09-27', '2026-09-28', '2026-09-28', '2026-09-29', '2026-09-30',
+    ])
+  })
+
+  it('reads the statement period printed under the title', () => {
+    expect(parsed.meta.periodStart).toBe('2026-09-01')
+    expect(parsed.meta.periodEnd).toBe('2026-09-30')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // The small parsers underneath
 // ---------------------------------------------------------------------------
@@ -392,5 +565,27 @@ describe('readCounterparty', () => {
 
   it('would rather return too much than trim a name away to nothing', () => {
     expect(readCounterparty('A - B').counterparty).toBe('A - B')
+  })
+
+  it('stops the name where the reference starts, separator or not', () => {
+    const read = readCounterparty('SQUARE (Faster Payments) Reference: T3EVF0EBV1772GN')
+    expect(read.counterparty).toBe('SQUARE')
+    expect(read.reference).toBe('T3EVF0EBV1772GN')
+  })
+
+  it('leaves out how the money moved', () => {
+    expect(readCounterparty('A Customer (P2P Payment)').counterparty).toBe('A Customer')
+  })
+
+  it('leaves out the foreign currency note, which changes every month', () => {
+    expect(readCounterparty('FLY.IO SAN FRANCISCO USA Amount: USD -7.23. Exchange rate: 1.324176.').counterparty).toBe(
+      'FLY.IO SAN FRANCISCO USA',
+    )
+  })
+
+  it('does not mistake a refund for a reference', () => {
+    const read = readCounterparty('AMAZON REFUND')
+    expect(read.counterparty).toBe('AMAZON REFUND')
+    expect(read.reference).toBeNull()
   })
 })

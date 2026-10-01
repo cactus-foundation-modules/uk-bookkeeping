@@ -83,24 +83,38 @@ function decode(font: PdfFont | undefined, bytes: string): string {
   // A subset font routinely maps its spare glyphs to U+0000. That is the CMap
   // saying "no character", not a character - and a NUL carried into the text is
   // invisible on screen and matches nothing, which is the worst way to be wrong.
-  return out.replace(/\u0000/g, '')
+  //
+  // A typographic ligature is one glyph standing for two or three letters, and a
+  // CMap faithfully maps it to the single ligature character. On screen "Oﬃce"
+  // and "Office" look identical; to every search, match and comparison after this
+  // they are different words, so the letters go back in.
+  return out.replace(/\u0000/g, '').replace(/[\uFB00-\uFB06]/g, (ligature) => ligature.normalize('NFKC'))
 }
 
-/** How far a run of character codes advances the line, in points. */
-function advanceOf(font: PdfFont | undefined, bytes: string, size: number): number {
+/** Character and word spacing, as Tc and Tw set them: added after every glyph, and after every space. */
+type Spacing = { character: number; word: number }
+
+/** How far a run of character codes advances the line, in text space. */
+function advanceOf(font: PdfFont | undefined, bytes: string, size: number, spacing: Spacing): number {
   if (!font || font.widths.size === 0) return 0
   let total = 0
+  let extra = 0
   if (font.twoByte) {
     for (let i = 0; i + 1 < bytes.length; i += 2) {
       const code = (bytes.charCodeAt(i) << 8) | bytes.charCodeAt(i + 1)
       total += font.widths.get(code) ?? font.defaultWidth
+      extra += spacing.character
     }
   } else {
     for (const character of bytes) {
-      total += font.widths.get(character.charCodeAt(0)) ?? font.defaultWidth
+      const code = character.charCodeAt(0)
+      total += font.widths.get(code) ?? font.defaultWidth
+      // Word spacing applies to the single-byte space and nothing else - not to
+      // a two-byte code that happens to be 32, which the spec is explicit about.
+      extra += spacing.character + (code === 32 ? spacing.word : 0)
     }
   }
-  return (total / 1000) * size
+  return (total / 1000) * size + extra
 }
 
 function extractPage(tokens: PdfToken[], fonts: Map<string, PdfFont>, page: number): PdfTextItem[] {
@@ -113,6 +127,7 @@ function extractPage(tokens: PdfToken[], fonts: Map<string, PdfFont>, page: numb
   let fontName: string | null = null
   let fontSize = 0
   let leading = 0
+  const spacing: Spacing = { character: 0, word: 0 }
 
   const operands: PdfToken[] = []
 
@@ -130,6 +145,16 @@ function extractPage(tokens: PdfToken[], fonts: Map<string, PdfFont>, page: numb
       text,
       width: advance * Math.abs(placed[0] || 1),
     })
+  }
+
+  // Showing text moves the pen. The next run in the same text object starts
+  // where this one ended, not where this one began - and a generator that
+  // switches font for one glyph (a ligature, a symbol, a bold word) writes
+  // exactly that: "Dynamic O", then "ﬃ" in another font, then "ce Seating" with
+  // no repositioning between them. Without this, all three report the same x and
+  // the line can no longer be put back together.
+  const advancePen = (advance: number): void => {
+    if (advance) textMatrix = multiply([1, 0, 0, 1, advance, 0], textMatrix)
   }
 
   const nextLine = (by: number): void => {
@@ -169,6 +194,12 @@ function extractPage(tokens: PdfToken[], fonts: Map<string, PdfFont>, page: numb
       case 'TL':
         leading = numbers[0] ?? leading
         break
+      case 'Tc':
+        spacing.character = numbers[0] ?? spacing.character
+        break
+      case 'Tw':
+        spacing.word = numbers[0] ?? spacing.word
+        break
       case 'Tm':
         if (numbers.length >= 6) {
           lineMatrix = numbers.slice(-6) as Matrix
@@ -190,15 +221,25 @@ function extractPage(tokens: PdfToken[], fonts: Map<string, PdfFont>, page: numb
       case 'Tj': {
         const font = fonts.get(fontName ?? '')
         const raw = args.filter((a) => a.t === 'str').map((a) => a.v).join('')
-        emit(decode(font, raw), advanceOf(font, raw, fontSize))
+        const advance = advanceOf(font, raw, fontSize, spacing)
+        emit(decode(font, raw), advance)
+        advancePen(advance)
         break
       }
       case "'":
       case '"': {
+        // The double-quote form sets word and character spacing before it shows
+        // the string: `aw ac string "`.
+        if (token.v === '"' && numbers.length >= 2) {
+          spacing.word = numbers[0]!
+          spacing.character = numbers[1]!
+        }
         nextLine(-leading)
         const font = fonts.get(fontName ?? '')
         const raw = args.filter((a) => a.t === 'str').map((a) => a.v).join('')
-        emit(decode(font, raw), advanceOf(font, raw, fontSize))
+        const advance = advanceOf(font, raw, fontSize, spacing)
+        emit(decode(font, raw), advance)
+        advancePen(advance)
         break
       }
       case 'TJ': {
@@ -208,14 +249,19 @@ function extractPage(tokens: PdfToken[], fonts: Map<string, PdfFont>, page: numb
         for (const arg of args) {
           if (arg.t === 'str') {
             text += decode(font, arg.v)
-            advance += advanceOf(font, arg.v, fontSize)
+            advance += advanceOf(font, arg.v, fontSize, spacing)
           } else if (arg.t === 'num') {
             // A kern is a displacement in thousandths of an em, subtracted.
             advance -= (arg.v / 1000) * fontSize
             if (arg.v <= -SPACE_KERN && text && !text.endsWith(' ')) text += ' '
           }
         }
-        emit(text, advance)
+        // A font with no widths cannot be measured, and its kerns alone are not
+        // an advance: moving the pen by them would put the next run somewhere it
+        // is not.
+        const measured = font !== undefined && font.widths.size > 0
+        emit(text, measured ? advance : 0)
+        if (measured) advancePen(advance)
         break
       }
       default:

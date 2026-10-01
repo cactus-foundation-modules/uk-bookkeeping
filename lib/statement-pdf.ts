@@ -10,7 +10,7 @@ import {
   type StatementLine,
   type StatementMeta,
 } from './statement'
-import { extractPdfText, type PdfTextRow } from './pdf/text'
+import { extractPdfText, type PdfTextItem, type PdfTextRow } from './pdf/text'
 
 // Reading the table out of a PDF bank statement.
 //
@@ -70,8 +70,15 @@ function headerKey(text: string): ColumnKey | null {
   return null
 }
 
-type Column = { key: ColumnKey; x: number }
+type Column = {
+  key: ColumnKey
+  x: number
+  /** Where the header text ends, when the font told us how wide it is. */
+  right: number | null
+}
 type HeaderRow = { row: PdfTextRow; columns: Column[] }
+
+const MONEY_COLUMNS: ReadonlySet<ColumnKey> = new Set<ColumnKey>(['paidIn', 'paidOut', 'amount', 'balance'])
 
 /**
  * A row is the table's header when it names a date column and at least one money
@@ -84,7 +91,7 @@ function readHeader(row: PdfTextRow): HeaderRow | null {
     const key = headerKey(cell.text)
     if (!key) continue
     if (columns.some((c) => c.key === key)) continue
-    columns.push({ key, x: cell.x })
+    columns.push({ key, x: cell.x, right: cell.width > 0 ? cell.x + cell.width : null })
   }
   const hasDate = columns.some((c) => c.key === 'date')
   const hasMoney = columns.some((c) => c.key === 'paidIn' || c.key === 'paidOut' || c.key === 'amount')
@@ -112,14 +119,83 @@ function assignColumn(x: number, columns: Column[]): ColumnKey | null {
   return columns[columns.length - 1]!.key
 }
 
+/**
+ * Which money column a figure belongs to, by how it lines up under the headers.
+ *
+ * Banks set figures right-aligned, and plenty set the header that way too, so a
+ * figure's left edge says little: under an "(GBP) Amount" header that starts at
+ * 373 and ends at 440, a short figure starts at 421 and a long one at 398, and
+ * the midpoint rule sends the short one to the balance column. The span the
+ * figure covers is what does not move - it sits under its own header, whichever
+ * way both are aligned. Most overlap wins; failing any overlap, the nearest
+ * header. Null when the font gave no widths to measure with.
+ */
+function moneyColumnFor(cell: PdfTextItem, columns: Column[]): ColumnKey | null {
+  if (!(cell.width > 0)) return null
+  const left = cell.x
+  const right = cell.x + cell.width
+  let best: { key: ColumnKey; overlap: number } | null = null
+  for (const column of columns) {
+    if (!MONEY_COLUMNS.has(column.key) || column.right === null) continue
+    // Negative when the two do not overlap: then it is minus the gap between
+    // them, so the largest value is still the best fit.
+    const overlap = Math.min(right, column.right) - Math.max(left, column.x)
+    if (!best || overlap > best.overlap) best = { key: column.key, overlap }
+  }
+  return best?.key ?? null
+}
+
+/**
+ * True when a cell has words in it, rather than a figure and its trimmings.
+ *
+ * A money column holds a figure, maybe a currency sign, maybe CR or DR. A cell
+ * with any other letters in it is a description that ran long - "ANTHROPIC*
+ * CLAUDE SUB", then "DUBLIN 4", then "IRL", each placed separately and the last
+ * two far enough right to cross the midpoint into the amount column. Letting it
+ * in there turns "-15.00" into "DUBLIN 4 IRL -15.00", which is not an amount,
+ * and the whole line disappears.
+ */
+function hasWords(text: string): boolean {
+  return /[a-z]/i.test(text.replace(/\b(?:CR|DR)\b\.?/gi, ''))
+}
+
+/** Two runs closer than this, as a fraction of the text size, are one word printed in pieces. */
+const SAME_WORD_GAP = 0.18
+
 type Cells = Partial<Record<ColumnKey, string>>
 
 function readCells(row: PdfTextRow, columns: Column[]): Cells {
   const cells: Cells = {}
+  const lastIn: Partial<Record<ColumnKey, PdfTextItem>> = {}
+  const textColumns = columns.filter((column) => !MONEY_COLUMNS.has(column.key))
+
   for (const cell of row.cells) {
-    const key = assignColumn(cell.x, columns)
+    let key = assignColumn(cell.x, columns)
     if (!key) continue
-    cells[key] = cells[key] ? `${cells[key]} ${cell.text}`.trim() : cell.text.trim()
+    if (MONEY_COLUMNS.has(key)) {
+      if (hasWords(cell.text)) {
+        key = assignColumn(cell.x, textColumns)
+        if (!key) continue
+      } else if (parseStatementAmount(cell.text)) {
+        key = moneyColumnFor(cell, columns) ?? key
+      }
+    }
+
+    const previous = lastIn[key]
+    const text = cell.text.trim()
+    if (!previous || !cells[key]) {
+      cells[key] = text
+    } else {
+      // One word split over two runs - a ligature in another font, a bold
+      // letter - joins up with no space. Anything with a visible gap is two words.
+      const gap = cell.x - (previous.x + previous.width)
+      const joined =
+        previous.width > 0 &&
+        !previous.text.endsWith(' ') &&
+        Math.abs(gap) <= Math.max(previous.size, cell.size) * SAME_WORD_GAP
+      cells[key] = joined ? `${cells[key]}${text}` : `${cells[key]} ${text}`.trim()
+    }
+    lastIn[key] = cell
   }
   return cells
 }
@@ -129,7 +205,7 @@ type WorkingLine = {
   page: number
   date: string
   cells: Cells
-  detailParts: { y: number; text: string }[]
+  detailParts: { page: number; y: number; text: string }[]
   amount: Prisma.Decimal
   balance: Prisma.Decimal | null
 }
@@ -236,6 +312,9 @@ function readMeta(plain: string): StatementMeta {
 
   const period =
     /statement (?:for|period)\s*:?\s*(.+?)\s*(?:to|-|–|—)\s*([\d]{1,2}[^\n,]{2,16}\d{4})/i.exec(text) ??
+    // "Business Account statement" with the dates on the line under it, and no
+    // "for" or "period" to introduce them.
+    /statement\s*:?\s*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})\s*(?:to|-|–|—)\s*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})/i.exec(text) ??
     /(?:period|from)\s*:?\s*(.+?)\s*(?:to|-|–|—)\s*([\d]{1,2}[^\n,]{2,16}\d{4})/i.exec(text)
   if (period) {
     meta.periodStart = parseStatementDate(period[1]!.trim())
@@ -299,12 +378,146 @@ function readMeta(plain: string): StatementMeta {
  */
 const CONTINUATION_REACH = 34
 
+/**
+ * A gap this much smaller than the one between two transactions is a gap inside
+ * one transaction.
+ */
+const SAME_ENTRY_RATIO = 0.7
+
+type Orphan = { y: number; page: number; cells: Cells }
+
+type Placed = { page: number; y: number; line: WorkingLine | null; orphan: Orphan | null }
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  return sorted[Math.floor(sorted.length / 2)]!
+}
+
+function nearestLine(orphan: Orphan, lines: WorkingLine[]): WorkingLine | null {
+  let best: WorkingLine | null = null
+  let bestDistance = Infinity
+  for (const line of lines) {
+    if (line.page !== orphan.page) continue
+    const distance = Math.abs(line.y - orphan.y)
+    if (distance < bestDistance) {
+      bestDistance = distance
+      best = line
+    }
+  }
+  return best && bestDistance <= CONTINUATION_REACH ? best : null
+}
+
+/**
+ * Give each wrapped description line to the transaction it belongs to.
+ *
+ * The plain rule is nearest dated row, because statements differ on which side
+ * of the date they put the rest of the description, and some put it on both.
+ *
+ * Where the statement spaces its transactions apart - most of them do, and the
+ * gap between two transactions is plainly wider than the gap between two lines
+ * of one - the spacing says more than distance does. Rows closer together than
+ * that are one transaction, so they go together. And it settles the case
+ * nearest gets wrong: a description that ran off the bottom of one page and
+ * finishes at the top of the next. Its last line sits a whole transaction's gap
+ * above the next page's first row, which is the page telling you it is not part
+ * of that one - it belongs to the transaction the previous page ended on.
+ */
+function attachWrappedLines(lines: WorkingLine[], orphans: Orphan[]): void {
+  const give = (line: WorkingLine, orphan: Orphan): void => {
+    const text = [orphan.cells.details, orphan.cells.type].filter(Boolean).join(' ').trim()
+    if (text) line.detailParts.push({ page: orphan.page, y: orphan.y, text })
+  }
+
+  const pages = new Map<number, Placed[]>()
+  for (const line of lines) {
+    const list = pages.get(line.page) ?? []
+    list.push({ page: line.page, y: line.y, line, orphan: null })
+    pages.set(line.page, list)
+  }
+  for (const orphan of orphans) {
+    const list = pages.get(orphan.page) ?? []
+    list.push({ page: orphan.page, y: orphan.y, line: null, orphan })
+    pages.set(orphan.page, list)
+  }
+  for (const list of pages.values()) list.sort((a, b) => b.y - a.y)
+
+  // The gap between two transactions, from the places two dated rows sit next
+  // to each other with nothing between them.
+  const entryGaps: number[] = []
+  for (const list of pages.values()) {
+    for (let i = 1; i < list.length; i += 1) {
+      if (list[i - 1]!.line && list[i]!.line) entryGaps.push(list[i - 1]!.y - list[i]!.y)
+    }
+  }
+  const entryGap = median(entryGaps)
+
+  if (entryGap === null || entryGap <= 0) {
+    for (const orphan of orphans) {
+      const line = nearestLine(orphan, lines)
+      if (line) give(line, orphan)
+    }
+    return
+  }
+
+  const lastLineOn = (page: number): WorkingLine | null => {
+    const list = pages.get(page)
+    if (!list) return null
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      if (list[i]!.line) return list[i]!.line
+    }
+    return null
+  }
+
+  for (const [page, list] of pages) {
+    // Split the page into runs of rows set close together.
+    const blocks: Placed[][] = []
+    for (const placed of list) {
+      const block = blocks[blocks.length - 1]
+      const previous = block?.[block.length - 1]
+      if (block && previous && previous.y - placed.y < entryGap * SAME_ENTRY_RATIO) block.push(placed)
+      else blocks.push([placed])
+    }
+
+    for (const [index, block] of blocks.entries()) {
+      const dated = block.filter((placed) => placed.line)
+      const loose = block.filter((placed): placed is Placed & { orphan: Orphan } => placed.orphan !== null)
+      if (loose.length === 0) continue
+
+      if (dated.length === 1) {
+        for (const placed of loose) give(dated[0]!.line!, placed.orphan)
+        continue
+      }
+
+      // Rows at the very top of a page, a full transaction's gap above its first
+      // dated row: the end of the transaction the page before finished on.
+      const next = blocks[index + 1]?.[0]
+      const carriedOver =
+        dated.length === 0 &&
+        index === 0 &&
+        next?.line &&
+        block[block.length - 1]!.y - next.y <= entryGap * 1.5
+          ? lastLineOn(page - 1)
+          : null
+      if (carriedOver) {
+        for (const placed of loose) give(carriedOver, placed.orphan)
+        continue
+      }
+
+      for (const placed of loose) {
+        const line = nearestLine(placed.orphan, lines)
+        if (line) give(line, placed.orphan)
+      }
+    }
+  }
+}
+
 export function parseStatementPdf(bytes: Buffer): ParsedStatement {
   const extracted = extractPdfText(bytes)
   const meta = readMeta(extracted.plain)
 
   const lines: WorkingLine[] = []
-  const unattached: { y: number; page: number; cells: Cells }[] = []
+  const unattached: Orphan[] = []
   let usedColumns: Column[] = []
   let headerCount = 0
 
@@ -317,22 +530,40 @@ export function parseStatementPdf(bytes: Buffer): ParsedStatement {
     byPage.set(row.page, list)
   }
 
+  // The columns a page with no header of its own goes on using. Plenty of
+  // statements - Monzo's among them - print the header once, on the first page,
+  // and let the table run on down the next three without it. Carried only while
+  // the table is still going: a page that yielded no lines is where it ended,
+  // and the terms and conditions after it are not to be read as payments.
+  let carried: Column[] | null = null
+
   for (const [page, rows] of [...byPage.entries()].sort((a, b) => a[0] - b[0])) {
-    let header: HeaderRow | null = null
-
-    for (const row of rows) {
-      if (!header) {
-        header = readHeader(row)
-        if (header) {
-          headerCount += 1
-          usedColumns = header.columns
-        }
-        continue
+    let columns: Column[] | null = null
+    let start = rows.length
+    for (const [index, row] of rows.entries()) {
+      const header = readHeader(row)
+      if (header) {
+        headerCount += 1
+        usedColumns = header.columns
+        columns = header.columns
+        start = index + 1
+        break
       }
+    }
+    if (!columns && carried) {
+      columns = carried
+      start = 0
+    }
+    if (!columns) {
+      carried = null
+      continue
+    }
 
-      const cells = readCells(row, header.columns)
+    const linesBefore = lines.length
+    for (const row of rows.slice(start)) {
+      const cells = readCells(row, columns)
       const date = parseStatementDate(cells.date ?? '')
-      const amount = date ? amountFor(cells, header.columns) : null
+      const amount = date ? amountFor(cells, columns) : null
 
       if (date && amount) {
         const balance = parseStatementAmount(cells.balance ?? '')
@@ -341,14 +572,19 @@ export function parseStatementPdf(bytes: Buffer): ParsedStatement {
           page,
           date,
           cells,
-          detailParts: cells.details ? [{ y: row.y, text: cells.details }] : [],
+          detailParts: cells.details ? [{ page, y: row.y, text: cells.details }] : [],
           amount,
           balance,
         })
-      } else if (cells.details || cells.type) {
+      } else if ((cells.details || cells.type) && (date || !cells.date)) {
+        // A wrapped description leaves the date column empty. Words in it that
+        // are not a date are a paragraph running the width of the page - the
+        // bank's registered office, the deposit protection blurb - and that is
+        // not the rest of anybody's payment.
         unattached.push({ y: row.y, page, cells })
       }
     }
+    carried = lines.length > linesBefore ? columns : null
   }
 
   if (headerCount === 0) {
@@ -362,24 +598,7 @@ export function parseStatementPdf(bytes: Buffer): ParsedStatement {
     }
   }
 
-  // Wrapped description lines join the dated row they sit nearest to. Nearest
-  // rather than "the one above" because statements differ on which side of the
-  // date they put the rest of the description, and some put it on both.
-  for (const orphan of unattached) {
-    let best: WorkingLine | null = null
-    let bestDistance = Infinity
-    for (const line of lines) {
-      if (line.page !== orphan.page) continue
-      const distance = Math.abs(line.y - orphan.y)
-      if (distance < bestDistance) {
-        bestDistance = distance
-        best = line
-      }
-    }
-    if (!best || bestDistance > CONTINUATION_REACH) continue
-    const text = [orphan.cells.details, orphan.cells.type].filter(Boolean).join(' ').trim()
-    if (text) best.detailParts.push({ y: orphan.y, text })
-  }
+  attachWrappedLines(lines, unattached)
 
   const { warnings, printedNewestFirst } = checkAgainstBalances(lines)
 
@@ -395,8 +614,13 @@ export function parseStatementPdf(bytes: Buffer): ParsedStatement {
   }
 
   const statementLines: StatementLine[] = lines.map((line) => {
+    // Top to bottom, page by page: a description that ran over onto the next page
+    // carries on there, so the next page's piece comes after this one's.
     const details = tidyDetails(
-      line.detailParts.sort((a, b) => b.y - a.y).map((part) => part.text).join(' '),
+      line.detailParts
+        .sort((a, b) => a.page - b.page || b.y - a.y)
+        .map((part) => part.text)
+        .join(' '),
     )
     const { counterparty, reference } = readCounterparty(details)
     return {
