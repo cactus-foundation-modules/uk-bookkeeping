@@ -47,6 +47,9 @@ export async function GET() {
       externalSalesEnabled: settings.external_sales_enabled,
       externalSalesCategoryId: settings.external_sales_category_id,
       externalSalesStatus: settings.external_sales_status,
+      businessAddress: settings.business_address,
+      invoicePrefix: settings.invoice_prefix,
+      autoInvoiceManualIncome: settings.auto_invoice_manual_income,
     },
     hmrc: {
       configured: isHmrcConfigured(),
@@ -90,6 +93,9 @@ const PatchBody = z.object({
   externalSalesEnabled: z.boolean().optional(),
   externalSalesCategoryId: z.string().nullable().optional(),
   externalSalesStatus: z.enum(['draft', 'posted']).optional(),
+  businessAddress: z.string().max(500).nullable().optional(),
+  invoicePrefix: z.string().max(12).optional(),
+  autoInvoiceManualIncome: z.boolean().optional(),
 })
 
 export async function PATCH(request: NextRequest) {

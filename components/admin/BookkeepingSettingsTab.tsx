@@ -40,6 +40,10 @@ type Settings = {
   externalSalesEnabled: boolean
   externalSalesCategoryId: string | null
   externalSalesStatus: 'draft' | 'posted'
+  /** The invoice raised for money recorded by hand. See lib/manual-invoice.ts. */
+  businessAddress: string | null
+  invoicePrefix: string
+  autoInvoiceManualIncome: boolean
 }
 
 /**
@@ -1184,6 +1188,31 @@ export function BookkeepingSettingsTab() {
         <div style={row}>
           <label htmlFor="bk-registered">VAT registered from</label>
           <input id="bk-registered" type="date" style={input} value={toDateValue(settings.vatRegisteredFrom)} onChange={(e) => set('vatRegisteredFrom', e.target.value || null)} />
+        </div>
+      </div>
+
+      <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+        <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Invoices for payments you record by hand</h3>
+        <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
+          Record money coming in and an invoice PDF is made for it, numbered in order and filed as the evidence.
+          Sales from your shop already have their own invoices and are left alone.
+        </p>
+        <div style={row}>
+          <label htmlFor="bk-auto-invoice">Make an invoice automatically</label>
+          <input
+            id="bk-auto-invoice"
+            type="checkbox"
+            checked={settings.autoInvoiceManualIncome}
+            onChange={(e) => set('autoInvoiceManualIncome', e.target.checked)}
+          />
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-invoice-prefix">Invoice number starts with</label>
+          <input id="bk-invoice-prefix" style={input} maxLength={12} value={settings.invoicePrefix} onChange={(e) => set('invoicePrefix', e.target.value)} />
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-address">Your address, as it goes on the invoice</label>
+          <textarea id="bk-address" style={{ ...input, minHeight: '5rem' }} value={settings.businessAddress ?? ''} onChange={(e) => set('businessAddress', e.target.value || null)} />
         </div>
       </div>
 

@@ -112,6 +112,8 @@ export type BkTransactionRow = {
   description: string
   reference: string | null
   status: TransactionStatus
+  /** The number of the invoice made for it (lib/manual-invoice.ts). */
+  invoice_number: string | null
   /** "There is no receipt for this one, and there is not meant to be." */
   evidence_not_required: boolean
   source: string
@@ -490,6 +492,11 @@ export type BkSettingsRow = {
   external_sales_enabled: boolean
   external_sales_category_id: string | null
   external_sales_status: 'draft' | 'posted'
+  /** Invoices for money recorded by hand - see lib/manual-invoice.ts. */
+  business_address: string | null
+  invoice_prefix: string
+  next_invoice_number: number
+  auto_invoice_manual_income: boolean
   created_at: Date
   updated_at: Date
 }

@@ -644,6 +644,9 @@ export default function TransactionForm({
       settledDate: value.settledDate || null,
       bankAccountId: value.bankAccountId || null,
       evidenceNotRequired: !!value.evidenceNotRequired,
+      // Their own paperwork is already on its way; a second invoice beside it
+      // would be two documents for one payment.
+      generateInvoice: chosenDocuments.length === 0 && !value.evidenceNotRequired,
       counterparty: value.counterparty,
       reference: value.reference || null,
       correctsTransactionId: value.correctsTransactionId ?? null,
@@ -671,6 +674,12 @@ export default function TransactionForm({
       }
 
       const saved = await response.json()
+      if (saved.invoiceError) {
+        // Saved, but the invoice was not made. Staying on the form would invite
+        // a second save and a duplicate entry, so say it and carry on to the
+        // entry, where "Make the invoice" tries again under the same number.
+        window.alert(`The payment is saved, but its invoice could not be made: ${saved.invoiceError}\n\nThere is a button on the entry to try again.`)
+      }
 
       // The receipts picked out of the inbox, wired to the entry now that it has
       // an id. One at a time and never fatally: the entry is saved, and a

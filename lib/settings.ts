@@ -38,6 +38,10 @@ const FALLBACK: BkSettingsRow = {
   external_sales_enabled: true,
   external_sales_category_id: null,
   external_sales_status: 'posted',
+  business_address: null,
+  invoice_prefix: 'INV-',
+  next_invoice_number: 1,
+  auto_invoice_manual_income: true,
   created_at: new Date(),
   updated_at: new Date(),
 }
@@ -83,6 +87,10 @@ export type SettingsPatch = {
   externalSalesEnabled?: boolean
   externalSalesCategoryId?: string | null
   externalSalesStatus?: 'draft' | 'posted'
+  /** Invoices raised for money recorded by hand - see lib/manual-invoice.ts. */
+  businessAddress?: string | null
+  invoicePrefix?: string
+  autoInvoiceManualIncome?: boolean
 }
 
 /**
@@ -152,6 +160,13 @@ export async function updateSettings(patch: SettingsPatch): Promise<BkSettingsRo
     (yearEndMonth < 1 || yearEndMonth > 12 || yearEndDay < 1 || yearEndDay > 31)
   ) {
     throw new BookkeepingError('invalid', 'That is not a date the year could end on.')
+  }
+
+  if (patch.invoicePrefix !== undefined && !/^[A-Za-z0-9._-]{0,12}$/.test(patch.invoicePrefix.trim())) {
+    throw new BookkeepingError(
+      'invalid',
+      'The invoice prefix can use letters, numbers, full stops, dashes and underscores, up to twelve of them.',
+    )
   }
 
   if (patch.errorThresholdPercent !== undefined) {
@@ -226,6 +241,9 @@ export async function updateSettings(patch: SettingsPatch): Promise<BkSettingsRo
           : patch.externalSalesCategoryId || null
       },
       "external_sales_status"   = ${patch.externalSalesStatus ?? current.external_sales_status},
+      "business_address"        = ${patch.businessAddress === undefined ? current.business_address : patch.businessAddress?.trim() || null},
+      "invoice_prefix"          = ${patch.invoicePrefix === undefined ? current.invoice_prefix : patch.invoicePrefix.trim()},
+      "auto_invoice_manual_income" = ${patch.autoInvoiceManualIncome ?? current.auto_invoice_manual_income},
       "updated_at"              = NOW()
     WHERE "id" = 'singleton'
   `

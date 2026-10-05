@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { toErrorResponse } from '@/modules/uk-bookkeeping/lib/errors'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
 import { createTransaction, listTransactions } from '@/modules/uk-bookkeeping/lib/transactions'
+import { issueManualInvoice, wantsManualInvoice } from '@/modules/uk-bookkeeping/lib/manual-invoice'
+import { getSettings } from '@/modules/uk-bookkeeping/lib/settings'
 import { TransactionBody } from '@/modules/uk-bookkeeping/lib/validation'
 
 export async function GET(request: NextRequest) {
@@ -52,7 +54,24 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }, { status: 400 })
   }
   try {
-    return NextResponse.json(await createTransaction(parsed.data, gate.user), { status: 201 })
+    const created = await createTransaction(parsed.data, gate.user)
+
+    // Money recorded as coming in gets its invoice, unless the person has said
+    // they are attaching their own. Never fatal: the entry is saved either way,
+    // and a failure comes back as a sentence the form shows - the entry's own
+    // page has a button to try again under the same number.
+    let invoiceError: string | null = null
+    if (parsed.data.generateInvoice !== false && wantsManualInvoice(created)) {
+      try {
+        if ((await getSettings()).auto_invoice_manual_income) {
+          await issueManualInvoice(created.id, gate.user)
+        }
+      } catch (error) {
+        console.error('[uk-bookkeeping] could not make an invoice for a recorded payment:', error)
+        invoiceError = error instanceof Error ? error.message : 'The invoice could not be made.'
+      }
+    }
+    return NextResponse.json({ ...created, invoiceError }, { status: 201 })
   } catch (error) {
     return toErrorResponse(error)
   }

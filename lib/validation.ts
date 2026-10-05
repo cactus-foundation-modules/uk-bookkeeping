@@ -43,6 +43,8 @@ export const TransactionBody = z.object({
   status: z.enum(['draft', 'posted']).optional(),
   /** "No receipt is coming, and none is meant to." */
   evidenceNotRequired: z.boolean().optional(),
+  /** False when the person is attaching their own invoice, so none is made. */
+  generateInvoice: z.boolean().optional(),
   correctsTransactionId: z.string().nullable().optional(),
   correctionReason: z.string().nullable().optional(),
   lines: z.array(LineBody).min(1),

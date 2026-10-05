@@ -42,6 +42,8 @@ type Transaction = {
   description: string
   reference: string | null
   status: string
+  source: string
+  invoice_number: string | null
   bank_account_id: string | null
   evidence_not_required: boolean
   correction_reason: string | null
@@ -71,6 +73,8 @@ export default function TransactionDetail({
   // Bumped after a receipt is filed from here, so the picker drops the one that
   // has just gone. Filing on this screen happens straight away - the entry
   // already exists, so there is nothing to hold anything back for.
+  const [makingInvoice, setMakingInvoice] = useState(false)
+  const [invoiceError, setInvoiceError] = useState<string | null>(null)
   const [pickerKey, setPickerKey] = useState(0)
   const [pickerError, setPickerError] = useState<string | null>(null)
 
@@ -133,6 +137,36 @@ export default function TransactionDetail({
     } catch {
       setError('The delete did not reach the server. Check the connection and try again.')
     }
+  }
+
+  const canMakeInvoice =
+    canRecord &&
+    !locked &&
+    !finalised &&
+    transaction.direction === 'income' &&
+    transaction.entry_type === 'normal' &&
+    transaction.source === 'manual' &&
+    transaction.status === 'posted' &&
+    !transaction.attachments.some((row) => row.name === 'Invoice')
+
+  async function makeInvoice() {
+    if (!transaction) return
+    setMakingInvoice(true)
+    setInvoiceError(null)
+    try {
+      const response = await fetch(`/api/m/uk-bookkeeping/admin/transactions/${transaction.id}/invoice`, {
+        method: 'POST',
+      })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        setInvoiceError(payload.error ?? 'The invoice could not be made.')
+      } else {
+        load()
+      }
+    } catch {
+      setInvoiceError('That did not reach the server. Check the connection and try again.')
+    }
+    setMakingInvoice(false)
   }
 
   async function post() {
@@ -314,6 +348,20 @@ export default function TransactionDetail({
           </tbody>
         </table>
       </div>
+
+      {canMakeInvoice && (
+        <div className="card" style={{ padding: '0.875rem 1rem', marginBottom: '1rem', maxWidth: 900 }}>
+          <p style={{ margin: '0 0 0.625rem', fontSize: 'var(--text-sm)' }}>
+            {transaction.invoice_number
+              ? `Invoice ${transaction.invoice_number} has been numbered but not made yet.`
+              : 'No invoice has been made for this payment.'}
+          </p>
+          <ErrorNotice message={invoiceError} />
+          <button type="button" className="btn btn-sm" onClick={makeInvoice} disabled={makingInvoice}>
+            {makingInvoice ? 'Making the invoice…' : 'Make the invoice'}
+          </button>
+        </div>
+      )}
 
       <EvidenceDropzone
         transactionId={transaction.id}
