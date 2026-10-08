@@ -105,11 +105,12 @@ async function requireVrn(): Promise<string> {
  * The sandbox remembers nothing, but this module locks a period once it is
  * filed. With only the default answer - one open 2017 quarter - a single test
  * submission used the sandbox up for good, and the fresh round of testing HMRC's
- * approvals team ask for became impossible. So two documented test scenarios
+ * approvals team ask for became impossible. So several documented test scenarios
  * are asked for, each with the year it describes spelled out:
  *
  *   - QUARTERLY_NONE_MET: quarterly obligations, none fulfilled (2017).
  *   - MULTIPLE_OPEN_QUARTERLY: two open quarters in 2018.
+ *   - MONTHLY_NONE_MET and MULTIPLE_OPEN_MONTHLY: the monthly equivalents.
  *
  * Asking QUARTERLY_NONE_MET alone, with no dates, came back on 2026-10-08 with
  * nothing new - and HMRC's stub is not public, so there is no reading its rules,
@@ -120,6 +121,12 @@ async function requireVrn(): Promise<string> {
 const SANDBOX_OPEN_SCENARIOS: { scenario: string; from: string; to: string }[] = [
   { scenario: 'QUARTERLY_NONE_MET', from: '2017-01-01', to: '2017-12-31' },
   { scenario: 'MULTIPLE_OPEN_QUARTERLY', from: '2018-01-01', to: '2018-12-31' },
+  // Monthly sets, added after the two above ran dry on 2026-10-08: the 2017
+  // one gave back only the quarter already filed, and the 2018 one a quarter
+  // whose key clashed plus one that was then filed - leaving nothing open to
+  // show the declaration on. Monthly periods carry their own keys and dates.
+  { scenario: 'MONTHLY_NONE_MET', from: '2017-01-01', to: '2017-12-31' },
+  { scenario: 'MULTIPLE_OPEN_MONTHLY', from: '2018-01-01', to: '2018-12-31' },
 ]
 
 async function sandboxOpenObligations(
