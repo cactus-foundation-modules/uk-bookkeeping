@@ -59,6 +59,7 @@ export default function VatPeriodsScreen({
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [lastChecked, setLastChecked] = useState<string | null>(null)
+  const [syncSummary, setSyncSummary] = useState<string | null>(null)
   const [money, setMoney] = useState<{ liabilities: Liability[]; payments: Payment[] } | null>(null)
   const [moneyBusy, setMoneyBusy] = useState(false)
 
@@ -92,6 +93,7 @@ export default function VatPeriodsScreen({
       }
       setLastChecked(new Date().toLocaleString('en-GB'))
       setPeriods(payload.periods ?? [])
+      setSyncSummary(describeSync(payload))
     } catch {
       setError('HMRC could not be reached. Check the connection and try again.')
     } finally {
@@ -190,6 +192,7 @@ export default function VatPeriodsScreen({
         {lastChecked && (
           <span style={{ fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
             Last checked {lastChecked}
+            {syncSummary ? ` · ${syncSummary}` : ''}
           </span>
         )}
       </div>
@@ -338,4 +341,15 @@ export default function VatPeriodsScreen({
       )}
     </div>
   )
+}
+
+/**
+ * What a refresh found, in a sentence. Without it a refresh that brought in
+ * nothing new looked exactly like one that had not worked.
+ */
+function describeSync(payload: { fetched?: number; created?: number }): string | null {
+  if (typeof payload.fetched !== 'number') return null
+  const listed = `HMRC listed ${payload.fetched} period${payload.fetched === 1 ? '' : 's'}`
+  const created = payload.created ?? 0
+  return created > 0 ? `${listed}, ${created} new here` : `${listed}, nothing new`
 }

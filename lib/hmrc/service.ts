@@ -14,6 +14,7 @@ import { formatPounds } from '../money'
 import {
   compareWithFinalisedSnapshot,
   describeNetVat,
+  listSnapshots,
   lockPeriodRecords,
   requirePeriod,
   toDateOnly,
@@ -97,8 +98,47 @@ async function requireVrn(): Promise<string> {
 // Obligations
 // ---------------------------------------------------------------------------
 
-/** Sent to the sandbox only; see the open-obligations call below. */
-const SANDBOX_OBLIGATIONS_SCENARIO = 'QUARTERLY_NONE_MET'
+/**
+ * The sandbox's open obligations, asked for in a way that leaves something to
+ * file more than once.
+ *
+ * The sandbox remembers nothing, but this module locks a period once it is
+ * filed. With only the default answer - one open 2017 quarter - a single test
+ * submission used the sandbox up for good, and the fresh round of testing HMRC's
+ * approvals team ask for became impossible. So two documented test scenarios
+ * are asked for, each with the year it describes spelled out:
+ *
+ *   - QUARTERLY_NONE_MET: quarterly obligations, none fulfilled (2017).
+ *   - MULTIPLE_OPEN_QUARTERLY: two open quarters in 2018.
+ *
+ * Asking QUARTERLY_NONE_MET alone, with no dates, came back on 2026-10-08 with
+ * nothing new - and HMRC's stub is not public, so there is no reading its rules,
+ * only asking more than one way. A scenario the sandbox refuses is skipped; if
+ * every one fails the plain call still answers, so a refresh never gets worse
+ * than it was.
+ */
+const SANDBOX_OPEN_SCENARIOS: { scenario: string; from: string; to: string }[] = [
+  { scenario: 'QUARTERLY_NONE_MET', from: '2017-01-01', to: '2017-12-31' },
+  { scenario: 'MULTIPLE_OPEN_QUARTERLY', from: '2018-01-01', to: '2018-12-31' },
+]
+
+async function sandboxOpenObligations(
+  client: HmrcClient,
+  vrn: string,
+  ctx: HmrcCallContext,
+): Promise<VatObligation[]> {
+  const found: VatObligation[] = []
+  for (const { scenario, from, to } of SANDBOX_OPEN_SCENARIOS) {
+    try {
+      found.push(
+        ...(await client.obligations({ vrn, status: 'O', from, to }, { ...ctx, testScenario: scenario })),
+      )
+    } catch (error) {
+      console.error(`[uk-bookkeeping] sandbox scenario ${scenario} refused`, error)
+    }
+  }
+  return found.length > 0 ? found : client.obligations({ vrn, status: 'O' }, ctx)
+}
 
 /**
  * Fetch HMRC's obligations and match them onto local periods by date range.
@@ -132,14 +172,10 @@ export async function syncObligations(inputs: CallInputs): Promise<{
   //
   // A failure on the second must not lose the first. Somebody with nothing filed
   // yet is exactly the person who most needs to see what is due.
-  //
-  // In the sandbox the open call asks for QUARTERLY_NONE_MET: four open 2017
-  // quarters instead of the default's one. The sandbox remembers nothing, but
-  // this module locks a period once it is filed - so with only the default's
-  // single quarter, one test submission used up the sandbox for good, and the
-  // fresh round of testing HMRC's approvals team ask for became impossible.
-  const openCtx = { ...ctx, testScenario: SANDBOX_OBLIGATIONS_SCENARIO }
-  const open = await client.obligations({ vrn, status: 'O' }, openCtx)
+  const open =
+    ctx.environment === 'sandbox'
+      ? await sandboxOpenObligations(client, vrn, ctx)
+      : await client.obligations({ vrn, status: 'O' }, ctx)
 
   const today = new Date()
   const yearAgo = new Date(today.getTime())
@@ -562,4 +598,44 @@ export async function reconcileWithHmrc(
   )
 
   return { reconciled: true, theirs }
+}
+
+/**
+ * "See what HMRC holds", on a return that has been filed.
+ *
+ * Read-only: asks HMRC for the nine figures they have for this period and puts
+ * them beside the ones we froze when it was filed. Nothing here changes, however
+ * the comparison comes out - a difference is a conversation with HMRC. It is
+ * also the only routine way the View VAT Return endpoint gets called, which
+ * HMRC's approvals team expect to see in the testing logs.
+ */
+export async function viewFiledReturn(
+  periodId: string,
+  inputs: CallInputs,
+): Promise<{ theirs: VatBoxes; ours: VatBoxes | null; matches: boolean | null }> {
+  const period = await requirePeriod(periodId)
+  if (period.status !== 'submitted') {
+    throw new PeriodStateError('Only a return that has been filed can be looked up at HMRC.')
+  }
+  if (!period.period_key) {
+    throw new PeriodStateError('There is no HMRC period to look this return up against.')
+  }
+
+  const client = getHmrcClient()
+  const ctx = await buildCallContext(client, inputs)
+  const vrn = period.vrn ?? (await requireVrn())
+  const { periodKey: _periodKey, ...theirs } = await client.viewReturn(
+    { vrn, periodKey: period.period_key },
+    ctx,
+  )
+
+  // The submitted snapshot is what went to HMRC; a return recorded as filed
+  // elsewhere has only the finalised one.
+  const snapshots = await listSnapshots(period.id)
+  const ours =
+    [...snapshots].reverse().find((s) => s.kind === 'submitted')?.boxes ??
+    [...snapshots].reverse().find((s) => s.kind === 'finalised')?.boxes ??
+    null
+
+  return { theirs, ours, matches: ours ? boxesMatch(ours, theirs) : null }
 }

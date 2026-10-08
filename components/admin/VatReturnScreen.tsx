@@ -53,6 +53,13 @@ type Detail = {
   snapshots: { id: string; kind: string; createdAt: string; rowHash: string }[]
 }
 
+/** What HMRC hold for a filed period, beside what was filed from here. */
+type HmrcHeld = {
+  theirs: Record<string, string>
+  ours: Record<string, string> | null
+  matches: boolean | null
+}
+
 const BOX_LABELS: [string, number, string][] = [
   ['vatDueSales', 1, 'VAT due on sales and other outputs'],
   ['vatDueAcquisitions', 2, 'VAT due on acquisitions from EU member states into Northern Ireland'],
@@ -83,6 +90,7 @@ export default function VatReturnScreen({
   const [duplicate, setDuplicate] = useState(false)
   const [uncertain, setUncertain] = useState(false)
   const [declaring, setDeclaring] = useState(false)
+  const [held, setHeld] = useState<HmrcHeld | null>(null)
   const declarationRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -385,6 +393,61 @@ export default function VatReturnScreen({
               </>
             )}
           </dl>
+          {canSubmit && period.period_key && (
+            <div style={{ marginTop: '0.75rem' }}>
+              <button
+                className="btn btn-sm"
+                disabled={busy}
+                onClick={async () => {
+                  const result = (await act(
+                    `/api/m/uk-bookkeeping/admin/periods/${period.id}/hmrc-view`,
+                    'POST',
+                    {},
+                  )) as HmrcHeld | null
+                  if (result) setHeld(result)
+                }}
+              >
+                {held ? 'Ask HMRC again' : 'See what HMRC holds'}
+              </button>
+            </div>
+          )}
+          {held && (
+            <div style={{ marginTop: '0.75rem' }}>
+              <p style={{ margin: '0 0 0.5rem', fontSize: 'var(--text-sm)' }}>
+                {held.matches === true
+                  ? 'HMRC’s figures match the ones filed from here, box for box.'
+                  : held.matches === false
+                    ? environment === 'sandbox'
+                      ? 'HMRC’s practice service always answers with its own sample figures, so these will not match yours. On the real service they should.'
+                      : 'HMRC’s figures are not the same as the ones filed from here. Nothing has been changed. This one needs a conversation with HMRC.'
+                    : 'There is no frozen copy of this return here to compare against, so these are HMRC’s figures on their own.'}
+              </p>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--color-border)', textAlign: 'left' }}>
+                    <th style={{ padding: '0.375rem 0.5rem 0.375rem 0' }}>Box</th>
+                    {held.ours && <th style={{ padding: '0.375rem 0.5rem', textAlign: 'right' }}>Filed from here</th>}
+                    <th style={{ padding: '0.375rem 0 0.375rem 0.5rem', textAlign: 'right' }}>HMRC hold</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {BOX_LABELS.map(([key, number]) => (
+                    <tr key={key} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                      <td style={{ padding: '0.375rem 0.5rem 0.375rem 0' }}>{number}</td>
+                      {held.ours && (
+                        <td style={{ padding: '0.375rem 0.5rem', textAlign: 'right' }}>
+                          {poundsFromString(held.ours[key] ?? '0')}
+                        </td>
+                      )}
+                      <td style={{ padding: '0.375rem 0 0.375rem 0.5rem', textAlign: 'right' }}>
+                        {poundsFromString(held.theirs[key] ?? '0')}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
           <p style={{ margin: '0.75rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
             Everything on this return is now locked. Anything that needs putting right goes on the
             current period as a correction.
