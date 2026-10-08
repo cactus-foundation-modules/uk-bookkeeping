@@ -224,6 +224,25 @@ async function applyObligation(
     LIMIT 1
   `
 
+  // A period key is unique here, and HMRC's live keys are unique per VAT
+  // number - but the sandbox's canned test data reuses them: on 2026-10-08 it
+  // handed back 18A1 for a second quarter while the filed 2017 Q1 already held
+  // it, and the unique index sank the whole refresh with a 500. A key already
+  // held by a DIFFERENT period is skipped, so one odd obligation never costs
+  // the owner every other one.
+  const [keyHolder] = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT "id" FROM "bk_vat_periods"
+    WHERE "period_key" = ${obligation.periodKey}
+      AND NOT ("start_date" = ${obligation.start}::date AND "end_date" = ${obligation.end}::date)
+    LIMIT 1
+  `
+  if (keyHolder) {
+    console.warn(
+      `[uk-bookkeeping] obligation ${obligation.start} to ${obligation.end} skipped: its period key is already held by another period`,
+    )
+    return 'skipped'
+  }
+
   if (existing) {
     // A submitted period is terminal, and the trigger would refuse this anyway.
     if (existing.status === 'submitted') return 'skipped'
