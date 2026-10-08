@@ -12,6 +12,7 @@ import { sniffMimeType, preflightFileError, isHeic } from './file-kinds'
 import { formatTimezoneOffset, keyValueHeader, percentEncode } from './hmrc/fraud-spec'
 import {
   MAX_RANGE_DAYS,
+  MONEY_MAX_RANGE_DAYS,
   assertValidPeriodKey,
   assertValidVrn,
   clampRange,
@@ -317,6 +318,13 @@ describe("HMRC's limits on what you may ask it", () => {
 
   it('stays one day inside the documented 366, because of their leap-year bug', () => {
     expect(MAX_RANGE_DAYS).toBe(365)
+  })
+
+  it('keeps a year of liabilities or payments to 365 days counting both ends', () => {
+    // The VAT screen asks for "a year ago today" to today - 2025-09-01 to
+    // 2026-09-01 on the day HMRC answered DATE_RANGE_INVALID.
+    const asked = clampRange({ from: '2025-08-21', to: '2026-08-21' }, today, MONEY_MAX_RANGE_DAYS)
+    expect(asked).toEqual({ from: '2025-08-22', to: '2026-08-21' })
   })
 
   it('pulls a future end date back to today', () => {

@@ -15,6 +15,14 @@ import { BookkeepingError } from '../errors'
  */
 export const MAX_RANGE_DAYS = 365
 
+/**
+ * Liabilities and payments are tighter than obligations: "365 days or less",
+ * and HMRC count BOTH ends. 2025-09-01 to 2026-09-01 is 365 days apart but 366
+ * days long by their reckoning, and came back DATE_RANGE_INVALID on the sandbox.
+ * So the gap between `from` and `to` may be at most 364.
+ */
+export const MONEY_MAX_RANGE_DAYS = 364
+
 /** Nothing exists before MTD did; HMRC rejects an earlier `from` outright. */
 export const EARLIEST_FROM = '2017-12-01'
 
@@ -45,7 +53,11 @@ export type DateRange = { from: string; to: string }
  * - keeping the most recent days, which is what anybody looking at their VAT
  * account actually wants.
  */
-export function clampRange(input: DateRange, today = new Date()): DateRange {
+export function clampRange(
+  input: DateRange,
+  today = new Date(),
+  maxDays = MAX_RANGE_DAYS,
+): DateRange {
   const from = parseDateOnly(input.from)
   const to = parseDateOnly(input.to)
   if (!from || !to) {
@@ -61,8 +73,8 @@ export function clampRange(input: DateRange, today = new Date()): DateRange {
   const clampedTo = to.getTime() > latest.getTime() ? latest : to
   let clampedFrom = from.getTime() < earliest.getTime() ? earliest : from
 
-  if (daysBetween(clampedFrom, clampedTo) > MAX_RANGE_DAYS) {
-    clampedFrom = new Date(clampedTo.getTime() - MAX_RANGE_DAYS * DAY_MS)
+  if (daysBetween(clampedFrom, clampedTo) > maxDays) {
+    clampedFrom = new Date(clampedTo.getTime() - maxDays * DAY_MS)
     if (clampedFrom.getTime() < earliest.getTime()) clampedFrom = earliest
   }
 

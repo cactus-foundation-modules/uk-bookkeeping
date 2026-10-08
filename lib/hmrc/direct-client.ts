@@ -26,6 +26,7 @@ import { assertValidPeriodKey, assertValidVrn } from './limits'
 import { buildVatReturnBody } from './payload'
 import {
   ApplicationTokenSchema,
+  BareCodeSchema,
   FraudHeaderVerdictSchema,
   HmrcErrorSchema,
   LiabilitiesResponseSchema,
@@ -141,6 +142,11 @@ export class DirectHmrcClient implements HmrcClient {
       ...ctx.fraudHeaders,
     }
     if (body) headers['Content-Type'] = 'application/json'
+    // Sandbox only, and guarded here rather than trusted from the caller: in
+    // production the header means nothing and has no business being sent.
+    if (ctx.testScenario && ctx.environment === 'sandbox') {
+      headers['Gov-Test-Scenario'] = ctx.testScenario
+    }
 
     // The row goes in BEFORE the call. A timeout that leaves no trace is how a
     // duplicate submission happens.
@@ -201,6 +207,23 @@ export class DirectHmrcClient implements HmrcClient {
     })
 
     return { text, correlationId, receiptId, receiptTimestamp }
+  }
+
+  /**
+   * Liabilities and payments answer 404 NOT_FOUND when there is simply nothing
+   * in the range - an owner with no VAT owed, and the sandbox's default for every
+   * test user. That is an empty list, not an error to put in front of anybody.
+   * The call is still logged in full, headers and all.
+   */
+  private async callOrNothing(method: string, path: string, ctx: HmrcCallContext): Promise<string | null> {
+    try {
+      return (await this.call(method, path, ctx)).text
+    } catch (error) {
+      if (error instanceof HmrcApiError && error.httpStatus === 404 && NOTHING_FOUND.has(error.hmrcCode)) {
+        return null
+      }
+      throw error
+    }
   }
 
   async obligations(input: ObligationsQuery, ctx: HmrcCallContext): Promise<VatObligation[]> {
@@ -271,11 +294,12 @@ export class DirectHmrcClient implements HmrcClient {
   async liabilities(input: DateRangeQuery, ctx: HmrcCallContext): Promise<VatLiability[]> {
     assertValidVrn(input.vrn)
     const query = new URLSearchParams({ from: input.from, to: input.to })
-    const { text } = await this.call(
+    const text = await this.callOrNothing(
       'GET',
       `/organisations/vat/${encodeURIComponent(input.vrn)}/liabilities?${query.toString()}`,
       ctx,
     )
+    if (text === null) return []
     return LiabilitiesResponseSchema.parse(JSON.parse(text)).liabilities.map((l) => ({
       taxPeriodFrom: l.taxPeriod?.from ?? null,
       taxPeriodTo: l.taxPeriod?.to ?? null,
@@ -289,11 +313,12 @@ export class DirectHmrcClient implements HmrcClient {
   async payments(input: DateRangeQuery, ctx: HmrcCallContext): Promise<VatPayment[]> {
     assertValidVrn(input.vrn)
     const query = new URLSearchParams({ from: input.from, to: input.to })
-    const { text } = await this.call(
+    const text = await this.callOrNothing(
       'GET',
       `/organisations/vat/${encodeURIComponent(input.vrn)}/payments?${query.toString()}`,
       ctx,
     )
+    if (text === null) return []
     return PaymentsResponseSchema.parse(JSON.parse(text)).payments.map((p) => ({
       amount: fromHmrcNumber(p.amount),
       received: p.received ?? null,
@@ -454,9 +479,26 @@ function safeJson(text: string): unknown {
  * downstream branches on; the message is shown alongside our own plain-English
  * gloss, never parsed.
  */
+// The sandbox does not always answer in the documented shape. A liabilities or
+// payments refusal came back as {"message":"DATE_RANGE_INVALID","statusCode":400}
+// - the code in `message`, no `code` at all - and was logged as HTTP_400, which
+// hid what was wrong. A bare upper-snake `message` is taken as the code.
+const BARE_CODE = /^[A-Z][A-Z0-9_]+$/
+
+// HTTP_404 is in here because the sandbox's off-spec bodies can arrive with no
+// code at all; a path we got wrong would also be a 404, which is what the
+// sandbox live suite's 401-not-404 probe is there to catch.
+const NOTHING_FOUND = new Set(['NOT_FOUND', 'HTTP_404'])
+
 function toHmrcError(status: number, text: string, correlationId: string | null): HmrcApiError {
-  const parsed = HmrcErrorSchema.safeParse(safeJson(text))
-  const code = parsed.success ? parsed.data.code : `HTTP_${status}`
+  const body = safeJson(text)
+  const parsed = HmrcErrorSchema.safeParse(body)
+  const bare = BareCodeSchema.safeParse(body)
+  const code = parsed.success
+    ? parsed.data.code
+    : bare.success && BARE_CODE.test(bare.data.message)
+      ? bare.data.message
+      : `HTTP_${status}`
   const detail = parsed.success ? parsed.data.message : undefined
   return new HmrcApiError({
     hmrcCode: code,
@@ -495,8 +537,11 @@ export function glossHmrcCode(code: string): string | null {
     // Obligations, liabilities and payments
     case 'INVALID_DATE_FROM':
     case 'INVALID_DATE_TO':
+    case 'DATE_FROM_INVALID':
+    case 'DATE_TO_INVALID':
       return 'HMRC would not accept those dates.'
     case 'INVALID_DATE_RANGE':
+    case 'DATE_RANGE_INVALID':
       return 'HMRC will only look at a year at a time. Try a shorter stretch of dates.'
     case 'INVALID_STATUS':
       return 'HMRC did not understand which returns were being asked for.'

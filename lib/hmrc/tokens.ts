@@ -93,11 +93,17 @@ export async function disconnect(user: SessionUser | null): Promise<void> {
  * expiry. No cron job: the request that needs a fresh token is the one that gets
  * it.
  *
- * PgBouncer runs in transaction pooling mode, so there is no session-level
- * advisory lock available to serialise two concurrent refreshes. Instead the
- * write is conditional on the `last_refresh_at` we read, and a loser simply
- * re-reads the row the winner just wrote. HMRC rotates the refresh token on
- * every use, so the loser must NOT go on to use the token it fetched with.
+ * HMRC rotate the refresh token on every use, so two requests refreshing at once
+ * is a real hazard - and the VAT screen does exactly that, asking for
+ * liabilities and payments side by side. The loser's refresh is refused, and on
+ * 2026-09-01 it looked for the winner's new token before the winner had written
+ * it, decided the connection was dead, and liabilities never reached HMRC.
+ *
+ * So refreshes queue. PgBouncer runs in transaction pooling mode, which rules
+ * out a session advisory lock but not a row lock: the refresh runs inside a
+ * transaction holding FOR UPDATE on the singleton row, and whoever waited
+ * behind it re-reads that row and finds a fresh token instead of spending a
+ * stale refresh token of its own.
  */
 export async function getAccessToken(client: HmrcClient): Promise<{
   accessToken: string
@@ -110,91 +116,102 @@ export async function getAccessToken(client: HmrcClient): Promise<{
     throw new HmrcReauthRequiredError('This site is not connected to HMRC yet.')
   }
 
-  const accessToken = tryDecryptSecret(connection.access_token_encrypted)
-  const expiresAt = connection.access_token_expires_at?.getTime() ?? 0
-  const stillGood = accessToken && expiresAt - Date.now() > REFRESH_MARGIN_MS
-  if (stillGood) {
-    return { accessToken, environment: connection.environment, vrn: connection.vrn }
+  const usable = usableAccessToken(connection)
+  if (usable) return usable
+
+  // Side effects of a failure (marking the connection expired, the audit row)
+  // happen AFTER the transaction: written inside it they would roll back with
+  // the throw that reports them.
+  const outcome = await prisma.$transaction(
+    async (tx): Promise<RefreshOutcome> => {
+      const [locked] = await tx.$queryRaw<BkHmrcConnectionRow[]>`
+        SELECT * FROM "bk_hmrc_connection" WHERE "id" = 'singleton' FOR UPDATE
+      `
+      if (!locked) return { kind: 'unreadable' }
+
+      // Somebody refreshed while we queued for the lock.
+      const queuedBehind = usableAccessToken(locked)
+      if (queuedBehind) return { kind: 'ok', ...queuedBehind }
+
+      const refreshToken = tryDecryptSecret(locked.refresh_token_encrypted)
+      // Either there is no refresh token, or this install's ENCRYPTION_KEY
+      // cannot read the one that is there - the restored-backup case.
+      if (!refreshToken) return { kind: 'unreadable' }
+
+      let tokens: HmrcTokens
+      try {
+        tokens = await client.refresh({ refreshToken, environment: locked.environment })
+      } catch (error) {
+        return { kind: 'failed', error }
+      }
+
+      await tx.$executeRaw`
+        UPDATE "bk_hmrc_connection" SET
+          "access_token_encrypted"   = ${encryptSecret(tokens.accessToken)},
+          "access_token_expires_at"  = ${new Date(Date.now() + tokens.expiresIn * 1000)},
+          "refresh_token_encrypted"  = ${encryptSecret(tokens.refreshToken)},
+          "status"                   = 'connected',
+          "last_refresh_at"          = NOW(),
+          "last_refresh_error"       = NULL,
+          "updated_at"               = NOW()
+        WHERE "id" = 'singleton'
+      `
+      return {
+        kind: 'ok',
+        accessToken: tokens.accessToken,
+        environment: locked.environment,
+        vrn: locked.vrn,
+      }
+    },
+    // The refresh is an HTTP call to HMRC made while holding the lock, so the
+    // transaction must outlive the client's own 30s timeout on it.
+    { timeout: 45_000, maxWait: 45_000 },
+  )
+
+  if (outcome.kind === 'ok') {
+    return { accessToken: outcome.accessToken, environment: outcome.environment, vrn: outcome.vrn }
   }
 
-  const refreshToken = tryDecryptSecret(connection.refresh_token_encrypted)
-  if (!refreshToken) {
-    // Either there is no refresh token, or this install's ENCRYPTION_KEY cannot
-    // read the one that is there - the restored-backup case. Both mean the same
-    // thing to the owner, and it is a sentence rather than a stack trace.
+  if (outcome.kind === 'unreadable') {
+    // Both causes mean the same thing to the owner, and it is a sentence rather
+    // than a stack trace.
     await markExpired('The stored HMRC connection cannot be read by this site.')
     throw new HmrcReauthRequiredError()
   }
 
-  const seen = connection.last_refresh_at
-  let tokens: HmrcTokens
-  try {
-    tokens = await client.refresh({ refreshToken, environment: connection.environment })
-  } catch (error) {
-    // Before declaring the connection dead, look again: HMRC's refresh tokens
-    // are single-use, so the commonest "failure" is losing a race - another
-    // request refreshed with this same token a moment ago and stored a
-    // perfectly good replacement. That is not an expiry.
-    const fresh = await getConnection()
-    const winnerMoved =
-      (fresh.last_refresh_at?.getTime() ?? 0) !== (seen?.getTime() ?? 0)
-    if (winnerMoved) {
-      const freshToken = tryDecryptSecret(fresh.access_token_encrypted)
-      if (freshToken && (fresh.access_token_expires_at?.getTime() ?? 0) > Date.now()) {
-        return { accessToken: freshToken, environment: fresh.environment, vrn: fresh.vrn }
-      }
-    }
-    // A timeout or an HMRC outage is transient: the stored refresh token is
-    // very likely still good, so surface the error without burning the
-    // connection to 'expired' and marching the owner back through the
-    // Government Gateway for nothing.
-    if (
-      error instanceof HmrcApiError &&
-      (error.httpStatus >= 500 || error.httpStatus === 429)
-    ) {
-      throw error
-    }
-    const message = error instanceof Error ? error.message : 'Refresh failed'
-    await markExpired(message)
-    await appendAudit({
-      action: 'hmrc.refresh-failed',
-      entityType: 'hmrc_connection',
-      summary: 'The HMRC connection could not be renewed',
-      detail: { message },
-      user: null,
-    })
-    throw new HmrcReauthRequiredError(message)
+  const { error } = outcome
+  // A timeout or an HMRC outage is transient: the stored refresh token is very
+  // likely still good, so surface the error without burning the connection to
+  // 'expired' and marching the owner back through the Government Gateway for
+  // nothing.
+  if (error instanceof HmrcApiError && (error.httpStatus >= 500 || error.httpStatus === 429)) {
+    throw error
   }
+  const message = error instanceof Error ? error.message : 'Refresh failed'
+  await markExpired(message)
+  await appendAudit({
+    action: 'hmrc.refresh-failed',
+    entityType: 'hmrc_connection',
+    summary: 'The HMRC connection could not be renewed',
+    detail: { message },
+    user: null,
+  })
+  throw new HmrcReauthRequiredError(message)
+}
 
-  // The comparison truncates BOTH sides to milliseconds. The column is a bare
-  // TIMESTAMPTZ (microseconds); the value in hand round-tripped through a JS
-  // Date (milliseconds). Compared raw they are almost never equal, which made
-  // every refresh look like a lost race: the rotated token was thrown away, the
-  // stale one returned, and the connection died at every expiry.
-  const written = await prisma.$executeRaw`
-    UPDATE "bk_hmrc_connection" SET
-      "access_token_encrypted"   = ${encryptSecret(tokens.accessToken)},
-      "access_token_expires_at"  = ${new Date(Date.now() + tokens.expiresIn * 1000)},
-      "refresh_token_encrypted"  = ${encryptSecret(tokens.refreshToken)},
-      "status"                   = 'connected',
-      "last_refresh_at"          = NOW(),
-      "last_refresh_error"       = NULL,
-      "updated_at"               = NOW()
-    WHERE "id" = 'singleton'
-      AND (date_trunc('milliseconds', "last_refresh_at")
-           IS NOT DISTINCT FROM date_trunc('milliseconds', ${seen}::timestamptz))
-  `
+type RefreshOutcome =
+  | { kind: 'ok'; accessToken: string; environment: HmrcEnvironment; vrn: string | null }
+  | { kind: 'unreadable' }
+  | { kind: 'failed'; error: unknown }
 
-  if (written === 0) {
-    // Somebody else refreshed while we were away, and the token we just fetched
-    // has already been superseded by theirs. Use what they stored.
-    const fresh = await getConnection()
-    const freshToken = tryDecryptSecret(fresh.access_token_encrypted)
-    if (!freshToken) throw new HmrcReauthRequiredError()
-    return { accessToken: freshToken, environment: fresh.environment, vrn: fresh.vrn }
-  }
-
-  return { accessToken: tokens.accessToken, environment: connection.environment, vrn: connection.vrn }
+/** The stored access token, if it decrypts and has more than the margin left. */
+function usableAccessToken(
+  row: BkHmrcConnectionRow,
+): { accessToken: string; environment: HmrcEnvironment; vrn: string | null } | null {
+  const accessToken = tryDecryptSecret(row.access_token_encrypted)
+  const expiresAt = row.access_token_expires_at?.getTime() ?? 0
+  if (!accessToken || expiresAt - Date.now() <= REFRESH_MARGIN_MS) return null
+  return { accessToken, environment: row.environment, vrn: row.vrn }
 }
 
 async function markExpired(reason: string): Promise<void> {

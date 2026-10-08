@@ -91,6 +91,9 @@ export const FraudHeaderVerdictSchema = z.object({
   warnings: z.array(FraudFindingSchema).optional(),
 })
 
+/** The sandbox's off-spec error shape: the code arrives in `message`. */
+export const BareCodeSchema = z.object({ message: z.string() })
+
 export const HmrcErrorSchema = z.object({
   code: z.string(),
   message: z.string().optional(),

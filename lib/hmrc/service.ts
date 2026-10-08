@@ -26,7 +26,7 @@ import type { HmrcCallContext, HmrcClient, VatObligation } from './client'
 import { DirectHmrcClient } from './direct-client'
 import { isHmrcConfigured } from './endpoints'
 import { buildFraudHeaders, type FraudBag } from './fraud-headers'
-import { clampRange, toDateOnly as toDateOnlyString } from './limits'
+import { MONEY_MAX_RANGE_DAYS, clampRange, toDateOnly as toDateOnlyString } from './limits'
 import { getAccessToken, getConnection } from './tokens'
 
 // Everything that needs HMRC, in one place, so the rest of the module never
@@ -97,6 +97,9 @@ async function requireVrn(): Promise<string> {
 // Obligations
 // ---------------------------------------------------------------------------
 
+/** Sent to the sandbox only; see the open-obligations call below. */
+const SANDBOX_OBLIGATIONS_SCENARIO = 'QUARTERLY_NONE_MET'
+
 /**
  * Fetch HMRC's obligations and match them onto local periods by date range.
  *
@@ -129,7 +132,14 @@ export async function syncObligations(inputs: CallInputs): Promise<{
   //
   // A failure on the second must not lose the first. Somebody with nothing filed
   // yet is exactly the person who most needs to see what is due.
-  const open = await client.obligations({ vrn, status: 'O' }, ctx)
+  //
+  // In the sandbox the open call asks for QUARTERLY_NONE_MET: four open 2017
+  // quarters instead of the default's one. The sandbox remembers nothing, but
+  // this module locks a period once it is filed - so with only the default's
+  // single quarter, one test submission used up the sandbox for good, and the
+  // fresh round of testing HMRC's approvals team ask for became impossible.
+  const openCtx = { ...ctx, testScenario: SANDBOX_OBLIGATIONS_SCENARIO }
+  const open = await client.obligations({ vrn, status: 'O' }, openCtx)
 
   const today = new Date()
   const yearAgo = new Date(today.getTime())
@@ -207,19 +217,20 @@ async function applyObligation(
 }
 
 // Both endpoints require a date range, refuse anything before MTD existed, and
-// cap the window - so the range is brought inside those limits here rather than
-// being sent as typed and coming back a 400.
+// cap the window a day tighter than obligations do (see MONEY_MAX_RANGE_DAYS) -
+// so the range is brought inside those limits here rather than being sent as
+// typed and coming back a 400.
 export async function fetchLiabilities(inputs: CallInputs, from: string, to: string) {
   const client = getHmrcClient()
   const ctx = await buildCallContext(client, inputs)
-  const range = clampRange({ from, to })
+  const range = clampRange({ from, to }, new Date(), MONEY_MAX_RANGE_DAYS)
   return client.liabilities({ vrn: await requireVrn(), ...range }, ctx)
 }
 
 export async function fetchPayments(inputs: CallInputs, from: string, to: string) {
   const client = getHmrcClient()
   const ctx = await buildCallContext(client, inputs)
-  const range = clampRange({ from, to })
+  const range = clampRange({ from, to }, new Date(), MONEY_MAX_RANGE_DAYS)
   return client.payments({ vrn: await requireVrn(), ...range }, ctx)
 }
 

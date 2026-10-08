@@ -37,6 +37,8 @@ export type HmrcCallContext = {
   environment: HmrcEnvironment
   fraudHeaders: Record<string, string>
   actorUserId?: string | null
+  /** HMRC's Gov-Test-Scenario. Only ever sent to the sandbox. */
+  testScenario?: string
 }
 
 export type ObligationsQuery = {
