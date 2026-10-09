@@ -50,6 +50,7 @@ suite('the document inbox, against a real database', () => {
   let documents: typeof import('./documents')
   let aliases: typeof import('./counterparty-aliases')
   let matching: typeof import('./document-matching')
+  let attachments: typeof import('./attachments')
 
   beforeAll(async () => {
     server = testServerFromEnv()
@@ -71,6 +72,7 @@ suite('the document inbox, against a real database', () => {
     documents = await import('./documents')
     aliases = await import('./counterparty-aliases')
     matching = await import('./document-matching')
+    attachments = await import('./attachments')
 
     // One entry to file things against, and one document in the inbox.
     await client.query(`
@@ -347,5 +349,60 @@ suite('the document inbox, against a real database', () => {
 
     await aliases.forgetAlias('TFL TRAVEL CH')
     expect(await aliases.resolveAlias('TFL TRAVEL CH')).toBeNull()
+  })
+
+  it('attaches one stored file to several entries, and taking it off one leaves the rest', async () => {
+    // A month of card fees, one entry per payout, and the processor's one
+    // statement for the lot.
+    await client.query(`
+      INSERT INTO "bk_transactions" ("id","direction","tax_point_date","counterparty")
+      VALUES ('txn-sq-1','expense','2026-03-05','SQUARE'),
+             ('txn-sq-2','expense','2026-03-28','SQUARE'),
+             ('txn-other','expense','2026-03-10','Someone Else')
+    `)
+
+    const targets = await attachments.sharedAttachmentTargets(['txn-sq-1', 'txn-sq-2', 'txn-sq-1', 'no-such-entry'])
+    expect(targets.usable.map((target) => target.id)).toEqual(['txn-sq-1', 'txn-sq-2'])
+    expect(targets.failed).toEqual([{ id: 'no-such-entry', error: 'That entry could not be found.' }])
+    // Filed by what they share: the latest date, and the one name they all carry.
+    expect(targets.filedUnder?.toISOString().slice(0, 10)).toBe('2026-03-28')
+    expect(targets.kind).toBe('purchase-receipt')
+    expect(targets.parts).toEqual({ counterparty: 'SQUARE' })
+
+    // Entries for different people: the file is not named after one of them.
+    const mixed = await attachments.sharedAttachmentTargets(['txn-sq-1', 'txn-other'])
+    expect(mixed.parts).toEqual({})
+
+    const outcome = await attachments.attachToSeveral(
+      {
+        name: 'square-fees-march.pdf',
+        filename: 'square-fees-march.pdf',
+        url: 'https://x/square-fees-march.pdf',
+        mediaProvider: 'BACKBLAZE_B2',
+        mediaKey: 'bookkeeping/square-fees-march.pdf',
+        mediaId: null,
+        mimeType: 'application/pdf',
+        size: 10,
+        sha256: null,
+      },
+      targets.usable,
+      null,
+    )
+    expect(outcome.done).toBe(2)
+    expect(outcome.failed).toEqual([])
+
+    const holders = async () =>
+      (
+        await client.query<{ transaction_id: string }>(
+          `SELECT "transaction_id" FROM "bk_attachments"
+           WHERE "media_key" = 'bookkeeping/square-fees-march.pdf' ORDER BY "transaction_id"`,
+        )
+      ).rows.map((row) => row.transaction_id)
+    // One stored copy, an evidence row on each entry pointing at it.
+    expect(await holders()).toEqual(['txn-sq-1', 'txn-sq-2'])
+
+    // Taking it off one entry removes that entry's row and nothing else.
+    await attachments.deleteAttachment(outcome.attachmentIds[0]!, null)
+    expect(await holders()).toEqual(['txn-sq-2'])
   })
 })

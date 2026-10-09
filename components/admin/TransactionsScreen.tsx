@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
 import {
   BookkeepingNav,
@@ -11,6 +11,7 @@ import {
   useTriggerHealth,
 } from './Notices'
 import { formatDate, poundsFromString } from './format'
+import { preflightFileError } from '@/modules/uk-bookkeeping/lib/file-kinds'
 
 type Row = {
   id: string
@@ -198,6 +199,57 @@ export default function TransactionsScreen({
   // Reviewing an import in bulk: only offered while the list is filtered to
   // drafts, so a stray tick can never post or delete a real record.
   const draftMode = canRecord && filters.status === 'draft'
+  // Ticking is offered whenever entries can be changed at all, because attaching
+  // one file to several of them is harmless on a recorded entry too - a monthly
+  // statement of card fees belongs on every fee the payouts recorded. Recording
+  // and removing stay behind draftMode.
+  const ticking = canRecord
+  // A transfer is a journal, not an entry, and an entry in a filed or finalised
+  // VAT return keeps its evidence as it is - no tick box for either, so a tick
+  // can only ever mean something that will work.
+  const tickable = (row: Row): boolean =>
+    row.entry_kind !== 'transfer' && !row.locked_period_id && !row.finalised_period_id
+  const attachInput = useRef<HTMLInputElement | null>(null)
+
+  /** One file, attached to every ticked entry, stored once. */
+  async function attachToTicked(file: File | undefined) {
+    if (attachInput.current) attachInput.current.value = ''
+    if (!file || selected.size === 0) return
+    const reason = preflightFileError(file)
+    if (reason) {
+      setError(reason)
+      return
+    }
+    setBulkBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const body = new FormData()
+      body.append('file', file)
+      body.append('name', file.name)
+      body.append('ids', JSON.stringify([...selected]))
+      const response = await fetch('/api/m/uk-bookkeeping/admin/transactions/bulk/attachments', {
+        method: 'POST',
+        body,
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        setError(payload.error ?? `“${file.name}” could not be attached.`)
+        return
+      }
+      const done = Number(payload.done ?? 0)
+      const failed: { error: string }[] = payload.failed ?? []
+      setNotice(
+        `“${file.name}” attached to ${done} entr${done === 1 ? 'y' : 'ies'}.` +
+          (failed.length ? ` ${failed.length} could not take it: ${failed[0]!.error}` : ''),
+      )
+      await load()
+    } catch {
+      setError(`“${file.name}” did not reach the server. Check the connection and try again.`)
+    } finally {
+      setBulkBusy(false)
+    }
+  }
 
   async function bulk(action: 'post' | 'delete') {
     if (selected.size === 0) return
@@ -368,7 +420,7 @@ export default function TransactionsScreen({
         </EmptyState>
       )}
 
-      {draftMode && list && list.rows.length > 0 && (
+      {(draftMode || selected.size > 0) && list && list.rows.length > 0 && (
         <div
           className="card"
           style={{
@@ -384,20 +436,40 @@ export default function TransactionsScreen({
             {selected.size} of {list.rows.length} ticked
           </span>
           <span style={{ flex: 1 }} />
-          <button
-            className="btn btn-sm btn-primary"
-            disabled={bulkBusy || selected.size === 0}
-            onClick={() => bulk('post')}
-          >
-            {bulkBusy ? 'Working…' : `Record ${selected.size || ''}`.trim()}
-          </button>
+          <input
+            ref={attachInput}
+            type="file"
+            accept=".pdf,.jpg,.jpeg,.png,.webp"
+            aria-label="File to attach to the ticked entries"
+            style={{ display: 'none' }}
+            onChange={(e) => attachToTicked(e.target.files?.[0])}
+          />
           <button
             className="btn btn-sm"
             disabled={bulkBusy || selected.size === 0}
-            onClick={() => bulk('delete')}
+            title="One file - a monthly statement, say - as evidence for every ticked entry"
+            onClick={() => attachInput.current?.click()}
           >
-            Remove
+            Attach a file to these
           </button>
+          {draftMode && (
+            <>
+              <button
+                className="btn btn-sm btn-primary"
+                disabled={bulkBusy || selected.size === 0}
+                onClick={() => bulk('post')}
+              >
+                {bulkBusy ? 'Working…' : `Record ${selected.size || ''}`.trim()}
+              </button>
+              <button
+                className="btn btn-sm"
+                disabled={bulkBusy || selected.size === 0}
+                onClick={() => bulk('delete')}
+              >
+                Remove
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -406,14 +478,14 @@ export default function TransactionsScreen({
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
             <thead>
               <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--color-border)' }}>
-                {draftMode && (
+                {ticking && (
                   <th style={{ ...stickyHeader, padding: '0.625rem 0.75rem', width: '2rem' }}>
                     <input
                       type="checkbox"
                       aria-label="Tick every entry on this page"
-                      checked={selected.size > 0 && selected.size === list.rows.length}
+                      checked={selected.size > 0 && selected.size === list.rows.filter(tickable).length}
                       onChange={(e) =>
-                        setSelected(e.target.checked ? new Set(list.rows.map((r) => r.id)) : new Set())
+                        setSelected(e.target.checked ? new Set(list.rows.filter(tickable).map((r) => r.id)) : new Set())
                       }
                     />
                   </th>
@@ -435,9 +507,9 @@ export default function TransactionsScreen({
             <tbody>
               {list.rows.map((row) => (
                 <tr key={row.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
-                  {draftMode && (
+                  {ticking && (
                     <td style={{ padding: '0.5rem 0.75rem' }}>
-                      {row.entry_kind === 'transfer' ? null : (
+                      {!tickable(row) ? null : (
                       <input
                         type="checkbox"
                         aria-label={`Tick the entry for ${row.counterparty}`}
@@ -518,7 +590,7 @@ export default function TransactionsScreen({
             </tbody>
             <tfoot>
               <tr>
-                <td colSpan={draftMode ? 4 : 3} style={{ padding: '0.625rem 0.75rem', fontWeight: 600 }}>
+                <td colSpan={ticking ? 4 : 3} style={{ padding: '0.625rem 0.75rem', fontWeight: 600 }}>
                   {list.total} entr{list.total === 1 ? 'y' : 'ies'}
                 </td>
                 <td style={{ padding: '0.625rem 0.75rem', textAlign: 'right', fontWeight: 600 }}>
