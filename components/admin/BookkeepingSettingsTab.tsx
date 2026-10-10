@@ -8,6 +8,7 @@ import { SettingsHeaderActions, SettingsHeaderStatus } from '@/components/admin/
 import { useTabParam } from './useTabParam'
 import { formatDate, poundsFromString } from './format'
 import { hmrcFetch } from '@/modules/uk-bookkeeping/lib/hmrc/fraud-client'
+import { InfoTip } from '@/components/admin/InfoTip'
 
 // Settings, as a tab under the site's own Settings page rather than another
 // sidebar link.
@@ -385,24 +386,17 @@ const SUBTYPE_ORDER: AccountSubtype[] = [
   'profit_and_loss',
 ]
 
+// A field in a settings section: its label above the box, like every other
+// settings page (the shared styles size the box itself).
 const input: React.CSSProperties = {
-  padding: '0.375rem 0.625rem',
-  border: '1px solid var(--color-border)',
-  borderRadius: 6,
-  background: 'var(--color-bg)',
-  color: 'var(--color-text)',
   width: '100%',
-  maxWidth: 280,
 }
 
 const row: React.CSSProperties = {
   display: 'flex',
-  flexWrap: 'wrap',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  gap: '0.5rem 1rem',
-  padding: '0.625rem 0',
-  borderBottom: '1px solid var(--color-border)',
+  flexDirection: 'column',
+  gap: 'var(--space-1)',
+  fontSize: 'var(--text-sm)',
 }
 
 const quiet: React.CSSProperties = {
@@ -586,6 +580,12 @@ export function BookkeepingSettingsTab() {
   async function save() {
     if (!settings) return
     setError(null)
+    // One Save for the whole page, as on every other settings page: HMRC
+    // credentials typed into their boxes go up with everything else.
+    if (credClientId.trim() || credClientSecret.trim()) {
+      const stored = await saveCredentials()
+      if (!stored) return
+    }
     try {
       const response = await fetch('/api/m/uk-bookkeeping/admin/settings', {
         method: 'PATCH',
@@ -644,7 +644,7 @@ export function BookkeepingSettingsTab() {
     }
   }
 
-  async function saveCredentials() {
+  async function saveCredentials(): Promise<boolean> {
     setSavingCreds(true)
     setSavedCreds(false)
     setCredError(null)
@@ -677,8 +677,10 @@ export function BookkeepingSettingsTab() {
       setCredClientId('')
       setCredClientSecret('')
       await load()
+      return true
     } catch (err) {
       setCredError(err instanceof Error ? err.message : 'Those credentials could not be saved.')
+      return false
     } finally {
       setSavingCreds(false)
     }
@@ -1169,8 +1171,8 @@ export function BookkeepingSettingsTab() {
       hosting environment variables.
     </p>
   ) : (
-    <div>
-      <div style={row}>
+    <div className="settings-fields">
+      <div className="settings-field" style={row}>
         <label htmlFor="bk-client-id">
           Client ID
           <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
@@ -1185,12 +1187,10 @@ export function BookkeepingSettingsTab() {
           onChange={(e) => setCredClientId(e.target.value)}
         />
       </div>
-      <div style={row}>
+      <div className="settings-field" style={row}>
         <label htmlFor="bk-client-secret">
           Client secret
-          <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
-            {envVars.HMRC_CLIENT_SECRET ? 'Stored. Paste a new one to replace it.' : 'Not stored yet.'}
-          </span>
+          <InfoTip>{envVars.HMRC_CLIENT_SECRET ? 'Stored. Paste a new one to replace it.' : 'Not stored yet.'}</InfoTip>
         </label>
         <input
           id="bk-client-secret"
@@ -1202,12 +1202,7 @@ export function BookkeepingSettingsTab() {
         />
       </div>
       <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginTop: '0.75rem', flexWrap: 'wrap' }}>
-        <SettingsHeaderActions>
-          <SettingsHeaderStatus message={savedCreds ? 'Credentials saved. Live from the next deployment.' : null} error={credError} />
-          <button className="btn btn-primary" onClick={saveCredentials} disabled={savingCreds}>
-            {savingCreds ? 'Saving…' : 'Save credentials'}
-          </button>
-        </SettingsHeaderActions>
+        {savingCreds && <span className="field-hint">Saving the credentials…</span>}
         {savedCreds && (
           <span style={{ color: 'var(--color-success, var(--color-text))', fontSize: 'var(--text-sm)' }}>
             Saved. They take hold on the next deployment - the site will prompt for one.
@@ -1243,8 +1238,8 @@ export function BookkeepingSettingsTab() {
 
       {tab === 'general' && (
         <div style={SECTION_STACK}>
-      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
-        <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Your business</h3>
+      <div className="card settings-fields">
+        <h3 className="card-title">Your business</h3>
         <div className="settings-field" style={row}>
           <label htmlFor="bk-name">Business name</label>
           <input id="bk-name" style={input} value={settings.businessName ?? ''} onChange={(e) => set('businessName', e.target.value || null)} />
@@ -1264,37 +1259,11 @@ export function BookkeepingSettingsTab() {
           <label htmlFor="bk-registered">VAT registered from</label>
           <input id="bk-registered" type="date" style={input} value={toDateValue(settings.vatRegisteredFrom)} onChange={(e) => set('vatRegisteredFrom', e.target.value || null)} />
         </div>
-      </div>
-
-      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
-        <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Invoices for payments you record by hand</h3>
-        <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
-          Record money coming in and an invoice PDF is made for it, numbered in order and filed as the evidence.
-          Sales from your shop already have their own invoices and are left alone.
-        </p>
-        <div style={row}>
-          <label htmlFor="bk-auto-invoice">Make an invoice automatically</label>
-          <input
-            id="bk-auto-invoice"
-            type="checkbox"
-            checked={settings.autoInvoiceManualIncome}
-            onChange={(e) => set('autoInvoiceManualIncome', e.target.checked)}
-          />
-        </div>
         <div className="settings-field" style={row}>
-          <label htmlFor="bk-invoice-prefix">Invoice number starts with</label>
-          <input id="bk-invoice-prefix" style={input} maxLength={12} value={settings.invoicePrefix} onChange={(e) => set('invoicePrefix', e.target.value)} />
-        </div>
-        <div style={row}>
-          <label htmlFor="bk-address">Your address, as it goes on the invoice</label>
-          <textarea id="bk-address" style={{ ...input, minHeight: '5rem' }} value={settings.businessAddress ?? ''} onChange={(e) => set('businessAddress', e.target.value || null)} />
-        </div>
-      </div>
-
-      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
-        <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Your accounting year end</h3>
-        <div className="settings-field" style={row}>
-          <label htmlFor="bk-year-end-month">Month</label>
+          <label htmlFor="bk-year-end-month">
+            Year end (month)
+            <InfoTip>The date your financial year ends - often 31 March, or the anniversary of the month the company was set up. The director&rsquo;s loan screen works out where the loan stood at this date, which is the figure that decides whether anything has to be paid back.</InfoTip>
+          </label>
           <select
             id="bk-year-end-month"
             style={input}
@@ -1309,7 +1278,7 @@ export function BookkeepingSettingsTab() {
           </select>
         </div>
         <div className="settings-field" style={row}>
-          <label htmlFor="bk-year-end-day">Day</label>
+          <label htmlFor="bk-year-end-day">Year end (day)</label>
           <input
             id="bk-year-end-day"
             type="number"
@@ -1320,19 +1289,32 @@ export function BookkeepingSettingsTab() {
             onChange={(e) => set('yearEndDay', Number(e.target.value))}
           />
         </div>
-        <p style={{ margin: '0.75rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
-          The date your financial year ends - often 31 March, or the anniversary of the month the
-          company was set up. The director&rsquo;s loan screen works out where the loan stood at this
-          date, which is the figure that decides whether anything has to be paid back.
-        </p>
+      </div>
+
+      <div className="card settings-fields">
+        <h3 className="card-title">Invoices for payments you record by hand <InfoTip>Record money coming in and an invoice PDF is made for it, numbered in order and filed as the evidence. Sales from your shop already have their own invoices and are left alone.</InfoTip></h3>
+        <div className="field field--beside-input">
+          <label className="settings-check">
+            <input id="bk-auto-invoice" type="checkbox" checked={settings.autoInvoiceManualIncome} onChange={(e) => set('autoInvoiceManualIncome', e.target.checked)} />
+            Make an invoice automatically
+          </label>
+        </div>
+        <div className="settings-field" style={row}>
+          <label htmlFor="bk-invoice-prefix">Invoice number starts with</label>
+          <input id="bk-invoice-prefix" style={input} maxLength={12} value={settings.invoicePrefix} onChange={(e) => set('invoicePrefix', e.target.value)} />
+        </div>
+        <div className="field field--wide" style={row}>
+          <label htmlFor="bk-address">Your address, as it goes on the invoice</label>
+          <textarea id="bk-address" style={{ ...input, minHeight: '5rem' }} value={settings.businessAddress ?? ''} onChange={(e) => set('businessAddress', e.target.value || null)} />
+        </div>
       </div>
         </div>
       )}
 
       {tab === 'vat' && (
         <div style={SECTION_STACK}>
-      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
-        <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>How you do VAT</h3>
+      <div className="card settings-fields">
+        <h3 className="card-title">How you do VAT</h3>
         <div className="settings-field" style={row}>
           <label htmlFor="bk-scheme">Scheme</label>
           <select id="bk-scheme" style={input} value={settings.scheme} onChange={(e) => set('scheme', e.target.value as Settings['scheme'])}>
@@ -1360,23 +1342,14 @@ export function BookkeepingSettingsTab() {
         <div className="settings-field" style={row}>
           <label htmlFor="bk-first-end">
             …and that first period ends
-            <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))', maxWidth: 340 }}>
-              From your registration letter or VAT account. HMRC ends every period on the last day of
-              a month, so the first one is rarely a neat three months: registering on 10 July with
-              periods ending October gives 10 July to 31 October. Every return after that follows
-              calendar months, due one month and 7 days after each period ends. Left empty, we assume
-              the nearest month end.
-            </span>
+            <InfoTip>From your registration letter or VAT account. HMRC ends every period on the last day of a month, so the first one is rarely a neat three months: registering on 10 July with periods ending October gives 10 July to 31 October. Every return after that follows calendar months, due one month and 7 days after each period ends. Left empty, we assume the nearest month end.</InfoTip>
           </label>
           <input id="bk-first-end" type="date" style={input} value={toDateValue(settings.firstPeriodEnd)} onChange={(e) => set('firstPeriodEnd', e.target.value || null)} />
         </div>
         <div className="settings-field" style={row}>
           <label htmlFor="bk-rounding">
             Rounding for the four total boxes
-            <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))', maxWidth: 340 }}>
-              Boxes 6 to 9 are whole pounds. HMRC’s guidance does not say which way to round them, so
-              pick whichever your accountant prefers. The unrounded figures are kept either way.
-            </span>
+            <InfoTip>Boxes 6 to 9 are whole pounds. HMRC’s guidance does not say which way to round them, so pick whichever your accountant prefers. The unrounded figures are kept either way.</InfoTip>
           </label>
           <select id="bk-rounding" style={input} value={settings.boxRounding} onChange={(e) => set('boxRounding', e.target.value as Settings['boxRounding'])}>
             <option value="nearest">To the nearest pound</option>
@@ -1392,8 +1365,8 @@ export function BookkeepingSettingsTab() {
         )}
       </div>
 
-      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
-        <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>HMRC</h3>
+      <div className="card settings-fields">
+        <h3 className="card-title">HMRC</h3>
 
         {!hmrc.configured && (
           <div>
@@ -1594,10 +1567,7 @@ export function BookkeepingSettingsTab() {
           <div className="settings-field" style={row}>
             <label htmlFor="bk-vendor-ip">
               Your site’s public address
-              <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))', maxWidth: 340 }}>
-                Left empty we look this up from your web address, which is right for almost everybody.
-                Fill it in only if HMRC has asked you to.
-              </span>
+              <InfoTip>Left empty we look this up from your web address, which is right for almost everybody. Fill it in only if HMRC has asked you to.</InfoTip>
             </label>
             <input id="bk-vendor-ip" style={input} value={settings.vendorPublicIp ?? ''} onChange={(e) => set('vendorPublicIp', e.target.value || null)} />
           </div>
@@ -1612,21 +1582,18 @@ export function BookkeepingSettingsTab() {
 
       {tab === 'records' && (
         <div style={SECTION_STACK}>
-      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
-        <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Sales from elsewhere on this site</h3>
-        <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
-          Another part of the site - a shop raising an invoice, for instance - can hand a sale straight to the books,
-          split by VAT rate, so nobody types it in twice. Each one is recorded once and once only, against its
-          invoice number.
-        </p>
-        <div style={row}>
-          <label htmlFor="bk-external-sales">Take sales handed over automatically</label>
-          <input
-            id="bk-external-sales"
-            type="checkbox"
-            checked={settings.externalSalesEnabled}
-            onChange={(e) => set('externalSalesEnabled', e.target.checked)}
-          />
+      <div className="card settings-fields">
+        <h3 className="card-title">Sales and records</h3>
+        <div className="field field--beside-input">
+          <label className="settings-check">
+            <input id="bk-external-sales" type="checkbox" checked={settings.externalSalesEnabled} onChange={(e) => set('externalSalesEnabled', e.target.checked)} />
+            Take sales from elsewhere on this site automatically
+            <InfoTip>Another part of the site - a shop raising an invoice, for instance - can hand a sale straight to the books, split by VAT rate, so nobody types it in twice. Each one is recorded once and once only, against its invoice number. Switch this off if you also bring the same money in from a bank statement - counting a sale twice makes a wrong return, not an untidy one.</InfoTip>
+          </label>
+        </div>
+        <div className="settings-field" style={row}>
+          <label htmlFor="bk-retention">Keep records for (years)</label>
+          <input id="bk-retention" type="number" style={input} value={settings.retentionYears} onChange={(e) => set('retentionYears', Number(e.target.value))} />
         </div>
         {settings.externalSalesEnabled && (
           <>
@@ -1660,14 +1627,6 @@ export function BookkeepingSettingsTab() {
             </div>
           </>
         )}
-        <p style={{ margin: '0.75rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
-          Switch this off if you also bring the same money in from a bank statement - counting a sale twice makes a
-          wrong return, not an untidy one.
-        </p>
-      </div>
-
-      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
-        <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Corrections and records</h3>
         <div className="settings-field" style={row}>
           <label htmlFor="bk-threshold">Correct on the next return up to</label>
           <input id="bk-threshold" style={input} value={settings.errorThresholdFixed} onChange={(e) => set('errorThresholdFixed', e.target.value)} />
@@ -1679,10 +1638,6 @@ export function BookkeepingSettingsTab() {
         <div className="settings-field" style={row}>
           <label htmlFor="bk-cap">Never above</label>
           <input id="bk-cap" style={input} value={settings.errorThresholdCap} onChange={(e) => set('errorThresholdCap', e.target.value)} />
-        </div>
-        <div className="settings-field" style={row}>
-          <label htmlFor="bk-retention">Keep records for (years)</label>
-          <input id="bk-retention" type="number" style={input} value={settings.retentionYears} onChange={(e) => set('retentionYears', Number(e.target.value))} />
         </div>
         <p style={{ margin: '0.75rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
           These are HMRC’s current limits for putting a mistake right on your next return rather than
@@ -1706,7 +1661,7 @@ export function BookkeepingSettingsTab() {
 
       {(tab === 'general' || tab === 'vat' || tab === 'records') && (
         <SettingsHeaderActions>
-          <SettingsHeaderStatus message={saved ? 'Saved' : null} />
+          <SettingsHeaderStatus message={saved ? 'Saved' : null} error={error ?? credError} />
           <button className="btn btn-primary" onClick={save}>
             Save changes
           </button>
@@ -1720,22 +1675,15 @@ export function BookkeepingSettingsTab() {
         presses Save, and wonders which of the two happened.
       */}
       {tab === 'categories' && (
-      <div className="card settings-fields" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
+      <div className="card settings-fields">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', margin: '0 0 0.5rem' }}>
-          <h3 style={{ margin: 0, fontSize: '0.9375rem' }}>Categories</h3>
+          <h3 className="card-title" style={{ margin: 0 }}>Categories <InfoTip>These are the choices in the &ldquo;What was it for&rdquo; box on every entry, and they arrive ready made. Add one when a cost is big enough, or regular enough, that you would rather see it on its own line than lumped in with everything else. Where you file it decides which box of the tax return it counts towards - so a new category changes what you can see, not what you owe. Changes here take effect straight away.</InfoTip></h3>
           {!showAddCategory && (
             <button type="button" className="btn btn-sm btn-primary" onClick={() => setShowAddCategory(true)}>
               Add a category
             </button>
           )}
         </div>
-        <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
-          These are the choices in the &ldquo;What was it for&rdquo; box on every entry, and they
-          arrive ready made. Add one when a cost is big enough, or regular enough, that you would
-          rather see it on its own line than lumped in with everything else. Where you file it
-          decides which box of the tax return it counts towards - so a new category changes what you
-          can see, not what you owe. Changes here take effect straight away.
-        </p>
         <ErrorNotice message={categoryError} />
         {categoryNotice && (
           <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
@@ -1785,10 +1733,7 @@ export function BookkeepingSettingsTab() {
         <div className="settings-field" style={row}>
           <label htmlFor="bk-new-category-filing">
             Where it belongs on the accounts
-            <span style={quiet}>
-              Which box of the tax return it counts towards. Pick the one it would have gone in if
-              you had not given it a category of its own.
-            </span>
+            <InfoTip>Which box of the tax return it counts towards. Pick the one it would have gone in if you had not given it a category of its own.</InfoTip>
           </label>
           <select
             id="bk-new-category-filing"
@@ -1806,12 +1751,7 @@ export function BookkeepingSettingsTab() {
         <div className="settings-field" style={row}>
           <label htmlFor="bk-new-category-account">
             Which account it posts to
-            <span style={quiet}>
-              Leave this be unless you know otherwise - an account is made for it, filed exactly
-              where you said above. Point it at one you already have when what you are recording is
-              not a cost at all: money paid onto a balance held with a supplier, say, which is still
-              yours until they bill you for it.
-            </span>
+            <InfoTip>Leave this be unless you know otherwise - an account is made for it, filed exactly where you said above. Point it at one you already have when what you are recording is not a cost at all: money paid onto a balance held with a supplier, say, which is still yours until they bill you for it.</InfoTip>
           </label>
           <select
             id="bk-new-category-account"
@@ -2037,20 +1977,15 @@ export function BookkeepingSettingsTab() {
       )}
 
       {tab === 'bank' && (
-      <div className="card settings-fields" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
+      <div className="card settings-fields">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', margin: '0 0 0.5rem' }}>
-          <h3 style={{ margin: 0, fontSize: '0.9375rem' }}>Bank accounts</h3>
+          <h3 className="card-title" style={{ margin: 0 }}>Bank accounts <InfoTip>A statement is imported against one particular account, so there has to be an account here before anything can be brought in. Changes on this card take effect straight away rather than waiting for the save button above.</InfoTip></h3>
           {!showAddBank && (
             <button type="button" className="btn btn-sm btn-primary" onClick={() => setShowAddBank(true)}>
               Add an account
             </button>
           )}
         </div>
-        <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
-          A statement is imported against one particular account, so there has to be an account here
-          before anything can be brought in. Changes on this card take effect straight away rather
-          than waiting for the save button above.
-        </p>
         <ErrorNotice message={bankError} />
         {bankNotice && (
           <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
@@ -2263,21 +2198,15 @@ export function BookkeepingSettingsTab() {
       )}
 
       {tab === 'ledger' && (
-      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+      <div className="card settings-fields">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', margin: '0 0 0.5rem' }}>
-          <h3 style={{ margin: 0, fontSize: '0.9375rem' }}>Ledger accounts</h3>
+          <h3 className="card-title" style={{ margin: 0 }}>Ledger accounts <InfoTip>These are the pots a journal moves money between, and they arrive ready made - most people never need to add one. The exception is a director&rsquo;s loan account: if more than one director lends the company money, give each of them their own, so each running total is their own. Changes here take effect straight away.</InfoTip></h3>
           {!showAddLedger && (
             <button type="button" className="btn btn-sm btn-primary" onClick={() => setShowAddLedger(true)}>
               Add an account
             </button>
           )}
         </div>
-        <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
-          These are the pots a journal moves money between, and they arrive ready made - most people
-          never need to add one. The exception is a director&rsquo;s loan account: if more than one
-          director lends the company money, give each of them their own, so each running total is
-          their own. Changes here take effect straight away.
-        </p>
         <ErrorNotice message={ledgerError} />
         {ledgerNotice && (
           <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
