@@ -10,7 +10,7 @@ import {
   TriggerHealthNotice,
   useTriggerHealth,
 } from './Notices'
-import { formatDate, poundsFromString } from './format'
+import { addStrings, formatDate, poundsFromString } from './format'
 import { preflightFileError } from '@/modules/uk-bookkeeping/lib/file-kinds'
 
 type Row = {
@@ -434,6 +434,10 @@ export default function TransactionsScreen({
         >
           <span style={{ fontSize: 'var(--text-sm)' }}>
             {selected.size} of {list.rows.length} ticked
+            {selected.size > 0 &&
+              ` - ${poundsFromString(
+                list.rows.filter((r) => selected.has(r.id)).reduce((sum, r) => addStrings(sum, r.gross_total), '0'),
+              )} total`}
           </span>
           <span style={{ flex: 1 }} />
           <input

@@ -255,7 +255,9 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
       AND (${filter.hasEvidence ?? null}::boolean IS NULL
            OR (${filter.hasEvidence ?? null}::boolean = TRUE AND EXISTS (
                  SELECT 1 FROM "bk_attachments" a WHERE a."transaction_id" = t."id"))
-           OR (${filter.hasEvidence ?? null}::boolean = FALSE AND NOT EXISTS (
+           OR (${filter.hasEvidence ?? null}::boolean = FALSE
+               AND t."evidence_not_required" = FALSE
+               AND NOT EXISTS (
                  SELECT 1 FROM "bk_attachments" a WHERE a."transaction_id" = t."id")))
       AND (${filter.evidenceNotRequired ?? null}::boolean IS NULL
            OR t."evidence_not_required" = ${filter.evidenceNotRequired ?? null}::boolean)
