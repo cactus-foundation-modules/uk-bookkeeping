@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
 import { ErrorNotice, TriggerHealthNotice, type TriggerHealth } from './Notices'
-import { SubTabs } from './ui'
+import { TabStrip } from '@/components/admin/TabStrip'
+import { SettingsHeaderActions, SettingsHeaderStatus } from '@/components/admin/SettingsHeaderActions'
+import { useTabParam } from './useTabParam'
 import { formatDate, poundsFromString } from './format'
 import { hmrcFetch } from '@/modules/uk-bookkeeping/lib/hmrc/fraud-client'
 
@@ -324,6 +326,16 @@ const SETTINGS_TABS: { key: SettingsTab; label: string }[] = [
   { key: 'ledger', label: 'Ledger accounts' },
 ]
 
+// Two columns of cards on a wide screen, one on a phone. The minimum is what
+// makes it collapse: when two will not fit side by side at that width, the
+// grid drops to one.
+const TWO_COLUMNS = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 28rem), 1fr))',
+  columnGap: '1.5rem',
+  alignItems: 'start',
+} as const
+
 const DEFAULT_YEAR_END_MONTH = 3
 const DEFAULT_YEAR_END_DAY = 31
 
@@ -387,9 +399,10 @@ const input: React.CSSProperties = {
 
 const row: React.CSSProperties = {
   display: 'flex',
+  flexWrap: 'wrap',
   alignItems: 'center',
   justifyContent: 'space-between',
-  gap: '1rem',
+  gap: '0.5rem 1rem',
   padding: '0.625rem 0',
   borderBottom: '1px solid var(--color-border)',
 }
@@ -422,7 +435,7 @@ export function BookkeepingSettingsTab() {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
-  const [tab, setTab] = useState<SettingsTab>('general')
+  const [tab, setTab] = useTabParam<SettingsTab>('sub', 'general', SETTINGS_TABS.map((t) => t.key))
   const [verdict, setVerdict] = useState<HeaderVerdict | null>(null)
   const [checking, setChecking] = useState(false)
 
@@ -458,6 +471,9 @@ export function BookkeepingSettingsTab() {
     { id: string; name: string; filing: string; isSystem: boolean; accountId: string } | null
   >(null)
   const [showArchivedCategories, setShowArchivedCategories] = useState(false)
+  const [showAddCategory, setShowAddCategory] = useState(false)
+  const [showAddBank, setShowAddBank] = useState(false)
+  const [showAddLedger, setShowAddLedger] = useState(false)
 
   const [ledgerAccounts, setLedgerAccounts] = useState<LedgerAccount[] | null>(null)
   const [ledgerError, setLedgerError] = useState<string | null>(null)
@@ -717,6 +733,7 @@ export function BookkeepingSettingsTab() {
         return
       }
       setNewBank(EMPTY_BANK_ACCOUNT)
+      setShowAddBank(false)
       await loadBankAccounts()
     } catch {
       setBankError('The save did not reach the server. Check the connection and try again.')
@@ -846,6 +863,7 @@ export function BookkeepingSettingsTab() {
         return
       }
       setNewLedger(EMPTY_LEDGER_ACCOUNT)
+      setShowAddLedger(false)
       await loadLedgerAccounts()
     } catch {
       setLedgerError('The save did not reach the server. Check the connection and try again.')
@@ -989,6 +1007,7 @@ export function BookkeepingSettingsTab() {
         return
       }
       setNewCategory({ ...EMPTY_CATEGORY, direction: newCategory.direction, filing: newCategory.filing })
+      setShowAddCategory(false)
       setCategoryNotice(`${name} has been added, at the bottom of its list. Move it up if it belongs higher.`)
       // The account list too: adding a category either made an account or
       // claimed one, and the "posts to" line on every row reads off it.
@@ -1185,9 +1204,12 @@ export function BookkeepingSettingsTab() {
         />
       </div>
       <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginTop: '0.75rem', flexWrap: 'wrap' }}>
-        <button className="btn btn-sm btn-primary" onClick={saveCredentials} disabled={savingCreds}>
-          {savingCreds ? 'Saving…' : 'Save credentials'}
-        </button>
+        <SettingsHeaderActions>
+          <SettingsHeaderStatus message={savedCreds ? 'Credentials saved. Live from the next deployment.' : null} error={credError} />
+          <button className="btn btn-primary" onClick={saveCredentials} disabled={savingCreds}>
+            {savingCreds ? 'Saving…' : 'Save credentials'}
+          </button>
+        </SettingsHeaderActions>
         {savedCreds && (
           <span style={{ color: 'var(--color-success, var(--color-text))', fontSize: 'var(--text-sm)' }}>
             Saved. They take hold on the next deployment - the site will prompt for one.
@@ -1207,14 +1229,22 @@ export function BookkeepingSettingsTab() {
   )
 
   return (
-    <div style={{ maxWidth: 720 }}>
+    <div>
       <ErrorNotice message={error} />
       <TriggerHealthNotice health={data.health} />
 
-      <SubTabs tabs={SETTINGS_TABS} active={tab} onChange={setTab} />
+      <TabStrip
+        style={{ marginBottom: 'var(--space-6)' }}
+        items={SETTINGS_TABS.map((t) => ({
+          key: t.key,
+          label: t.label,
+          active: t.key === tab,
+          onClick: () => setTab(t.key),
+        }))}
+      />
 
       {tab === 'general' && (
-        <>
+        <div style={TWO_COLUMNS}>
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Your business</h3>
         <div style={row}>
@@ -1298,11 +1328,11 @@ export function BookkeepingSettingsTab() {
           date, which is the figure that decides whether anything has to be paid back.
         </p>
       </div>
-        </>
+        </div>
       )}
 
       {tab === 'vat' && (
-        <>
+        <div style={TWO_COLUMNS}>
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>How you do VAT</h3>
         <div style={row}>
@@ -1579,11 +1609,11 @@ export function BookkeepingSettingsTab() {
           </p>
         </details>
       </div>
-        </>
+        </div>
       )}
 
       {tab === 'records' && (
-        <>
+        <div style={TWO_COLUMNS}>
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Sales from elsewhere on this site</h3>
         <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
@@ -1673,27 +1703,34 @@ export function BookkeepingSettingsTab() {
           </p>
         )}
       </div>
-        </>
+        </div>
       )}
 
       {(tab === 'general' || tab === 'vat' || tab === 'records') && (
-        <>
-      <button className="btn btn-primary" onClick={save}>
-        Save settings
-      </button>
-      {saved && <span style={{ marginLeft: '0.75rem', color: 'var(--color-success, var(--color-text))', fontSize: 'var(--text-sm)' }}>Saved</span>}
-        </>
+        <SettingsHeaderActions>
+          <SettingsHeaderStatus message={saved ? 'Saved' : null} />
+          <button className="btn btn-primary" onClick={save}>
+            Save changes
+          </button>
+        </SettingsHeaderActions>
       )}
 
       {/*
-        The lists below sit under the save button on purpose: everything above it
-        is settings you save in one go, and these save themselves the moment you
-        press a button. Mixing the two in one column is how somebody ends up
-        adding an account, pressing Save, and wondering which of the two happened.
+        The lists below are not part of the Save button in the Settings bar: the
+        settings above are saved in one go, and these save themselves the moment you
+        press a button. They are on tabs of their own, so nobody adds an account,
+        presses Save, and wonders which of the two happened.
       */}
       {tab === 'categories' && (
       <div className="card" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
-        <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Categories</h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', margin: '0 0 0.5rem' }}>
+          <h3 style={{ margin: 0, fontSize: '0.9375rem' }}>Categories</h3>
+          {!showAddCategory && (
+            <button type="button" className="btn btn-sm btn-primary" onClick={() => setShowAddCategory(true)}>
+              Add a category
+            </button>
+          )}
+        </div>
         <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
           These are the choices in the &ldquo;What was it for&rdquo; box on every entry, and they
           arrive ready made. Add one when a cost is big enough, or regular enough, that you would
@@ -1706,6 +1743,111 @@ export function BookkeepingSettingsTab() {
           <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
             {categoryNotice}
           </p>
+        )}
+
+        {showAddCategory && (
+          <div style={{ border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md, 6px)', padding: '0.75rem 1rem', margin: '0 0 1rem' }}>
+            <h4 style={{ margin: '0 0 0.25rem', fontSize: 'var(--text-sm)' }}>Add a category</h4>
+        <div style={row}>
+          <label htmlFor="bk-new-category-name">
+            Name
+            <span style={quiet}>Required. What you want to see in the list when you record something.</span>
+          </label>
+          <input
+            id="bk-new-category-name"
+            style={input}
+            value={newCategory.name}
+            onChange={(e) => setNewCategory({ ...newCategory, name: e.target.value })}
+          />
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-category-direction">Money in or money out</label>
+          <select
+            id="bk-new-category-direction"
+            style={input}
+            value={newCategory.direction}
+            onChange={(e) => {
+              // Keep the filing choice if it still applies, rather than leaving a
+              // box selected that the new direction has no option for.
+              const direction = e.target.value as Category['direction']
+              const options = filingOptionsFor(direction)
+              const filing = options.some((option) => option.key === newCategory.filing)
+                ? newCategory.filing
+                : (options[0]?.key ?? '')
+              setNewCategory({ ...newCategory, direction, filing })
+            }}
+          >
+            {DIRECTION_GROUPS.map((group) => (
+              <option key={group.direction} value={group.direction}>
+                {group.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-category-filing">
+            Where it belongs on the accounts
+            <span style={quiet}>
+              Which box of the tax return it counts towards. Pick the one it would have gone in if
+              you had not given it a category of its own.
+            </span>
+          </label>
+          <select
+            id="bk-new-category-filing"
+            style={input}
+            value={newCategory.filing}
+            onChange={(e) => setNewCategory({ ...newCategory, filing: e.target.value })}
+          >
+            {filingOptionsFor(newCategory.direction).map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={row}>
+          <label htmlFor="bk-new-category-account">
+            Which account it posts to
+            <span style={quiet}>
+              Leave this be unless you know otherwise - an account is made for it, filed exactly
+              where you said above. Point it at one you already have when what you are recording is
+              not a cost at all: money paid onto a balance held with a supplier, say, which is still
+              yours until they bill you for it.
+            </span>
+          </label>
+          <select
+            id="bk-new-category-account"
+            style={input}
+            value={newCategory.accountId}
+            onChange={(e) => setNewCategory({ ...newCategory, accountId: e.target.value })}
+          >
+            <option value="">Make one for it</option>
+            {accountOptionsFor(null).map((account) => (
+              <option key={account.id} value={account.id}>
+                {account.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            onClick={addCategory}
+            disabled={categoryBusy}
+          >
+            {categoryBusy ? 'Adding…' : 'Add category'}
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setShowAddCategory(false)}
+            disabled={categoryBusy}
+          >
+            Cancel
+          </button>
+        </div>
+          </div>
         )}
 
         {!categories ? (
@@ -1722,10 +1864,10 @@ export function BookkeepingSettingsTab() {
             // a put-away category has no place in the order to be moved within.
             const movable = rows.filter((category) => !category.archived)
             return (
-              <div key={group.direction}>
-                <h4 style={{ margin: '1rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
-                  {group.label}
-                </h4>
+              <details key={group.direction} style={{ borderTop: '1px solid var(--color-border)', padding: '0.5rem 0' }}>
+                <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 'var(--text-sm)' }}>
+                  {group.label} ({rows.length})
+                </summary>
                 {rows.map((category) =>
                   editingCategory?.id === category.id ? (
                     <div key={category.id} style={{ ...row, flexWrap: 'wrap' }}>
@@ -1879,102 +2021,12 @@ export function BookkeepingSettingsTab() {
                     </div>
                   ),
                 )}
-              </div>
+              </details>
             )
           })
         )}
 
-        <h4 style={{ margin: '1rem 0 0.25rem', fontSize: 'var(--text-sm)' }}>Add a category</h4>
-        <div style={row}>
-          <label htmlFor="bk-new-category-name">
-            Name
-            <span style={quiet}>Required. What you want to see in the list when you record something.</span>
-          </label>
-          <input
-            id="bk-new-category-name"
-            style={input}
-            value={newCategory.name}
-            onChange={(e) => setNewCategory({ ...newCategory, name: e.target.value })}
-          />
-        </div>
-        <div style={row}>
-          <label htmlFor="bk-new-category-direction">Money in or money out</label>
-          <select
-            id="bk-new-category-direction"
-            style={input}
-            value={newCategory.direction}
-            onChange={(e) => {
-              // Keep the filing choice if it still applies, rather than leaving a
-              // box selected that the new direction has no option for.
-              const direction = e.target.value as Category['direction']
-              const options = filingOptionsFor(direction)
-              const filing = options.some((option) => option.key === newCategory.filing)
-                ? newCategory.filing
-                : (options[0]?.key ?? '')
-              setNewCategory({ ...newCategory, direction, filing })
-            }}
-          >
-            {DIRECTION_GROUPS.map((group) => (
-              <option key={group.direction} value={group.direction}>
-                {group.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div style={row}>
-          <label htmlFor="bk-new-category-filing">
-            Where it belongs on the accounts
-            <span style={quiet}>
-              Which box of the tax return it counts towards. Pick the one it would have gone in if
-              you had not given it a category of its own.
-            </span>
-          </label>
-          <select
-            id="bk-new-category-filing"
-            style={input}
-            value={newCategory.filing}
-            onChange={(e) => setNewCategory({ ...newCategory, filing: e.target.value })}
-          >
-            {filingOptionsFor(newCategory.direction).map((option) => (
-              <option key={option.key} value={option.key}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div style={row}>
-          <label htmlFor="bk-new-category-account">
-            Which account it posts to
-            <span style={quiet}>
-              Leave this be unless you know otherwise - an account is made for it, filed exactly
-              where you said above. Point it at one you already have when what you are recording is
-              not a cost at all: money paid onto a balance held with a supplier, say, which is still
-              yours until they bill you for it.
-            </span>
-          </label>
-          <select
-            id="bk-new-category-account"
-            style={input}
-            value={newCategory.accountId}
-            onChange={(e) => setNewCategory({ ...newCategory, accountId: e.target.value })}
-          >
-            <option value="">Make one for it</option>
-            {accountOptionsFor(null).map((account) => (
-              <option key={account.id} value={account.id}>
-                {account.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-          <button
-            type="button"
-            className="btn btn-sm btn-primary"
-            onClick={addCategory}
-            disabled={categoryBusy}
-          >
-            {categoryBusy ? 'Adding…' : 'Add category'}
-          </button>
+        <div style={{ marginTop: '0.75rem' }}>
           <button
             type="button"
             className="btn btn-sm"
@@ -1988,7 +2040,14 @@ export function BookkeepingSettingsTab() {
 
       {tab === 'bank' && (
       <div className="card" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
-        <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Bank accounts</h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', margin: '0 0 0.5rem' }}>
+          <h3 style={{ margin: 0, fontSize: '0.9375rem' }}>Bank accounts</h3>
+          {!showAddBank && (
+            <button type="button" className="btn btn-sm btn-primary" onClick={() => setShowAddBank(true)}>
+              Add an account
+            </button>
+          )}
+        </div>
         <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
           A statement is imported against one particular account, so there has to be an account here
           before anything can be brought in. Changes on this card take effect straight away rather
@@ -2001,11 +2060,107 @@ export function BookkeepingSettingsTab() {
           </p>
         )}
 
+        {showAddBank && (
+          <div style={{ border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md, 6px)', padding: '0.75rem 1rem', margin: '0 0 1rem' }}>
+            <h4 style={{ margin: '0 0 0.25rem', fontSize: 'var(--text-sm)' }}>Add an account</h4>
+          <div style={row}>
+            <label htmlFor="bk-new-bank-name">
+              What you call it
+              <span style={quiet}>Required. Whatever you would say out loud: &ldquo;Current account&rdquo;.</span>
+            </label>
+            <input
+              id="bk-new-bank-name"
+              style={input}
+              value={newBank.name}
+              onChange={(e) => setNewBank({ ...newBank, name: e.target.value })}
+            />
+          </div>
+          <div style={row}>
+            <label htmlFor="bk-new-bank-kind">What sort</label>
+            <select
+              id="bk-new-bank-kind"
+              style={input}
+              value={newBank.kind}
+              onChange={(e) => setNewBank({ ...newBank, kind: e.target.value as BankAccountKind })}
+            >
+              <option value="bank">Bank account</option>
+              <option value="card">Credit or charge card</option>
+              <option value="cash">Cash</option>
+            </select>
+          </div>
+          <div style={row}>
+            <label htmlFor="bk-new-bank-bank">Who it is with</label>
+            <input
+              id="bk-new-bank-bank"
+              style={input}
+              value={newBank.bankName}
+              onChange={(e) => setNewBank({ ...newBank, bankName: e.target.value })}
+            />
+          </div>
+          <div style={row}>
+            <label htmlFor="bk-new-bank-last4">
+              Last four digits
+              <span style={quiet}>Only the last four are kept, whatever you type.</span>
+            </label>
+            <input
+              id="bk-new-bank-last4"
+              inputMode="numeric"
+              style={input}
+              value={newBank.accountLast4}
+              onChange={(e) => setNewBank({ ...newBank, accountLast4: e.target.value })}
+            />
+          </div>
+          <div style={row}>
+            <label htmlFor="bk-new-bank-sort">Sort code</label>
+            <input
+              id="bk-new-bank-sort"
+              inputMode="numeric"
+              placeholder="00-00-00"
+              style={input}
+              value={newBank.sortCode}
+              onChange={(e) => setNewBank({ ...newBank, sortCode: e.target.value })}
+            />
+          </div>
+          <div style={row}>
+            <label htmlFor="bk-new-bank-opening">
+              What was in it to start with
+              <span style={quiet}>Leave it empty if you are starting from nothing.</span>
+            </label>
+            <input
+              id="bk-new-bank-opening"
+              inputMode="decimal"
+              placeholder="0.00"
+              style={input}
+              value={newBank.openingBalance}
+              onChange={(e) => setNewBank({ ...newBank, openingBalance: e.target.value })}
+            />
+          </div>
+          <div style={row}>
+            <label htmlFor="bk-new-bank-opening-date">…as at</label>
+            <input
+              id="bk-new-bank-opening-date"
+              type="date"
+              style={input}
+              value={newBank.openingDate}
+              onChange={(e) => setNewBank({ ...newBank, openingDate: e.target.value })}
+            />
+          </div>
+            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button type="button" className="btn btn-sm btn-primary" onClick={addBankAccount} disabled={bankBusy}>
+                {bankBusy ? 'Adding…' : 'Add account'}
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => setShowAddBank(false)} disabled={bankBusy}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
         {!bankAccounts ? (
           <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>Loading…</p>
         ) : bankAccounts.length === 0 ? (
           <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
-            Nothing here yet. Add the account your statements come from, below.
+            Nothing here yet. Use the button above to add the account your statements come from.
           </p>
         ) : (
           <div style={{ overflowX: 'auto', marginBottom: '1rem' }}>
@@ -2106,105 +2261,19 @@ export function BookkeepingSettingsTab() {
           would take the tick with it.
         </p>
 
-        <h4 style={{ margin: '1rem 0 0.25rem', fontSize: 'var(--text-sm)' }}>Add an account</h4>
-        <div style={row}>
-          <label htmlFor="bk-new-bank-name">
-            What you call it
-            <span style={quiet}>Required. Whatever you would say out loud: &ldquo;Current account&rdquo;.</span>
-          </label>
-          <input
-            id="bk-new-bank-name"
-            style={input}
-            value={newBank.name}
-            onChange={(e) => setNewBank({ ...newBank, name: e.target.value })}
-          />
-        </div>
-        <div style={row}>
-          <label htmlFor="bk-new-bank-kind">What sort</label>
-          <select
-            id="bk-new-bank-kind"
-            style={input}
-            value={newBank.kind}
-            onChange={(e) => setNewBank({ ...newBank, kind: e.target.value as BankAccountKind })}
-          >
-            <option value="bank">Bank account</option>
-            <option value="card">Credit or charge card</option>
-            <option value="cash">Cash</option>
-          </select>
-        </div>
-        <div style={row}>
-          <label htmlFor="bk-new-bank-bank">Who it is with</label>
-          <input
-            id="bk-new-bank-bank"
-            style={input}
-            value={newBank.bankName}
-            onChange={(e) => setNewBank({ ...newBank, bankName: e.target.value })}
-          />
-        </div>
-        <div style={row}>
-          <label htmlFor="bk-new-bank-last4">
-            Last four digits
-            <span style={quiet}>Only the last four are kept, whatever you type.</span>
-          </label>
-          <input
-            id="bk-new-bank-last4"
-            inputMode="numeric"
-            style={input}
-            value={newBank.accountLast4}
-            onChange={(e) => setNewBank({ ...newBank, accountLast4: e.target.value })}
-          />
-        </div>
-        <div style={row}>
-          <label htmlFor="bk-new-bank-sort">Sort code</label>
-          <input
-            id="bk-new-bank-sort"
-            inputMode="numeric"
-            placeholder="00-00-00"
-            style={input}
-            value={newBank.sortCode}
-            onChange={(e) => setNewBank({ ...newBank, sortCode: e.target.value })}
-          />
-        </div>
-        <div style={row}>
-          <label htmlFor="bk-new-bank-opening">
-            What was in it to start with
-            <span style={quiet}>Leave it empty if you are starting from nothing.</span>
-          </label>
-          <input
-            id="bk-new-bank-opening"
-            inputMode="decimal"
-            placeholder="0.00"
-            style={input}
-            value={newBank.openingBalance}
-            onChange={(e) => setNewBank({ ...newBank, openingBalance: e.target.value })}
-          />
-        </div>
-        <div style={row}>
-          <label htmlFor="bk-new-bank-opening-date">…as at</label>
-          <input
-            id="bk-new-bank-opening-date"
-            type="date"
-            style={input}
-            value={newBank.openingDate}
-            onChange={(e) => setNewBank({ ...newBank, openingDate: e.target.value })}
-          />
-        </div>
-        <div style={{ marginTop: '0.75rem' }}>
-          <button
-            type="button"
-            className="btn btn-sm btn-primary"
-            onClick={addBankAccount}
-            disabled={bankBusy}
-          >
-            {bankBusy ? 'Adding…' : 'Add account'}
-          </button>
-        </div>
       </div>
       )}
 
       {tab === 'ledger' && (
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
-        <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Ledger accounts</h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', margin: '0 0 0.5rem' }}>
+          <h3 style={{ margin: 0, fontSize: '0.9375rem' }}>Ledger accounts</h3>
+          {!showAddLedger && (
+            <button type="button" className="btn btn-sm btn-primary" onClick={() => setShowAddLedger(true)}>
+              Add an account
+            </button>
+          )}
+        </div>
         <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
           These are the pots a journal moves money between, and they arrive ready made - most people
           never need to add one. The exception is a director&rsquo;s loan account: if more than one
@@ -2218,6 +2287,76 @@ export function BookkeepingSettingsTab() {
           </p>
         )}
 
+        {showAddLedger && (
+          <div style={{ border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md, 6px)', padding: '0.75rem 1rem', margin: '0 0 1rem' }}>
+            <h4 style={{ margin: '0 0 0.25rem', fontSize: 'var(--text-sm)' }}>Add an account</h4>
+          <div style={row}>
+            <label htmlFor="bk-new-account-name">
+              Name
+              <span style={quiet}>Required. What you would like to see it called on a journal.</span>
+            </label>
+            <input
+              id="bk-new-account-name"
+              style={input}
+              value={newLedger.name}
+              onChange={(e) => setNewLedger({ ...newLedger, name: e.target.value })}
+            />
+          </div>
+          <div style={row}>
+            <label htmlFor="bk-new-account-kind">What sort of account</label>
+            <select
+              id="bk-new-account-kind"
+              style={input}
+              value={newLedger.kind}
+              onChange={(e) => setNewLedger({ ...newLedger, kind: e.target.value as AccountKind })}
+            >
+              {KIND_GROUPS.map((group) => (
+                <option key={group.kind} value={group.kind}>
+                  {group.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div style={row}>
+            <label htmlFor="bk-new-account-subtype">What it is for</label>
+            <select
+              id="bk-new-account-subtype"
+              style={input}
+              value={newLedger.subtype}
+              onChange={(e) => setNewLedger({ ...newLedger, subtype: e.target.value as AccountSubtype })}
+            >
+              {SUBTYPE_ORDER.map((subtype) => (
+                <option key={subtype} value={subtype}>
+                  {SUBTYPE_LABELS[subtype]}
+                </option>
+              ))}
+            </select>
+          </div>
+          {newLedger.subtype === 'director_loan' && (
+            <div style={row}>
+              <label htmlFor="bk-new-account-person">
+                Whose account is it
+                <span style={quiet}>Required. The director whose money this account follows.</span>
+              </label>
+              <input
+                id="bk-new-account-person"
+                style={input}
+                value={newLedger.personName}
+                onChange={(e) => setNewLedger({ ...newLedger, personName: e.target.value })}
+              />
+            </div>
+          )}
+            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button type="button" className="btn btn-sm btn-primary" onClick={addLedgerAccount} disabled={ledgerBusy}>
+                {ledgerBusy ? 'Adding…' : 'Add account'}
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => setShowAddLedger(false)} disabled={ledgerBusy}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
         {!ledgerAccounts ? (
           <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>Loading…</p>
         ) : ledgerAccounts.length === 0 ? (
@@ -2229,10 +2368,10 @@ export function BookkeepingSettingsTab() {
             const rows = ledgerAccounts.filter((account) => account.kind === group.kind)
             if (rows.length === 0) return null
             return (
-              <div key={group.kind}>
-                <h4 style={{ margin: '1rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
-                  {group.label}
-                </h4>
+              <details key={group.kind} style={{ borderTop: '1px solid var(--color-border)', padding: '0.5rem 0' }}>
+                <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 'var(--text-sm)' }}>
+                  {group.label} ({rows.length})
+                </summary>
                 {rows.map((account) => (
                   <div key={account.id} style={row}>
                     <span>
@@ -2265,78 +2404,11 @@ export function BookkeepingSettingsTab() {
                     </span>
                   </div>
                 ))}
-              </div>
+              </details>
             )
           })
         )}
 
-        <h4 style={{ margin: '1rem 0 0.25rem', fontSize: 'var(--text-sm)' }}>Add an account</h4>
-        <div style={row}>
-          <label htmlFor="bk-new-account-name">
-            Name
-            <span style={quiet}>Required. What you would like to see it called on a journal.</span>
-          </label>
-          <input
-            id="bk-new-account-name"
-            style={input}
-            value={newLedger.name}
-            onChange={(e) => setNewLedger({ ...newLedger, name: e.target.value })}
-          />
-        </div>
-        <div style={row}>
-          <label htmlFor="bk-new-account-kind">What sort of account</label>
-          <select
-            id="bk-new-account-kind"
-            style={input}
-            value={newLedger.kind}
-            onChange={(e) => setNewLedger({ ...newLedger, kind: e.target.value as AccountKind })}
-          >
-            {KIND_GROUPS.map((group) => (
-              <option key={group.kind} value={group.kind}>
-                {group.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div style={row}>
-          <label htmlFor="bk-new-account-subtype">What it is for</label>
-          <select
-            id="bk-new-account-subtype"
-            style={input}
-            value={newLedger.subtype}
-            onChange={(e) => setNewLedger({ ...newLedger, subtype: e.target.value as AccountSubtype })}
-          >
-            {SUBTYPE_ORDER.map((subtype) => (
-              <option key={subtype} value={subtype}>
-                {SUBTYPE_LABELS[subtype]}
-              </option>
-            ))}
-          </select>
-        </div>
-        {newLedger.subtype === 'director_loan' && (
-          <div style={row}>
-            <label htmlFor="bk-new-account-person">
-              Whose account is it
-              <span style={quiet}>Required. The director whose money this account follows.</span>
-            </label>
-            <input
-              id="bk-new-account-person"
-              style={input}
-              value={newLedger.personName}
-              onChange={(e) => setNewLedger({ ...newLedger, personName: e.target.value })}
-            />
-          </div>
-        )}
-        <div style={{ marginTop: '0.75rem' }}>
-          <button
-            type="button"
-            className="btn btn-sm btn-primary"
-            onClick={addLedgerAccount}
-            disabled={ledgerBusy}
-          >
-            {ledgerBusy ? 'Adding…' : 'Add account'}
-          </button>
-        </div>
       </div>
       )}
     </div>
