@@ -131,6 +131,13 @@ computation follows the same rule.
   tick the lot, code them in one go. One line that will not take the coding comes
   back as a sentence beside its own row and never strands the rest. Nothing
   reaches a VAT box until a human has said what it was for.
+- **Balance check for cash accounts.** A prepaid balance held with a supplier
+  may only ever be a figure on their web page. A cash account on the Reconcile
+  screen gets a panel above its statement lines: the balance the books hold as at
+  a date, a box for the supplier's figure, and the difference between them in
+  words. Saving it keeps a record of what was compared, when and by whom, in its
+  own table; nothing reaches the ledger or a VAT box. Bank and card accounts do
+  not get it.
 - **Card payouts, less the fees.** A card processor does not pay you what you
   invoiced: GoCardless and Square batch a day's takings into one payout, take
   their cut out of the middle, and net any refunds off as well - so the bank line

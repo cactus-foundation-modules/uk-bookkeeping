@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
 import { BookkeepingNav, EmptyState, ErrorNotice, SandboxBanner } from './Notices'
+import BalanceCheckPanel from './BalanceCheckPanel'
 import { addStrings, formatDate, poundsFromString } from './format'
 
 // Reconciliation: does what the bank says match what the books say.
@@ -70,6 +71,7 @@ type Summary = {
 type BankAccount = {
   id: string
   name: string
+  kind: 'bank' | 'card' | 'cash'
   account_last4: string | null
   position_summary: {
     openingBalance: string
@@ -549,6 +551,10 @@ export default function ReconcileScreen({
           director&rsquo;s loan payments, tick the lot, and code them in one go.
         </p>
       </div>
+
+      {account?.kind === 'cash' && (
+        <BalanceCheckPanel key={account.id} bankAccountId={account.id} accountName={account.name} canRecord={canRecord} />
+      )}
 
       {account && feed?.summary && <Position account={account} summary={feed.summary} />}
 

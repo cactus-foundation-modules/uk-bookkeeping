@@ -94,6 +94,8 @@ export type AuditAction =
   | 'ct_adjustment.added'
   | 'ct_adjustment.removed'
   | 'health.trigger-missing'
+  // Somebody compared a cash account with the balance its supplier shows.
+  | 'balance-check.saved'
 
 export type AuditInput = {
   action: AuditAction

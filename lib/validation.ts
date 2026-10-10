@@ -69,6 +69,14 @@ export const TransferBody = z.object({
   status: z.enum(['draft', 'posted']).optional(),
 })
 
+/** A typed balance for a cash account that has no statement. */
+export const BalanceCheckBody = z.object({
+  bankAccountId: z.string().min(1),
+  asAt: z.string().nullable().optional(),
+  statedBalance: z.string().regex(/^-?\d{1,10}(\.\d{1,2})?$/, 'Give the balance as a number, like 12.34.'),
+  note: z.string().max(500).nullable().optional(),
+})
+
 /** What the browser's fraud collector sends. Everything optional - a value we
  * could not collect is a header we do not send, not a request we refuse. */
 export const FraudBagBody = z.object({
