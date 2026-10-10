@@ -315,7 +315,7 @@ function readMeta(plain: string): StatementMeta {
     // "Business Account statement" with the dates on the line under it, and no
     // "for" or "period" to introduce them.
     /statement\s*:?\s*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})\s*(?:to|-|–|—)\s*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})/i.exec(text) ??
-    /(?:period|from)\s*:?\s*(.+?)\s*(?:to|-|–|—)\s*([\d]{1,2}[^\n,]{2,16}\d{4})/i.exec(text)
+    /(?:period|from|summary for)\s*:?\s*(.+?)\s*(?:to|-|–|—)\s*([\d]{1,2}[^\n,]{2,16}\d{4})/i.exec(text)
   if (period) {
     meta.periodStart = parseStatementDate(period[1]!.trim())
     meta.periodEnd = parseStatementDate(period[2]!.trim())
@@ -512,9 +512,28 @@ function attachWrappedLines(lines: WorkingLine[], orphans: Orphan[]): void {
   }
 }
 
+/**
+ * A date printed without its year - "8 Sept", "20 Sep" - which some statements
+ * do under a heading that already names the period. The year comes from the
+ * period's end; a day that would land after that end belongs to the year before,
+ * which is how a December-to-January statement keeps its Decembers right.
+ */
+function parseYearlessDate(value: string, periodEnd: string | null, fallbackYear: number | null): string | null {
+  const match = /^(\d{1,2})[\s\-/]*([A-Za-z]{3,9})\.?$/.exec(value.trim())
+  if (!match) return null
+  const endYear = periodEnd ? Number(periodEnd.slice(0, 4)) : fallbackYear
+  if (!endYear) return null
+  const date = parseStatementDate(`${match[1]} ${match[2]} ${endYear}`)
+  if (!date) return null
+  if (periodEnd && date > periodEnd) return parseStatementDate(`${match[1]} ${match[2]} ${endYear - 1}`)
+  return date
+}
+
 export function parseStatementPdf(bytes: Buffer): ParsedStatement {
   const extracted = extractPdfText(bytes)
   const meta = readMeta(extracted.plain)
+  const yearInText = /\b\d{1,2}\s+[A-Za-z]{3,9}\.?\s+(20\d{2})\b/.exec(extracted.plain)
+  const fallbackYear = yearInText ? Number(yearInText[1]) : null
 
   const lines: WorkingLine[] = []
   const unattached: Orphan[] = []
@@ -562,7 +581,8 @@ export function parseStatementPdf(bytes: Buffer): ParsedStatement {
     const linesBefore = lines.length
     for (const row of rows.slice(start)) {
       const cells = readCells(row, columns)
-      const date = parseStatementDate(cells.date ?? '')
+      const date =
+        parseStatementDate(cells.date ?? '') ?? parseYearlessDate(cells.date ?? '', meta.periodEnd, fallbackYear)
       const amount = date ? amountFor(cells, columns) : null
 
       if (date && amount) {
@@ -576,7 +596,7 @@ export function parseStatementPdf(bytes: Buffer): ParsedStatement {
           amount,
           balance,
         })
-      } else if ((cells.details || cells.type) && (date || !cells.date)) {
+      } else if ((cells.details || cells.type) && (date || !cells.date) && !/^(?:sub)?total\b/i.test(cells.details ?? '')) {
         // A wrapped description leaves the date column empty. Words in it that
         // are not a date are a paragraph running the width of the page - the
         // bank's registered office, the deposit protection blurb - and that is

@@ -504,6 +504,34 @@ describe('a statement laid out like Monzo', () => {
   })
 })
 
+describe('a statement whose dates carry no year', () => {
+  const parsed = parseStatementPdf(
+    buildPdf([
+      { x: 400, y: 780, text: 'Summary for 1 Sept 2026 - 30 Sept 2026' },
+      { x: 40, y: 700, text: 'Date' },
+      { x: 120, y: 700, text: 'Description' },
+      { x: 480, y: 700, text: 'Amount(\u00a3)' },
+      { x: 40, y: 680, text: '8 Sept' },
+      { x: 120, y: 680, text: 'Threshold charge: Mastercard 3622' },
+      { x: 480, y: 680, text: '-7.50' },
+      { x: 40, y: 660, text: '20 Sept' },
+      { x: 120, y: 660, text: 'Manual payment: Mastercard 3622' },
+      { x: 480, y: 660, text: '-50.00' },
+      { x: 120, y: 640, text: 'Total payments received in GBP' },
+      { x: 480, y: 640, text: '-\u00a357.50' },
+    ]),
+  )
+
+  it('takes the year from the statement period', () => {
+    expect(parsed.lines.map((line) => line.date)).toEqual(['2026-09-08', '2026-09-20'])
+  })
+
+  it('does not fold the totals row into the last payment', () => {
+    expect(parsed.lines[1]!.details).not.toMatch(/total/i)
+    expect(parsed.warnings).toEqual([])
+  })
+})
+
 // ---------------------------------------------------------------------------
 // The small parsers underneath
 // ---------------------------------------------------------------------------
