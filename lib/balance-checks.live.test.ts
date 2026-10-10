@@ -44,6 +44,10 @@ suite('balance check on a cash account, against a real database', () => {
     createTransfer: typeof import('./transfers').createTransfer
     getBalancePosition: typeof import('./balance-checks').getBalancePosition
     saveBalanceCheck: typeof import('./balance-checks').saveBalanceCheck
+    createTransaction: typeof import('./transactions').createTransaction
+    getCategoryByCode: typeof import('./categories').getCategoryByCode
+    listSettlementCandidates: typeof import('./reconcile-actions').listSettlementCandidates
+    summariseReconciliation: typeof import('./reconciliation').summariseReconciliation
   }
 
   const migrationsDirectory = join(__dirname, '..', 'migrations')
@@ -74,6 +78,10 @@ suite('balance check on a cash account, against a real database', () => {
       createTransfer: (await import('./transfers')).createTransfer,
       getBalancePosition: (await import('./balance-checks')).getBalancePosition,
       saveBalanceCheck: (await import('./balance-checks')).saveBalanceCheck,
+      createTransaction: (await import('./transactions')).createTransaction,
+      getCategoryByCode: (await import('./categories')).getCategoryByCode,
+      listSettlementCandidates: (await import('./reconcile-actions')).listSettlementCandidates,
+      summariseReconciliation: (await import('./reconciliation')).summariseReconciliation,
     }
 
     bankId = (await lib.createBankAccount({ name: 'Current account', kind: 'bank' })).id
@@ -148,5 +156,72 @@ suite('balance check on a cash account, against a real database', () => {
         [cashId],
       ),
     ).rejects.toThrow(/difference_chk/)
+  })
+
+  async function bill(counterparty: string, amount: string, bankAccountId: string | null) {
+    const office = (await lib.getCategoryByCode('office'))!
+    return lib.createTransaction(
+      {
+        direction: 'expense',
+        taxPointDate: '2026-02-10',
+        settledDate: '2026-02-10',
+        counterparty,
+        ...(bankAccountId ? { bankAccountId } : {}),
+        evidenceNotRequired: true,
+        lines: [
+          {
+            categoryId: office.id,
+            description: 'February usage',
+            vatTreatment: 'outside_scope',
+            vatRateCode: 'outside_scope',
+            vatRatePercent: '0.00',
+            netAmount: amount,
+            vatAmount: '0.00',
+            grossAmount: amount,
+          },
+        ],
+      },
+      null,
+    )
+  }
+
+  it('keeps a bill paid from the cash account out of another account\'s settle list', async () => {
+    const twilio = await bill('Twilio', '4.80', cashId)
+    const unnamed = await bill('Somebody else', '4.80', null)
+    const { rows } = await admin.query<{ id: string }>(
+      `INSERT INTO "bk_bank_transactions"
+         ("bank_account_id", "date", "details", "counterparty", "amount", "fingerprint")
+       VALUES ($1, '2026-02-12', 'SOMEBODY ELSE', 'Somebody else', -4.80, 'balchk-line-1')
+       RETURNING "id"`,
+      [bankId],
+    )
+    const view = await lib.listSettlementCandidates(rows[0]!.id)
+    const ids = view.candidates.map((candidate) => candidate.transactionId)
+    expect(ids).not.toContain(twilio.id)
+    // An entry that names no account is still offered everywhere, as before.
+    expect(ids).toContain(unnamed.id)
+  })
+
+  it('covers the entries behind an agreeing check, and nothing for a disagreeing one', async () => {
+    const before = await lib.getBalancePosition(cashId, '2026-03-05')
+    expect(before.booksBalance).toBe('25.20')
+    expect(before.unchecked.count).toBe(1)
+    const unmatchedBefore = (await lib.summariseReconciliation(cashId, null, null)).unmatchedEntryCount
+
+    const wrong = await lib.saveBalanceCheck({ bankAccountId: cashId, asAt: '2026-03-05', statedBalance: '25.00' }, null)
+    expect(wrong.covered).toBe(0)
+    expect((await lib.getBalancePosition(cashId, '2026-03-05')).unchecked.count).toBe(1)
+
+    const right = await lib.saveBalanceCheck({ bankAccountId: cashId, asAt: '2026-03-05', statedBalance: '25.20' }, null)
+    expect(right).toMatchObject({ difference: '0.00', covered: 1 })
+
+    const after = await lib.getBalancePosition(cashId, '2026-03-05')
+    expect(after.unchecked.count).toBe(0)
+    expect(after.latest).toMatchObject({ covered: 1 })
+    expect((await lib.summariseReconciliation(cashId, null, null)).unmatchedEntryCount).toBe(unmatchedBefore - 1)
+
+    // A second agreeing check does not claim the same entry twice.
+    const again = await lib.saveBalanceCheck({ bankAccountId: cashId, asAt: '2026-03-06', statedBalance: '25.20' }, null)
+    expect(again.covered).toBe(0)
   })
 })

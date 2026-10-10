@@ -50,6 +50,7 @@ export async function GET(request: NextRequest) {
       counterparty: row.counterparty,
       details: row.details,
       reference: row.reference,
+      bankAccountId: row.bank_account_id,
     }))
     const suggestions = await suggestMatchesForLines(matchable)
 

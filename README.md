@@ -136,7 +136,11 @@ computation follows the same rule.
   screen gets a panel above its statement lines: the balance the books hold as at
   a date, a box for the supplier's figure, and the difference between them in
   words. Saving it keeps a record of what was compared, when and by whom, in its
-  own table; nothing reaches the ledger or a VAT box. Bank and card accounts do
+  own table; nothing reaches the ledger or a VAT box. A check that agrees to the
+  penny also covers every entry paid from that account up to its date, which is how
+  bills taken from a prepaid balance are reconciled with no statement; a check that
+  does not agree covers nothing. An entry that names a different account than a
+  statement line is on is no longer offered against that line. Bank and card accounts do
   not get it.
 - **Card payouts, less the fees.** A card processor does not pay you what you
   invoiced: GoCardless and Square batch a day's takings into one payout, take

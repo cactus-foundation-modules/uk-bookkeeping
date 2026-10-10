@@ -18,6 +18,7 @@ type Entry = {
 }
 
 type Check = {
+  covered: number
   asAt: string
   booksBalance: string
   statedBalance: string
@@ -28,6 +29,7 @@ type Check = {
 type Position = {
   asAt: string
   booksBalance: string
+  unchecked: { count: number; total: string }
   recent: Entry[]
   latest: Check | null
 }
@@ -205,12 +207,23 @@ export default function BalanceCheckPanel({
         </div>
       )}
 
+      {position && position.unchecked.count > 0 && (
+        <p style={{ margin: '0.75rem 0 0', ...mutedStyle }}>
+          {position.unchecked.count} {position.unchecked.count === 1 ? 'entry' : 'entries'} paid from here,
+          worth {poundsFromString(position.unchecked.total)}, {position.unchecked.count === 1 ? 'is' : 'are'}{' '}
+          not covered by a check yet. A check that agrees covers every one of them up to its date, which is how
+          they get reconciled without a statement.
+        </p>
+      )}
+
       {position?.latest && (
         <p style={{ margin: '0.75rem 0 0', ...mutedStyle }}>
           Last checked for {formatDate(position.latest.asAt)}:{' '}
           {poundsFromString(position.latest.statedBalance)} stated against {poundsFromString(position.latest.booksBalance)} in the
           books
-          {/[1-9]/.test(position.latest.difference) ? `, out by ${poundsFromString(position.latest.difference)}` : ', agreed'}.
+          {/[1-9]/.test(position.latest.difference)
+            ? `, out by ${poundsFromString(position.latest.difference)}, so nothing was covered`
+            : `, agreed, covering ${position.latest.covered} ${position.latest.covered === 1 ? 'entry' : 'entries'}`}.
         </p>
       )}
 

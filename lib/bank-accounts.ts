@@ -157,6 +157,33 @@ export async function updateBankAccount(id: string, patch: BankAccountPatch): Pr
 }
 
 /**
+ * Put the accounts in the order given. Positions are renumbered in steps of ten
+ * so a later insert has room, and the ledger account behind each bank account
+ * follows (it sits at 200 + position), which is what keeps ledger pickers in
+ * step with the bank account ones.
+ */
+export async function reorderBankAccounts(ids: string[]): Promise<void> {
+  if (ids.length === 0 || new Set(ids).size !== ids.length) {
+    throw new BookkeepingError('invalid', 'That order does not list each account once.')
+  }
+  await prisma.$transaction(
+    ids.flatMap((id, index) => {
+      const position = (index + 1) * 10
+      return [
+        prisma.$executeRaw`
+          UPDATE "bk_bank_accounts" SET "position" = ${position}, "updated_at" = NOW()
+          WHERE "id" = ${id}
+        `,
+        prisma.$executeRaw`
+          UPDATE "bk_accounts" SET "position" = ${200 + position}, "updated_at" = NOW()
+          WHERE "bank_account_id" = ${id} AND "is_system" = TRUE
+        `,
+      ]
+    }),
+  )
+}
+
+/**
  * Deletion, which mostly is not deletion.
  *
  * An account any statement was ever imported against is archived rather than

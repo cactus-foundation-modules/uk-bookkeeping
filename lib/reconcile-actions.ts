@@ -339,6 +339,7 @@ export async function acceptSuggestedMatches(
       counterparty: line.counterparty,
       details: line.details,
       reference: line.reference,
+      bankAccountId: line.bank_account_id,
     })),
   )
 
@@ -612,6 +613,10 @@ export async function listSettlementCandidates(
     FROM "bk_transactions" t
     JOIN "bk_transaction_lines" l ON l."transaction_id" = t."id"
     WHERE t."locked_period_id" IS NULL
+      -- Not paid from some other account. A bill taken out of a prepaid balance
+      -- has no line on this one to be part of, so offering it here is how it
+      -- cluttered the list of a bank it never touched.
+      AND (t."bank_account_id" IS NULL OR t."bank_account_id" = ${line.bank_account_id})
       -- Every day count is cast to int: Prisma sends a JavaScript number as
       -- int8, and Postgres has "date - integer" but no "date - bigint".
       AND (

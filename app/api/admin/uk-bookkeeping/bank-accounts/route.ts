@@ -3,6 +3,7 @@ import { toErrorResponse } from '@/modules/uk-bookkeeping/lib/errors'
 import {
   createBankAccount,
   listBankAccounts,
+  reorderBankAccounts,
 } from '@/modules/uk-bookkeeping/lib/bank-accounts'
 import { getBankAccountPosition } from '@/modules/uk-bookkeeping/lib/bank-transactions'
 import { requireBookkeepingUser } from '@/modules/uk-bookkeeping/lib/permissions'
@@ -31,6 +32,24 @@ export async function POST(request: NextRequest) {
 
   try {
     return NextResponse.json({ account: await createBankAccount(body) })
+  } catch (error) {
+    return toErrorResponse(error)
+  }
+}
+
+export async function PUT(request: NextRequest) {
+  const gate = await requireBookkeepingUser('bookkeeping.settings')
+  if (gate.error) return gate.error
+
+  const body = (await request.json().catch(() => null)) as { ids?: unknown } | null
+  const ids = body?.ids
+  if (!Array.isArray(ids) || !ids.every((id): id is string => typeof id === 'string')) {
+    return NextResponse.json({ error: 'Nothing was sent.' }, { status: 400 })
+  }
+
+  try {
+    await reorderBankAccounts(ids)
+    return NextResponse.json({ ok: true })
   } catch (error) {
     return toErrorResponse(error)
   }

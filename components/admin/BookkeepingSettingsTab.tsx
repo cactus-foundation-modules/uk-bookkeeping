@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
 import { ErrorNotice, TriggerHealthNotice, type TriggerHealth } from './Notices'
+import { SubTabs } from './ui'
 import { formatDate, poundsFromString } from './format'
 import { hmrcFetch } from '@/modules/uk-bookkeeping/lib/hmrc/fraud-client'
 
@@ -312,6 +313,17 @@ const MONTHS = [
 
 // 31 March, which is what a company incorporated without a thought about it ends
 // up with often enough to be the least surprising thing to show.
+type SettingsTab = 'general' | 'vat' | 'records' | 'categories' | 'bank' | 'ledger'
+
+const SETTINGS_TABS: { key: SettingsTab; label: string }[] = [
+  { key: 'general', label: 'Business' },
+  { key: 'vat', label: 'VAT and HMRC' },
+  { key: 'records', label: 'Sales and records' },
+  { key: 'categories', label: 'Categories' },
+  { key: 'bank', label: 'Bank accounts' },
+  { key: 'ledger', label: 'Ledger accounts' },
+]
+
 const DEFAULT_YEAR_END_MONTH = 3
 const DEFAULT_YEAR_END_DAY = 31
 
@@ -410,6 +422,7 @@ export function BookkeepingSettingsTab() {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [tab, setTab] = useState<SettingsTab>('general')
   const [verdict, setVerdict] = useState<HeaderVerdict | null>(null)
   const [checking, setChecking] = useState(false)
 
@@ -707,6 +720,36 @@ export function BookkeepingSettingsTab() {
       await loadBankAccounts()
     } catch {
       setBankError('The save did not reach the server. Check the connection and try again.')
+    } finally {
+      setBankBusy(false)
+    }
+  }
+
+  async function moveBankAccount(index: number, step: -1 | 1) {
+    if (!bankAccounts) return
+    const target = index + step
+    if (target < 0 || target >= bankAccounts.length) return
+    const order = bankAccounts.map((account) => account.id)
+    const moved = order[index]!
+    order[index] = order[target]!
+    order[target] = moved
+    setBankError(null)
+    setBankNotice(null)
+    setBankBusy(true)
+    try {
+      const response = await fetch('/api/m/uk-bookkeeping/admin/bank-accounts', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: order }),
+      })
+      const payload = (await response.json().catch(() => ({}))) as { error?: string }
+      if (!response.ok) {
+        setBankError(payload.error ?? 'That order could not be saved.')
+        return
+      }
+      await loadBankAccounts()
+    } catch {
+      setBankError('That did not reach the server. Check the connection and try again.')
     } finally {
       setBankBusy(false)
     }
@@ -1168,6 +1211,10 @@ export function BookkeepingSettingsTab() {
       <ErrorNotice message={error} />
       <TriggerHealthNotice health={data.health} />
 
+      <SubTabs tabs={SETTINGS_TABS} active={tab} onChange={setTab} />
+
+      {tab === 'general' && (
+        <>
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Your business</h3>
         <div style={row}>
@@ -1251,7 +1298,11 @@ export function BookkeepingSettingsTab() {
           date, which is the figure that decides whether anything has to be paid back.
         </p>
       </div>
+        </>
+      )}
 
+      {tab === 'vat' && (
+        <>
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>How you do VAT</h3>
         <div style={row}>
@@ -1528,7 +1579,11 @@ export function BookkeepingSettingsTab() {
           </p>
         </details>
       </div>
+        </>
+      )}
 
+      {tab === 'records' && (
+        <>
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Sales from elsewhere on this site</h3>
         <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
@@ -1618,11 +1673,17 @@ export function BookkeepingSettingsTab() {
           </p>
         )}
       </div>
+        </>
+      )}
 
+      {(tab === 'general' || tab === 'vat' || tab === 'records') && (
+        <>
       <button className="btn btn-primary" onClick={save}>
         Save settings
       </button>
       {saved && <span style={{ marginLeft: '0.75rem', color: 'var(--color-success, var(--color-text))', fontSize: 'var(--text-sm)' }}>Saved</span>}
+        </>
+      )}
 
       {/*
         The lists below sit under the save button on purpose: everything above it
@@ -1630,6 +1691,7 @@ export function BookkeepingSettingsTab() {
         press a button. Mixing the two in one column is how somebody ends up
         adding an account, pressing Save, and wondering which of the two happened.
       */}
+      {tab === 'categories' && (
       <div className="card" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
         <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Categories</h3>
         <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
@@ -1922,7 +1984,9 @@ export function BookkeepingSettingsTab() {
           </button>
         </div>
       </div>
+      )}
 
+      {tab === 'bank' && (
       <div className="card" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
         <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Bank accounts</h3>
         <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
@@ -1956,7 +2020,7 @@ export function BookkeepingSettingsTab() {
                 </tr>
               </thead>
               <tbody>
-                {bankAccounts.map((account) => (
+                {bankAccounts.map((account, index) => (
                   <tr key={account.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
                     <td style={cellStyle}>
                       {account.name}
@@ -1993,6 +2057,24 @@ export function BookkeepingSettingsTab() {
                     </td>
                     <td style={cellStyle}>
                       <div style={{ display: 'flex', gap: '0.375rem', flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          aria-label={`Move ${account.name} up`}
+                          onClick={() => moveBankAccount(index, -1)}
+                          disabled={bankBusy || index === 0}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          aria-label={`Move ${account.name} down`}
+                          onClick={() => moveBankAccount(index, 1)}
+                          disabled={bankBusy || index === bankAccounts.length - 1}
+                        >
+                          ↓
+                        </button>
                         <button
                           type="button"
                           className="btn btn-sm"
@@ -2118,7 +2200,9 @@ export function BookkeepingSettingsTab() {
           </button>
         </div>
       </div>
+      )}
 
+      {tab === 'ledger' && (
       <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Ledger accounts</h3>
         <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)' }}>
@@ -2254,6 +2338,7 @@ export function BookkeepingSettingsTab() {
           </button>
         </div>
       </div>
+      )}
     </div>
   )
 }

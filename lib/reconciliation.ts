@@ -46,9 +46,18 @@ export type MatchableLine = {
   counterparty: string
   details: string
   reference: string | null
+  /**
+   * The account the line is on. An entry that says it was paid from a DIFFERENT
+   * account is not offered: a bill taken out of a prepaid balance has no line on
+   * the current account to be matched to, and offering it there is how it ended
+   * up in the "paid several invoices" list of a bank it never touched. An entry
+   * with no account named is offered everywhere, as before.
+   */
+  bankAccountId?: string | null
 }
 
 type CandidateEntry = {
+  bank_account_id: string | null
   id: string
   counterparty: string
   tax_point_date: Date
@@ -72,11 +81,12 @@ async function findCandidateEntries(lines: MatchableLine[]): Promise<CandidateEn
   if (lines.length === 0) return []
 
   const dates = lines.map((line) => line.date).sort()
+  const accountIds = [...new Set(lines.map((line) => line.bankAccountId).filter((id): id is string => !!id))]
   const amounts = [...new Set(lines.map((line) => formatMoney(toMoney(line.amount).abs())))]
 
   return prisma.$queryRaw<CandidateEntry[]>`
     SELECT t."id", t."counterparty", t."tax_point_date", t."settled_date", t."reference",
-           t."status", t."direction",
+           t."status", t."direction", t."bank_account_id",
            COALESCE(SUM(l."gross_amount"), 0)::numeric AS gross
     FROM "bk_transactions" t
     JOIN "bk_transaction_lines" l ON l."transaction_id" = t."id"
@@ -90,6 +100,11 @@ async function findCandidateEntries(lines: MatchableLine[]): Promise<CandidateEn
         OR t."settled_date" BETWEEN ${dates[0]}::date - ${DATE_WINDOW_DAYS}::int
                                AND ${dates[dates.length - 1]}::date + ${DATE_WINDOW_DAYS}::int
       )
+      -- Not paid from some other account than the ones these lines are on. When
+      -- no line says which account it is on, nothing is ruled out.
+      AND (${accountIds.length === 0}::boolean
+           OR t."bank_account_id" IS NULL
+           OR t."bank_account_id" = ANY(${accountIds}::text[]))
       -- Not already fully accounted for by some other statement line.
       AND COALESCE((
         SELECT SUM(ABS(r."amount")) FROM "bk_reconciliations" r WHERE r."transaction_id" = t."id"
@@ -117,6 +132,7 @@ function scoreCandidates(line: MatchableLine, entries: CandidateEntry[], limit: 
   for (const entry of entries) {
     if (entry.direction !== direction) continue
     if (!entry.gross.equals(gross)) continue
+    if (line.bankAccountId && entry.bank_account_id && entry.bank_account_id !== line.bankAccountId) continue
 
     const gaps = [entry.tax_point_date, entry.settled_date]
       .filter((date): date is Date => date !== null)
@@ -206,9 +222,16 @@ export async function suggestMatchesForLines(
 /** Entries that might be what this saved statement line is. */
 export async function suggestMatches(bankTransactionId: string, limit = 8): Promise<MatchCandidate[]> {
   const [line] = await prisma.$queryRaw<
-    { date: Date; amount: Prisma.Decimal; counterparty: string; details: string; reference: string | null }[]
+    {
+      date: Date
+      amount: Prisma.Decimal
+      counterparty: string
+      details: string
+      reference: string | null
+      bank_account_id: string
+    }[]
   >`
-    SELECT "date", "amount", "counterparty", "details", "reference"
+    SELECT "date", "amount", "counterparty", "details", "reference", "bank_account_id"
     FROM "bk_bank_transactions" WHERE "id" = ${bankTransactionId} LIMIT 1
   `
   if (!line) throw new NotFoundError('That statement line')
@@ -219,6 +242,7 @@ export async function suggestMatches(bankTransactionId: string, limit = 8): Prom
     counterparty: line.counterparty,
     details: line.details,
     reference: line.reference,
+    bankAccountId: line.bank_account_id,
   }
   return scoreCandidates(matchable, await findCandidateEntries([matchable]), limit)
 }
@@ -702,6 +726,9 @@ export async function summariseReconciliation(
         AND (${fromDate}::date IS NULL OR t."tax_point_date" >= ${fromDate}::date)
         AND (${toDate}::date IS NULL OR t."tax_point_date" <= ${toDate}::date)
         AND NOT EXISTS (SELECT 1 FROM "bk_reconciliations" r WHERE r."transaction_id" = t."id")
+        -- Covered by a balance check that agreed: a prepaid account has no
+        -- statement line to be behind it, and this is the other way to say so.
+        AND NOT EXISTS (SELECT 1 FROM "bk_balance_check_entries" c WHERE c."transaction_id" = t."id")
       GROUP BY t."id"
     ) g
   `

@@ -17,6 +17,8 @@ import { requireBankAccount } from './bank-accounts'
 export type BalanceCheck = {
   id: string
   bankAccountId: string
+  /** How many entries this check vouched for. Always 0 when it did not agree. */
+  covered: number
   asAt: string
   booksBalance: string
   statedBalance: string
@@ -25,10 +27,14 @@ export type BalanceCheck = {
   checkedAt: string
 }
 
+/** Entries paid from the account that no agreeing check has vouched for yet. */
+export type UncheckedEntries = { count: number; total: string }
+
 export type BalancePosition = {
   bankAccountId: string
   asAt: string
   booksBalance: string
+  unchecked: UncheckedEntries
   /** The latest movements up to that date, newest last, so a gap can be spotted. */
   recent: NominalEntry[]
   latest: BalanceCheck | null
@@ -45,10 +51,11 @@ type CheckRow = {
   created_at: Date
 }
 
-function toCheck(row: CheckRow): BalanceCheck {
+function toCheck(row: CheckRow, covered = 0): BalanceCheck {
   return {
     id: row.id,
     bankAccountId: row.bank_account_id,
+    covered,
     asAt: row.as_at.toISOString().slice(0, 10),
     booksBalance: formatMoney(row.books_balance),
     statedBalance: formatMoney(row.stated_balance),
@@ -90,7 +97,30 @@ async function latestCheck(bankAccountId: string): Promise<BalanceCheck | null> 
     ORDER BY "as_at" DESC, "created_at" DESC
     LIMIT 1
   `
-  return row ? toCheck(row) : null
+  if (!row) return null
+  const [covered] = await prisma.$queryRaw<{ count: bigint }[]>`
+    SELECT COUNT(*)::bigint AS count FROM "bk_balance_check_entries" WHERE "balance_check_id" = ${row.id}
+  `
+  return toCheck(row, Number(covered?.count ?? 0n))
+}
+
+async function uncheckedEntries(bankAccountId: string, asAt: string): Promise<UncheckedEntries> {
+  const [row] = await prisma.$queryRaw<{ count: bigint; total: Prisma.Decimal }[]>`
+    SELECT COUNT(*)::bigint AS count, COALESCE(SUM(g."gross"), 0)::numeric AS total
+    FROM (
+      SELECT t."id", COALESCE(SUM(l."gross_amount"), 0) AS gross
+      FROM "bk_transactions" t
+      JOIN "bk_transaction_lines" l ON l."transaction_id" = t."id"
+      WHERE t."status" = 'posted'
+        AND t."bank_account_id" = ${bankAccountId}
+        AND t."settled_date" IS NOT NULL
+        AND t."settled_date" <= ${new Date(`${asAt}T00:00:00.000Z`)}::date
+        AND NOT EXISTS (SELECT 1 FROM "bk_balance_check_entries" c WHERE c."transaction_id" = t."id")
+        AND NOT EXISTS (SELECT 1 FROM "bk_reconciliations" r WHERE r."transaction_id" = t."id")
+      GROUP BY t."id"
+    ) g
+  `
+  return { count: Number(row?.count ?? 0n), total: formatMoney(row?.total ?? null) }
 }
 
 async function booksPosition(bankAccountId: string, asAt: string) {
@@ -119,6 +149,7 @@ export async function getBalancePosition(
     bankAccountId,
     asAt: date,
     booksBalance: ledger.closing,
+    unchecked: await uncheckedEntries(bankAccountId, date),
     recent: ledger.entries.slice(-8),
     latest: await latestCheck(bankAccountId),
   }
@@ -150,14 +181,33 @@ export async function saveBalanceCheck(
     )
     RETURNING *
   `
-  const saved = toCheck(row!)
+
+  // An agreeing check vouches for the entries behind the balance: the books and
+  // the supplier say the same total, so what makes it up is accounted for. A
+  // check that is out by anything covers nothing - the gap could be any of them.
+  let covered = 0
+  if (difference.isZero()) {
+    covered = await prisma.$executeRaw`
+      INSERT INTO "bk_balance_check_entries" ("balance_check_id", "transaction_id")
+      SELECT ${row!.id}, t."id"
+      FROM "bk_transactions" t
+      WHERE t."status" = 'posted'
+        AND t."bank_account_id" = ${input.bankAccountId}
+        AND t."settled_date" IS NOT NULL
+        AND t."settled_date" <= ${new Date(`${date}T00:00:00.000Z`)}::date
+        AND NOT EXISTS (SELECT 1 FROM "bk_balance_check_entries" c WHERE c."transaction_id" = t."id")
+        AND NOT EXISTS (SELECT 1 FROM "bk_reconciliations" r WHERE r."transaction_id" = t."id")
+      ON CONFLICT DO NOTHING
+    `
+  }
+  const saved = toCheck(row!, covered)
 
   await appendAudit({
     action: 'balance-check.saved',
     entityType: 'bank_account',
     entityId: input.bankAccountId,
     summary: difference.isZero()
-      ? `${account.name} agreed at ${formatPounds(stated)} on ${date}`
+      ? `${account.name} agreed at ${formatPounds(stated)} on ${date}, covering ${covered} ${covered === 1 ? 'entry' : 'entries'}`
       : `${account.name} checked on ${date}: books ${formatPounds(books)}, stated ${formatPounds(stated)}, out by ${formatPounds(difference)}`,
     detail: { after: saved },
     user,
