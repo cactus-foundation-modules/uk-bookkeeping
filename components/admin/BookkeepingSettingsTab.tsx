@@ -326,14 +326,12 @@ const SETTINGS_TABS: { key: SettingsTab; label: string }[] = [
   { key: 'ledger', label: 'Ledger accounts' },
 ]
 
-// Two columns of cards on a wide screen, one on a phone. The minimum is what
-// makes it collapse: when two will not fit side by side at that width, the
-// grid drops to one.
-const TWO_COLUMNS = {
-  display: 'grid',
-  gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 28rem), 1fr))',
-  columnGap: '1.5rem',
-  alignItems: 'start',
+// Sections run the full width of the page, one under another; the fields inside
+// each section sit two across (see .settings-fields in the admin stylesheet).
+const SECTION_STACK = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 0, // each card carries its own bottom margin
 } as const
 
 const DEFAULT_YEAR_END_MONTH = 3
@@ -1244,31 +1242,31 @@ export function BookkeepingSettingsTab() {
       />
 
       {tab === 'general' && (
-        <div style={TWO_COLUMNS}>
-      <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+        <div style={SECTION_STACK}>
+      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Your business</h3>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-name">Business name</label>
           <input id="bk-name" style={input} value={settings.businessName ?? ''} onChange={(e) => set('businessName', e.target.value || null)} />
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-type">What kind of business</label>
           <select id="bk-type" style={input} value={settings.businessType} onChange={(e) => set('businessType', e.target.value as Settings['businessType'])}>
             <option value="ltd">Limited company</option>
             <option value="sole_trader">Sole trader or partnership</option>
           </select>
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-vrn">VAT number</label>
           <input id="bk-vrn" style={input} placeholder="123456789" value={settings.vrn ?? ''} onChange={(e) => set('vrn', e.target.value || null)} />
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-registered">VAT registered from</label>
           <input id="bk-registered" type="date" style={input} value={toDateValue(settings.vatRegisteredFrom)} onChange={(e) => set('vatRegisteredFrom', e.target.value || null)} />
         </div>
       </div>
 
-      <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Invoices for payments you record by hand</h3>
         <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
           Record money coming in and an invoice PDF is made for it, numbered in order and filed as the evidence.
@@ -1283,7 +1281,7 @@ export function BookkeepingSettingsTab() {
             onChange={(e) => set('autoInvoiceManualIncome', e.target.checked)}
           />
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-invoice-prefix">Invoice number starts with</label>
           <input id="bk-invoice-prefix" style={input} maxLength={12} value={settings.invoicePrefix} onChange={(e) => set('invoicePrefix', e.target.value)} />
         </div>
@@ -1293,9 +1291,9 @@ export function BookkeepingSettingsTab() {
         </div>
       </div>
 
-      <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Your accounting year end</h3>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-year-end-month">Month</label>
           <select
             id="bk-year-end-month"
@@ -1310,7 +1308,7 @@ export function BookkeepingSettingsTab() {
             ))}
           </select>
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-year-end-day">Day</label>
           <input
             id="bk-year-end-day"
@@ -1332,17 +1330,17 @@ export function BookkeepingSettingsTab() {
       )}
 
       {tab === 'vat' && (
-        <div style={TWO_COLUMNS}>
-      <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+        <div style={SECTION_STACK}>
+      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>How you do VAT</h3>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-scheme">Scheme</label>
           <select id="bk-scheme" style={input} value={settings.scheme} onChange={(e) => set('scheme', e.target.value as Settings['scheme'])}>
             <option value="accrual">Standard - by invoice date</option>
             <option value="cash">Cash accounting - by when the money moved</option>
           </select>
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-frequency">How often you file</label>
           <select id="bk-frequency" style={input} value={settings.periodFrequency} onChange={(e) => set('periodFrequency', e.target.value as Settings['periodFrequency'])}>
             <option value="quarterly">Every three months</option>
@@ -1350,7 +1348,7 @@ export function BookkeepingSettingsTab() {
             <option value="annual">Once a year</option>
           </select>
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-first">
             Your first VAT period starts
             <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))', maxWidth: 340 }}>
@@ -1359,7 +1357,7 @@ export function BookkeepingSettingsTab() {
           </label>
           <input id="bk-first" type="date" style={input} value={toDateValue(settings.firstPeriodStart)} onChange={(e) => set('firstPeriodStart', e.target.value || null)} />
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-first-end">
             …and that first period ends
             <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))', maxWidth: 340 }}>
@@ -1372,7 +1370,7 @@ export function BookkeepingSettingsTab() {
           </label>
           <input id="bk-first-end" type="date" style={input} value={toDateValue(settings.firstPeriodEnd)} onChange={(e) => set('firstPeriodEnd', e.target.value || null)} />
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-rounding">
             Rounding for the four total boxes
             <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))', maxWidth: 340 }}>
@@ -1394,7 +1392,7 @@ export function BookkeepingSettingsTab() {
         )}
       </div>
 
-      <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>HMRC</h3>
 
         {!hmrc.configured && (
@@ -1483,7 +1481,7 @@ export function BookkeepingSettingsTab() {
           </details>
         )}
 
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-env">Which HMRC service</label>
           <select id="bk-env" style={input} value={settings.hmrcEnvironment} onChange={(e) => set('hmrcEnvironment', e.target.value as Settings['hmrcEnvironment'])}>
             <option value="sandbox">Practice service (nothing is really filed)</option>
@@ -1593,7 +1591,7 @@ export function BookkeepingSettingsTab() {
             )}
           </div>
 
-          <div style={row}>
+          <div className="settings-field" style={row}>
             <label htmlFor="bk-vendor-ip">
               Your site’s public address
               <span style={{ display: 'block', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))', maxWidth: 340 }}>
@@ -1613,8 +1611,8 @@ export function BookkeepingSettingsTab() {
       )}
 
       {tab === 'records' && (
-        <div style={TWO_COLUMNS}>
-      <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+        <div style={SECTION_STACK}>
+      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Sales from elsewhere on this site</h3>
         <p style={{ margin: '0 0 0.75rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
           Another part of the site - a shop raising an invoice, for instance - can hand a sale straight to the books,
@@ -1632,7 +1630,7 @@ export function BookkeepingSettingsTab() {
         </div>
         {settings.externalSalesEnabled && (
           <>
-            <div style={row}>
+            <div className="settings-field" style={row}>
               <label htmlFor="bk-external-category">File them under</label>
               <select
                 id="bk-external-category"
@@ -1648,7 +1646,7 @@ export function BookkeepingSettingsTab() {
                   ))}
               </select>
             </div>
-            <div style={row}>
+            <div className="settings-field" style={row}>
               <label htmlFor="bk-external-status">Record them as</label>
               <select
                 id="bk-external-status"
@@ -1668,21 +1666,21 @@ export function BookkeepingSettingsTab() {
         </p>
       </div>
 
-      <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Corrections and records</h3>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-threshold">Correct on the next return up to</label>
           <input id="bk-threshold" style={input} value={settings.errorThresholdFixed} onChange={(e) => set('errorThresholdFixed', e.target.value)} />
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-percent">Or this much of your sales figure (%)</label>
           <input id="bk-percent" style={input} value={settings.errorThresholdPercent} onChange={(e) => set('errorThresholdPercent', e.target.value)} />
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-cap">Never above</label>
           <input id="bk-cap" style={input} value={settings.errorThresholdCap} onChange={(e) => set('errorThresholdCap', e.target.value)} />
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-retention">Keep records for (years)</label>
           <input id="bk-retention" type="number" style={input} value={settings.retentionYears} onChange={(e) => set('retentionYears', Number(e.target.value))} />
         </div>
@@ -1722,7 +1720,7 @@ export function BookkeepingSettingsTab() {
         presses Save, and wonders which of the two happened.
       */}
       {tab === 'categories' && (
-      <div className="card" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
+      <div className="card settings-fields" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', margin: '0 0 0.5rem' }}>
           <h3 style={{ margin: 0, fontSize: '0.9375rem' }}>Categories</h3>
           {!showAddCategory && (
@@ -1748,7 +1746,7 @@ export function BookkeepingSettingsTab() {
         {showAddCategory && (
           <div style={{ border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md, 6px)', padding: '0.75rem 1rem', margin: '0 0 1rem' }}>
             <h4 style={{ margin: '0 0 0.25rem', fontSize: 'var(--text-sm)' }}>Add a category</h4>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-new-category-name">
             Name
             <span style={quiet}>Required. What you want to see in the list when you record something.</span>
@@ -1760,7 +1758,7 @@ export function BookkeepingSettingsTab() {
             onChange={(e) => setNewCategory({ ...newCategory, name: e.target.value })}
           />
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-new-category-direction">Money in or money out</label>
           <select
             id="bk-new-category-direction"
@@ -1784,7 +1782,7 @@ export function BookkeepingSettingsTab() {
             ))}
           </select>
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-new-category-filing">
             Where it belongs on the accounts
             <span style={quiet}>
@@ -1805,7 +1803,7 @@ export function BookkeepingSettingsTab() {
             ))}
           </select>
         </div>
-        <div style={row}>
+        <div className="settings-field" style={row}>
           <label htmlFor="bk-new-category-account">
             Which account it posts to
             <span style={quiet}>
@@ -2039,7 +2037,7 @@ export function BookkeepingSettingsTab() {
       )}
 
       {tab === 'bank' && (
-      <div className="card" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
+      <div className="card settings-fields" style={{ padding: '1.25rem', margin: '1.5rem 0' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', margin: '0 0 0.5rem' }}>
           <h3 style={{ margin: 0, fontSize: '0.9375rem' }}>Bank accounts</h3>
           {!showAddBank && (
@@ -2063,7 +2061,7 @@ export function BookkeepingSettingsTab() {
         {showAddBank && (
           <div style={{ border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md, 6px)', padding: '0.75rem 1rem', margin: '0 0 1rem' }}>
             <h4 style={{ margin: '0 0 0.25rem', fontSize: 'var(--text-sm)' }}>Add an account</h4>
-          <div style={row}>
+          <div className="settings-field" style={row}>
             <label htmlFor="bk-new-bank-name">
               What you call it
               <span style={quiet}>Required. Whatever you would say out loud: &ldquo;Current account&rdquo;.</span>
@@ -2075,7 +2073,7 @@ export function BookkeepingSettingsTab() {
               onChange={(e) => setNewBank({ ...newBank, name: e.target.value })}
             />
           </div>
-          <div style={row}>
+          <div className="settings-field" style={row}>
             <label htmlFor="bk-new-bank-kind">What sort</label>
             <select
               id="bk-new-bank-kind"
@@ -2088,7 +2086,7 @@ export function BookkeepingSettingsTab() {
               <option value="cash">Cash</option>
             </select>
           </div>
-          <div style={row}>
+          <div className="settings-field" style={row}>
             <label htmlFor="bk-new-bank-bank">Who it is with</label>
             <input
               id="bk-new-bank-bank"
@@ -2097,7 +2095,7 @@ export function BookkeepingSettingsTab() {
               onChange={(e) => setNewBank({ ...newBank, bankName: e.target.value })}
             />
           </div>
-          <div style={row}>
+          <div className="settings-field" style={row}>
             <label htmlFor="bk-new-bank-last4">
               Last four digits
               <span style={quiet}>Only the last four are kept, whatever you type.</span>
@@ -2110,7 +2108,7 @@ export function BookkeepingSettingsTab() {
               onChange={(e) => setNewBank({ ...newBank, accountLast4: e.target.value })}
             />
           </div>
-          <div style={row}>
+          <div className="settings-field" style={row}>
             <label htmlFor="bk-new-bank-sort">Sort code</label>
             <input
               id="bk-new-bank-sort"
@@ -2121,7 +2119,7 @@ export function BookkeepingSettingsTab() {
               onChange={(e) => setNewBank({ ...newBank, sortCode: e.target.value })}
             />
           </div>
-          <div style={row}>
+          <div className="settings-field" style={row}>
             <label htmlFor="bk-new-bank-opening">
               What was in it to start with
               <span style={quiet}>Leave it empty if you are starting from nothing.</span>
@@ -2135,7 +2133,7 @@ export function BookkeepingSettingsTab() {
               onChange={(e) => setNewBank({ ...newBank, openingBalance: e.target.value })}
             />
           </div>
-          <div style={row}>
+          <div className="settings-field" style={row}>
             <label htmlFor="bk-new-bank-opening-date">…as at</label>
             <input
               id="bk-new-bank-opening-date"
@@ -2265,7 +2263,7 @@ export function BookkeepingSettingsTab() {
       )}
 
       {tab === 'ledger' && (
-      <div className="card" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
+      <div className="card settings-fields" style={{ padding: '1.25rem', marginBottom: '1.5rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', margin: '0 0 0.5rem' }}>
           <h3 style={{ margin: 0, fontSize: '0.9375rem' }}>Ledger accounts</h3>
           {!showAddLedger && (
@@ -2290,7 +2288,7 @@ export function BookkeepingSettingsTab() {
         {showAddLedger && (
           <div style={{ border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md, 6px)', padding: '0.75rem 1rem', margin: '0 0 1rem' }}>
             <h4 style={{ margin: '0 0 0.25rem', fontSize: 'var(--text-sm)' }}>Add an account</h4>
-          <div style={row}>
+          <div className="settings-field" style={row}>
             <label htmlFor="bk-new-account-name">
               Name
               <span style={quiet}>Required. What you would like to see it called on a journal.</span>
@@ -2302,7 +2300,7 @@ export function BookkeepingSettingsTab() {
               onChange={(e) => setNewLedger({ ...newLedger, name: e.target.value })}
             />
           </div>
-          <div style={row}>
+          <div className="settings-field" style={row}>
             <label htmlFor="bk-new-account-kind">What sort of account</label>
             <select
               id="bk-new-account-kind"
@@ -2317,7 +2315,7 @@ export function BookkeepingSettingsTab() {
               ))}
             </select>
           </div>
-          <div style={row}>
+          <div className="settings-field" style={row}>
             <label htmlFor="bk-new-account-subtype">What it is for</label>
             <select
               id="bk-new-account-subtype"
@@ -2333,7 +2331,7 @@ export function BookkeepingSettingsTab() {
             </select>
           </div>
           {newLedger.subtype === 'director_loan' && (
-            <div style={row}>
+            <div className="settings-field" style={row}>
               <label htmlFor="bk-new-account-person">
                 Whose account is it
                 <span style={quiet}>Required. The director whose money this account follows.</span>
