@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
+import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
 import { BookkeepingNav, EmptyState, ErrorNotice, SandboxBanner } from './Notices'
 import { addStrings, formatDate, poundsFromString, toDateInput, today } from './format'
 
@@ -216,6 +217,7 @@ export default function JournalsScreen({
   canRecord: boolean
 }) {
   const adminPath = useAdminPath()
+  const [askConfirm, confirmNode] = useAdminConfirm()
   const [list, setList] = useState<List | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -467,9 +469,10 @@ export default function JournalsScreen({
 
   async function remove(row: JournalRow) {
     if (
-      !window.confirm(
-        `Delete the journal for "${row.narrative}"? It has not been filed, so nothing else changes - but it will not come back.`,
-      )
+      !(await askConfirm({
+        title: `Delete the journal for "${row.narrative}"?`,
+        message: 'It has not been filed, so nothing else changes - but it will not come back.',
+      }))
     ) {
       return
     }
@@ -499,6 +502,7 @@ export default function JournalsScreen({
 
   return (
     <div>
+      {confirmNode}
       <BookkeepingNav active="journals" />
       <SandboxBanner environment={environment} />
       <ErrorNotice message={error} />

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
+import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
 import {
   BookkeepingNav,
   EmptyState,
@@ -94,6 +95,7 @@ export default function TransactionsScreen({
   canRecord: boolean
 }) {
   const adminPath = useAdminPath()
+  const [askConfirm, confirmNode] = useAdminConfirm()
   const health = useTriggerHealth()
   const [list, setList] = useState<List | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -255,7 +257,11 @@ export default function TransactionsScreen({
     if (selected.size === 0) return
     if (
       action === 'delete' &&
-      !window.confirm(`Remove ${selected.size} draft entr${selected.size === 1 ? 'y' : 'ies'}? They have not been recorded, so nothing else changes.`)
+      !(await askConfirm({
+        title: `Remove ${selected.size} draft entr${selected.size === 1 ? 'y' : 'ies'}?`,
+        message: 'They have not been recorded, so nothing else changes.',
+        confirmLabel: 'Remove',
+      }))
     ) {
       return
     }
@@ -289,6 +295,7 @@ export default function TransactionsScreen({
 
   return (
     <div>
+      {confirmNode}
       <BookkeepingNav active="transactions" />
       <SandboxBanner environment={environment} />
       <TriggerHealthNotice health={health} />

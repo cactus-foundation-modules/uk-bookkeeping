@@ -1,6 +1,7 @@
 'use client'
 
 import { useRef, useState } from 'react'
+import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
 import { ErrorNotice } from './Notices'
 import { preflightFileError } from '@/modules/uk-bookkeeping/lib/file-kinds'
 
@@ -43,6 +44,7 @@ export default function EvidenceDropzone({
   onChange: () => void
 }) {
   const fileInput = useRef<HTMLInputElement>(null)
+  const [askConfirm, confirmNode] = useAdminConfirm()
   const [dragging, setDragging] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -86,7 +88,7 @@ export default function EvidenceDropzone({
   }
 
   async function remove(id: string) {
-    if (!window.confirm('Remove this receipt from the entry?')) return
+    if (!(await askConfirm({ title: 'Remove this receipt?', message: 'It is taken off the entry.', confirmLabel: 'Remove' }))) return
     try {
       const response = await fetch(`/api/m/uk-bookkeeping/admin/attachments/${id}`, { method: 'DELETE' })
       if (!response.ok) {
@@ -102,6 +104,7 @@ export default function EvidenceDropzone({
 
   return (
     <div className="card" style={{ padding: '1.25rem', maxWidth: 900 }}>
+      {confirmNode}
       <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>Evidence</h3>
       <ErrorNotice message={error} />
 

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
+import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
 import { hmrcFetch } from '@/modules/uk-bookkeeping/lib/hmrc/fraud-client'
 import { BookkeepingNav, ErrorNotice, PeriodStatusBadge, SandboxBanner } from './Notices'
 import { formatDate, poundsFromString } from './format'
@@ -82,6 +83,7 @@ export default function VatReturnScreen({
   canSubmit: boolean
 }) {
   const adminPath = useAdminPath()
+  const [askConfirm, confirmNode] = useAdminConfirm()
   const [detail, setDetail] = useState<Detail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -171,6 +173,7 @@ export default function VatReturnScreen({
 
   return (
     <div>
+      {confirmNode}
       <BookkeepingNav active="vat" />
       <SandboxBanner environment={environment} />
       <ErrorNotice message={error} />
@@ -528,11 +531,14 @@ export default function VatReturnScreen({
               <button
                 className="btn"
                 disabled={busy}
-                onClick={() => {
+                onClick={async () => {
                   if (
-                    window.confirm(
-                      'Record this as filed elsewhere? Everything on it locks, exactly as if it had been sent from here.',
-                    )
+                    await askConfirm({
+                      title: 'Record this as filed elsewhere?',
+                      message: 'Everything on it locks, exactly as if it had been sent from here.',
+                      confirmLabel: 'Record as filed',
+                      danger: false,
+                    })
                   ) {
                     act(`/api/m/uk-bookkeeping/admin/periods/${period.id}/mark-submitted`, 'POST')
                   }

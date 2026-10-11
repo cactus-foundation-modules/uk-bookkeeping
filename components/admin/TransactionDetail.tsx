@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
+import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
 import { BookkeepingNav, ErrorNotice, LockedNotice, SandboxBanner } from './Notices'
 import DocumentPicker from './DocumentPicker'
 import EvidenceDropzone from './EvidenceDropzone'
@@ -65,6 +66,7 @@ export default function TransactionDetail({
   canRecord: boolean
 }) {
   const adminPath = useAdminPath()
+  const [askConfirm, confirmNode] = useAdminConfirm()
   const [transaction, setTransaction] = useState<Transaction | null>(null)
   const [bankAccountNames, setBankAccountNames] = useState<Record<string, string>>({})
   const [editing, setEditing] = useState(false)
@@ -122,7 +124,7 @@ export default function TransactionDetail({
 
   async function remove() {
     if (!transaction) return
-    if (!window.confirm('Delete this entry? This cannot be undone.')) return
+    if (!(await askConfirm({ title: 'Delete this entry?', message: 'This cannot be undone.' }))) return
     try {
       const response = await fetch(`/api/m/uk-bookkeeping/admin/transactions/${transaction.id}`, {
         method: 'DELETE',
@@ -243,6 +245,7 @@ export default function TransactionDetail({
 
   return (
     <div>
+      {confirmNode}
       <BookkeepingNav active="transactions" />
       <SandboxBanner environment={environment} />
       <ErrorNotice message={error} />

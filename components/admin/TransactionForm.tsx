@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
+import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
 import DocumentPicker from './DocumentPicker'
 import { type UnfiledDocument } from './documents-shared'
 import { ErrorNotice } from './Notices'
@@ -222,6 +223,7 @@ export default function TransactionForm({
   initialDocumentId?: string | null
 }) {
   const adminPath = useAdminPath()
+  const [askConfirm, confirmNode] = useAdminConfirm()
   // Whether this form is filling in a fresh entry or editing a saved one. The
   // two want different defaults, and the distinction is worth a name.
   const isNewEntry = !initial
@@ -678,7 +680,13 @@ export default function TransactionForm({
         // Saved, but the invoice was not made. Staying on the form would invite
         // a second save and a duplicate entry, so say it and carry on to the
         // entry, where "Make the invoice" tries again under the same number.
-        window.alert(`The payment is saved, but its invoice could not be made: ${saved.invoiceError}\n\nThere is a button on the entry to try again.`)
+        await askConfirm({
+          title: 'The payment is saved',
+          message: `Its invoice could not be made: ${saved.invoiceError}. There is a button on the entry to try again.`,
+          confirmLabel: 'OK',
+          cancelLabel: '',
+          danger: false,
+        })
       }
 
       // The receipts picked out of the inbox, wired to the entry now that it has
@@ -729,6 +737,7 @@ export default function TransactionForm({
         else save()
       }}
     >
+      {confirmNode}
       <ErrorNotice message={error} />
 
       {correcting && (

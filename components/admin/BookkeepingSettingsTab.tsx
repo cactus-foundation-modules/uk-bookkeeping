@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
+import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
 import { ErrorNotice, TriggerHealthNotice, type TriggerHealth } from './Notices'
 import { TabStrip } from '@/components/admin/TabStrip'
 import { SettingsHeaderActions, SettingsHeaderStatus } from '@/components/admin/SettingsHeaderActions'
@@ -422,6 +423,7 @@ function withYearEnd(raw: SettingsResponse): Settings {
 
 export function BookkeepingSettingsTab() {
   const adminPath = useAdminPath()
+  const [askConfirm, confirmNode] = useAdminConfirm()
   const [data, setData] = useState<Payload | null>(null)
   const [settings, setSettings] = useState<Settings | null>(null)
   const [saved, setSaved] = useState(false)
@@ -687,7 +689,7 @@ export function BookkeepingSettingsTab() {
   }
 
   async function disconnect() {
-    if (!window.confirm('Disconnect from HMRC? Your records stay exactly as they are.')) return
+    if (!(await askConfirm({ title: 'Disconnect from HMRC?', message: 'Your records stay exactly as they are.', confirmLabel: 'Disconnect' }))) return
     setError(null)
     try {
       const response = await fetch('/api/m/uk-bookkeeping/admin/hmrc/status', { method: 'DELETE' })
@@ -798,9 +800,11 @@ export function BookkeepingSettingsTab() {
 
   async function removeBankAccount(account: BankAccount) {
     if (
-      !window.confirm(
-        `Remove ${account.name}? If a statement has ever been imported against it, it is put away instead.`,
-      )
+      !(await askConfirm({
+        title: `Remove ${account.name}?`,
+        message: 'If a statement has ever been imported against it, it is put away instead.',
+        confirmLabel: 'Remove',
+      }))
     ) {
       return
     }
@@ -898,9 +902,11 @@ export function BookkeepingSettingsTab() {
 
   async function removeLedgerAccount(account: LedgerAccount) {
     if (
-      !window.confirm(
-        `Remove ${account.name}? If a journal has ever used it, it is put away instead.`,
-      )
+      !(await askConfirm({
+        title: `Remove ${account.name}?`,
+        message: 'If a journal has ever used it, it is put away instead.',
+        confirmLabel: 'Remove',
+      }))
     ) {
       return
     }
@@ -1122,9 +1128,11 @@ export function BookkeepingSettingsTab() {
 
   async function removeCategory(category: Category) {
     if (
-      !window.confirm(
-        `Remove ${category.name}? If any entry has ever been filed under it, it is put away instead.`,
-      )
+      !(await askConfirm({
+        title: `Remove ${category.name}?`,
+        message: 'If any entry has ever been filed under it, it is put away instead.',
+        confirmLabel: 'Remove',
+      }))
     ) {
       return
     }
@@ -1223,6 +1231,7 @@ export function BookkeepingSettingsTab() {
 
   return (
     <div>
+      {confirmNode}
       <ErrorNotice message={error} />
       <TriggerHealthNotice health={data.health} />
 
