@@ -67,7 +67,8 @@ export const EMPTY_META: StatementMeta = {
  * number must not be read as an amount, or a reference number becomes a payment.
  */
 export function parseStatementAmount(value: string): Prisma.Decimal | null {
-  const trimmed = value.trim()
+  // A trailing currency code ("100.13 GBP", as WorldFirst prints it) is not part of the figure.
+  const trimmed = value.trim().replace(/\s*\b(?:GBP|EUR|USD)\b$/i, '')
   if (!trimmed || trimmed === '-' || trimmed === '–') return null
 
   const parenthesised = /^\(.*\)$/.test(trimmed)
@@ -129,8 +130,8 @@ export function parseStatementDate(value: string): string | null {
   const trimmed = value.trim()
   if (!trimmed) return null
 
-  // 29 Jul 2026 · 29 July 2026 · 29-Jul-2026 · Jul 29 2026
-  const named = /^(\d{1,2})[\s\-/]*([A-Za-z]{3,9})\.?[\s\-/]*(\d{2,4})/.exec(trimmed)
+  // 29 Jul 2026 · 29 July 2026 · 29-Jul-2026 · 29 Jul, 2026 · Jul 29 2026
+  const named = /^(\d{1,2})[\s\-/]*([A-Za-z]{3,9})\.?,?[\s\-/]*(\d{2,4})/.exec(trimmed)
   if (named) {
     const month = MONTHS[named[2]!.slice(0, 4).toLowerCase()] ?? MONTHS[named[2]!.slice(0, 3).toLowerCase()]
     if (month) return isoFrom(Number(named[3]), month, Number(named[1]))

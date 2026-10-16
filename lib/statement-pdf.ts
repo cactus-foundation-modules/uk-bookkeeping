@@ -156,7 +156,7 @@ function moneyColumnFor(cell: PdfTextItem, columns: Column[]): ColumnKey | null 
  * and the whole line disappears.
  */
 function hasWords(text: string): boolean {
-  return /[a-z]/i.test(text.replace(/\b(?:CR|DR)\b\.?/gi, ''))
+  return /[a-z]/i.test(text.replace(/\b(?:CR|DR|GBP|EUR|USD)\b\.?/gi, ''))
 }
 
 /** Two runs closer than this, as a fraction of the text size, are one word printed in pieces. */

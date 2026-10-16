@@ -543,6 +543,7 @@ describe('parseStatementDate', () => {
     expect(parseStatementDate('29-Jul-2026')).toBe('2026-07-29')
     expect(parseStatementDate('2026-07-29')).toBe('2026-07-29')
     expect(parseStatementDate('Jul 29, 2026')).toBe('2026-07-29')
+    expect(parseStatementDate('16 Oct, 2026')).toBe('2026-10-16')
   })
 
   it('reads a numeric date day first, as a UK statement means it', () => {
@@ -561,6 +562,7 @@ describe('parseStatementAmount', () => {
   it('reads what a statement prints', () => {
     expect(parseStatementAmount('1,234.56')?.toFixed(2)).toBe('1234.56')
     expect(parseStatementAmount('£1,234.56')?.toFixed(2)).toBe('1234.56')
+    expect(parseStatementAmount('100.13 GBP')?.toFixed(2)).toBe('100.13')
     expect(parseStatementAmount('(50.00)')?.toFixed(2)).toBe('-50.00')
     expect(parseStatementAmount('50.00-')?.toFixed(2)).toBe('-50.00')
     expect(parseStatementAmount('50.00 DR')?.toFixed(2)).toBe('-50.00')
