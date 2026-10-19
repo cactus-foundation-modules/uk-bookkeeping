@@ -36,6 +36,14 @@ type Period = {
   source: string
   submitted_externally: boolean
   overdue: boolean
+  payment?: PaymentInfo | null
+}
+
+type PaymentInfo = {
+  status: 'unpaid' | 'part_paid' | 'paid' | 'unknown'
+  original_amount: string | null
+  outstanding_amount: string | null
+  hmrc_due_date: string | null
 }
 
 type HmrcStatus = {
@@ -81,6 +89,34 @@ export default function VatPeriodsScreen({
     load()
   }, [load])
 
+  // Ask HMRC whether filed returns have been paid. The server skips every return
+  // already seen as paid, so this costs nothing once they all are.
+  const checkPayments = useCallback(async (force: boolean) => {
+    try {
+      const response = await hmrcFetch('/api/m/uk-bookkeeping/admin/hmrc/payment-status', { force })
+      if (!response.ok) return
+      const payload = (await response.json()) as { statuses?: (PaymentInfo & { period_id: string })[] }
+      const byPeriod = new Map((payload.statuses ?? []).map((s) => [s.period_id, s]))
+      setPeriods((current) =>
+        current ? current.map((p) => ({ ...p, payment: byPeriod.get(p.id) ?? p.payment ?? null })) : current,
+      )
+    } catch {
+      // Best effort: the badge simply stays as it was.
+    }
+  }, [])
+
+  const wantsPaymentCheck =
+    canSubmit &&
+    hmrc?.status === 'connected' &&
+    !!periods?.some((p) => p.status === 'submitted' && p.payment?.status !== 'paid')
+  const [paymentChecked, setPaymentChecked] = useState(false)
+  useEffect(() => {
+    if (!wantsPaymentCheck || paymentChecked) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-off per page load, guards itself
+    setPaymentChecked(true)
+    void checkPayments(false)
+  }, [wantsPaymentCheck, paymentChecked, checkPayments])
+
   async function refreshFromHmrc() {
     setBusy(true)
     setError(null)
@@ -94,6 +130,7 @@ export default function VatPeriodsScreen({
       setLastChecked(new Date().toLocaleString('en-GB'))
       setPeriods(payload.periods ?? [])
       setSyncSummary(describeSync(payload))
+      void checkPayments(true)
     } catch {
       setError('HMRC could not be reached. Check the connection and try again.')
     } finally {
@@ -309,6 +346,7 @@ export default function VatPeriodsScreen({
                 <th style={{ padding: '0.625rem 0.75rem' }}>Scheme</th>
                 <th style={{ padding: '0.625rem 0.75rem' }}>Where it came from</th>
                 <th style={{ padding: '0.625rem 0.75rem' }}>State</th>
+                <th style={{ padding: '0.625rem 0.75rem' }}>Paid to HMRC?</th>
               </tr>
             </thead>
             <tbody>
@@ -333,6 +371,9 @@ export default function VatPeriodsScreen({
                       submittedExternally={period.submitted_externally}
                     />
                   </td>
+                  <td style={{ padding: '0.5rem 0.75rem' }}>
+                    <PaymentBadge period={period} />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -343,13 +384,26 @@ export default function VatPeriodsScreen({
   )
 }
 
+function PaymentBadge({ period }: { period: Period }) {
+  if (period.status !== 'submitted') return <span style={{ color: 'var(--color-text-muted, var(--color-text))' }}>-</span>
+  const payment = period.payment
+  if (!payment || payment.status === 'unknown') {
+    return <span style={{ color: 'var(--color-text-muted, var(--color-text))' }}>Not known yet</span>
+  }
+  if (payment.status === 'paid') return <strong>Paid</strong>
+  const left = poundsFromString(payment.outstanding_amount ?? payment.original_amount ?? '0')
+  if (payment.status === 'part_paid') return <span>Part paid, {left} to go</span>
+  return <span>Unpaid, {left} due{payment.hmrc_due_date ? ` ${formatDate(payment.hmrc_due_date)}` : ''}</span>
+}
+
 /**
  * What a refresh found, in a sentence. Without it a refresh that brought in
  * nothing new looked exactly like one that had not worked.
  */
-function describeSync(payload: { fetched?: number; created?: number }): string | null {
+function describeSync(payload: { fetched?: number; created?: number; testPeriod?: boolean }): string | null {
   if (typeof payload.fetched !== 'number') return null
   const listed = `HMRC listed ${payload.fetched} period${payload.fetched === 1 ? '' : 's'}`
   const created = payload.created ?? 0
-  return created > 0 ? `${listed}, ${created} new here` : `${listed}, nothing new`
+  const test = payload.testPeriod ? ' (one of them a test period made here, as the sandbox had none left)' : ''
+  return created > 0 ? `${listed}, ${created} new here${test}` : `${listed}, nothing new`
 }

@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { getSiteUrl } from '@/lib/config/env'
 import { sendTemplateEmail } from '@/lib/email'
@@ -23,11 +24,13 @@ import {
 import { getSettings } from '../settings'
 import { boxesMatch } from '../vat-boxes'
 import type { BkVatPeriodRow, SnapshotLine, VatBoxes } from '../types'
-import type { HmrcCallContext, HmrcClient, VatObligation } from './client'
+import type { HmrcCallContext, HmrcClient, VatLiability, VatObligation } from './client'
 import { DirectHmrcClient } from './direct-client'
 import { isHmrcConfigured } from './endpoints'
 import { buildFraudHeaders, type FraudBag } from './fraud-headers'
 import { MONEY_MAX_RANGE_DAYS, clampRange, toDateOnly as toDateOnlyString } from './limits'
+import { pickSandboxTestPeriod } from './sandbox-period'
+import { judgePeriodPayment, liabilityWindows } from './payment-match'
 import { getAccessToken, getConnection } from './tokens'
 
 // Everything that needs HMRC, in one place, so the rest of the module never
@@ -159,6 +162,7 @@ export async function syncObligations(inputs: CallInputs): Promise<{
   fetched: number
   matched: number
   created: number
+  testPeriod: boolean
 }> {
   const client = getHmrcClient()
   const ctx = await buildCallContext(client, inputs)
@@ -217,7 +221,38 @@ export async function syncObligations(inputs: CallInputs): Promise<{
     if (applied === 'created') created += 1
   }
 
-  return { fetched: byPeriod.size, matched, created }
+  const testPeriod = ctx.environment === 'sandbox' && (await ensureSandboxTestPeriod(vrn, settings.scheme))
+
+  return { fetched: byPeriod.size, matched, created: created + (testPeriod ? 1 : 0), testPeriod }
+}
+
+/**
+ * Sandbox only: if nothing is left to file, make a test period so a refresh
+ * always leaves something to test with (see sandbox-period.ts). One at a time -
+ * pressing Refresh repeatedly does not pile them up.
+ */
+async function ensureSandboxTestPeriod(vrn: string, scheme: 'accrual' | 'cash'): Promise<boolean> {
+  const [open] = await prisma.$queryRaw<{ n: number }[]>`
+    SELECT COUNT(*)::int AS n FROM "bk_vat_periods"
+    WHERE "status" <> 'submitted' AND ("vrn" IS NULL OR "vrn" = ${vrn})
+  `
+  if ((open?.n ?? 0) > 0) return false
+
+  const taken = await prisma.$queryRaw<{ start: string; end: string; periodKey: string | null }[]>`
+    SELECT "start_date"::text AS "start", "end_date"::text AS "end", "period_key" AS "periodKey"
+    FROM "bk_vat_periods"
+  `
+  const pick = pickSandboxTestPeriod(taken)
+  if (!pick) return false
+
+  const inserted = await prisma.$executeRaw`
+    INSERT INTO "bk_vat_periods"
+      ("period_key", "start_date", "end_date", "due_date", "scheme", "source", "obligation_status", "vrn")
+    VALUES (${pick.periodKey}, ${pick.start}::date, ${pick.end}::date, ${pick.due}::date,
+            ${scheme}, 'hmrc', 'O', ${vrn})
+    ON CONFLICT DO NOTHING
+  `
+  return inserted > 0
 }
 
 async function applyObligation(
@@ -278,6 +313,38 @@ async function applyObligation(
   return inserted > 0 ? 'created' : 'skipped'
 }
 
+// The sandbox answers 404 NOT_FOUND for liabilities and payments unless a
+// Gov-Test-Scenario is sent, and then only for the dates that scenario was built
+// around (checked against the published spec on 2026-10-19). A 404 is not the
+// successful response HMRC's approvals team asks to see, so on the sandbox an
+// empty answer is followed up with the documented scenarios. Production never
+// goes near this.
+const SANDBOX_LIABILITY_SCENARIOS: { scenario: string; from: string; to: string }[] = [
+  { scenario: 'MULTIPLE_LIABILITIES_2018_19', from: '2018-04-05', to: '2018-12-21' },
+  { scenario: 'SINGLE_LIABILITY_2018_19', from: '2018-01-02', to: '2018-02-02' },
+]
+
+const SANDBOX_PAYMENT_SCENARIOS: { scenario: string; from: string; to: string }[] = [
+  { scenario: 'MULTIPLE_PAYMENTS_2018_19', from: '2018-02-27', to: '2018-12-21' },
+  { scenario: 'SINGLE_PAYMENT_2018_19', from: '2018-01-02', to: '2018-02-02' },
+]
+
+async function sandboxScenarios<T>(
+  scenarios: { scenario: string; from: string; to: string }[],
+  ctx: HmrcCallContext,
+  ask: (range: { from: string; to: string }, scenarioCtx: HmrcCallContext) => Promise<T[]>,
+): Promise<T[]> {
+  const found: T[] = []
+  for (const { scenario, from, to } of scenarios) {
+    try {
+      found.push(...(await ask({ from, to }, { ...ctx, testScenario: scenario })))
+    } catch (error) {
+      console.error(`[uk-bookkeeping] sandbox scenario ${scenario} refused`, error)
+    }
+  }
+  return found
+}
+
 // Both endpoints require a date range, refuse anything before MTD existed, and
 // cap the window a day tighter than obligations do (see MONEY_MAX_RANGE_DAYS) -
 // so the range is brought inside those limits here rather than being sent as
@@ -285,15 +352,113 @@ async function applyObligation(
 export async function fetchLiabilities(inputs: CallInputs, from: string, to: string) {
   const client = getHmrcClient()
   const ctx = await buildCallContext(client, inputs)
+  const vrn = await requireVrn()
   const range = clampRange({ from, to }, new Date(), MONEY_MAX_RANGE_DAYS)
-  return client.liabilities({ vrn: await requireVrn(), ...range }, ctx)
+  const found = await client.liabilities({ vrn, ...range }, ctx)
+  if (found.length > 0 || ctx.environment !== 'sandbox') return found
+  return sandboxScenarios(SANDBOX_LIABILITY_SCENARIOS, ctx, (r, c) =>
+    client.liabilities({ vrn, ...r }, c),
+  )
 }
 
 export async function fetchPayments(inputs: CallInputs, from: string, to: string) {
   const client = getHmrcClient()
   const ctx = await buildCallContext(client, inputs)
+  const vrn = await requireVrn()
   const range = clampRange({ from, to }, new Date(), MONEY_MAX_RANGE_DAYS)
-  return client.payments({ vrn: await requireVrn(), ...range }, ctx)
+  const found = await client.payments({ vrn, ...range }, ctx)
+  if (found.length > 0 || ctx.environment !== 'sandbox') return found
+  return sandboxScenarios(SANDBOX_PAYMENT_SCENARIOS, ctx, (r, c) =>
+    client.payments({ vrn, ...r }, c),
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Has HMRC been paid?
+// ---------------------------------------------------------------------------
+
+export type PaymentStatusRow = {
+  period_id: string
+  status: 'unpaid' | 'part_paid' | 'paid' | 'unknown'
+  original_amount: Prisma.Decimal | null
+  outstanding_amount: Prisma.Decimal | null
+  hmrc_due_date: Date | null
+  checked_at: Date
+}
+
+/** Seven years of quarters is more than any page load should ever fetch. */
+const MAX_PAYMENT_WINDOWS = 8
+
+export async function listPaymentStatuses(): Promise<PaymentStatusRow[]> {
+  return prisma.$queryRaw<PaymentStatusRow[]>`SELECT * FROM "bk_vat_payment_status"`
+}
+
+/**
+ * Ask HMRC whether each filed return has been paid, and remember the answer.
+ *
+ * Every submitted period is asked about until HMRC's liability for it says
+ * nothing is outstanding; from then on it is never asked about again. When every
+ * submitted period is paid this makes no call to HMRC at all. Anything that
+ * cannot be matched stays "unknown" and keeps being asked.
+ */
+export async function refreshPaymentStatuses(
+  inputs: CallInputs,
+  options: { force?: boolean } = {},
+): Promise<{ asked: number; paid: number; statuses: PaymentStatusRow[] }> {
+  const vrn = await requireVrn()
+  const force = options.force === true
+
+  const pending = await prisma.$queryRaw<{ id: string; start: string; end: string }[]>`
+    SELECT p."id", p."start_date"::text AS "start", p."end_date"::text AS "end"
+    FROM "bk_vat_periods" p
+    LEFT JOIN "bk_vat_payment_status" s ON s."period_id" = p."id"
+    WHERE p."status" = 'submitted'
+      AND (p."vrn" IS NULL OR p."vrn" = ${vrn})
+      AND (s."status" IS NULL OR s."status" <> 'paid')
+      AND (${force}::boolean OR s."checked_at" IS NULL
+           OR s."checked_at" < NOW() - INTERVAL '60 minutes')
+  `
+  if (pending.length === 0) return { asked: 0, paid: 0, statuses: await listPaymentStatuses() }
+
+  const client = getHmrcClient()
+  const ctx = await buildCallContext(client, inputs)
+  const earliest = pending.reduce((min, p) => (p.start < min ? p.start : min), pending[0]!.start)
+  const today = toDateOnlyString(new Date())
+  const windows = liabilityWindows(
+    clampRange({ from: earliest, to: today }, new Date(), 100_000).from,
+    today,
+    MONEY_MAX_RANGE_DAYS,
+  ).slice(-MAX_PAYMENT_WINDOWS)
+
+  const liabilities: VatLiability[] = []
+  for (const window of windows) {
+    liabilities.push(...(await client.liabilities({ vrn, ...window }, ctx)))
+  }
+
+  let paid = 0
+  for (const period of pending) {
+    const verdict = judgePeriodPayment(period, liabilities)
+    if (verdict.status === 'paid') paid += 1
+    await prisma.$executeRaw`
+      INSERT INTO "bk_vat_payment_status"
+        ("period_id", "status", "original_amount", "outstanding_amount", "hmrc_due_date", "paid_seen_at")
+      VALUES (
+        ${period.id}, ${verdict.status}::text, ${verdict.originalAmount}::numeric,
+        ${verdict.outstandingAmount}::numeric, ${verdict.dueDate}::date,
+        CASE WHEN ${verdict.status}::text = 'paid' THEN NOW() END
+      )
+      ON CONFLICT ("period_id") DO UPDATE SET
+        "status" = EXCLUDED."status",
+        "original_amount" = EXCLUDED."original_amount",
+        "outstanding_amount" = EXCLUDED."outstanding_amount",
+        "hmrc_due_date" = EXCLUDED."hmrc_due_date",
+        "paid_seen_at" = EXCLUDED."paid_seen_at",
+        "checked_at" = NOW()
+      WHERE "bk_vat_payment_status"."status" <> 'paid'
+    `
+  }
+
+  return { asked: pending.length, paid, statuses: await listPaymentStatuses() }
 }
 
 /**

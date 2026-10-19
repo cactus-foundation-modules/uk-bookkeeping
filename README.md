@@ -61,7 +61,7 @@ computation follows the same rule.
   each expandable to the exact entries behind it, and a frozen snapshot of both
   the figures and the workings at the moment you finalise. HMRC's declaration is
   shown and affirmed before anything is sent, and the periods screen can show
-  what HMRC says is owed and paid, beside your own figures.
+  what HMRC says is owed and paid, beside your own figures, and shows whether each filed return has been paid.
 - **HMRC.** OAuth to the Government Gateway, obligations, liabilities, payments,
   and submission with the fraud prevention headers HMRC requires. Absent
   credentials, everything except filing still works.
