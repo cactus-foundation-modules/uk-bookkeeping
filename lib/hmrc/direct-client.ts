@@ -144,9 +144,8 @@ export class DirectHmrcClient implements HmrcClient {
     if (body) headers['Content-Type'] = 'application/json'
     // Sandbox only, and guarded here rather than trusted from the caller: in
     // production the header means nothing and has no business being sent.
-    if (ctx.testScenario && ctx.environment === 'sandbox') {
-      headers['Gov-Test-Scenario'] = ctx.testScenario
-    }
+    const testScenario = ctx.testScenario && ctx.environment === 'sandbox' ? ctx.testScenario : null
+    if (testScenario) headers['Gov-Test-Scenario'] = testScenario
 
     // The row goes in BEFORE the call. A timeout that leaves no trace is how a
     // duplicate submission happens.
@@ -155,6 +154,7 @@ export class DirectHmrcClient implements HmrcClient {
       method,
       path,
       fraudHeaders: ctx.fraudHeaders,
+      testScenario,
       actorUserId: ctx.actorUserId ?? null,
     })
     const startedAt = Date.now()

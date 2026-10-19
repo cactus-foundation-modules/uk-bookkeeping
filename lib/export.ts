@@ -104,7 +104,7 @@ const HEADERS: Record<ExportKind, string[]> = {
   ],
   'hmrc-calls': [
     'id', 'at', 'environment', 'method', 'path', 'status_code', 'duration_ms',
-    'correlation_id', 'receipt_id', 'error_code', 'fraud_headers',
+    'correlation_id', 'receipt_id', 'error_code', 'fraud_headers', 'test_scenario',
   ],
   audit: ['chain_index', 'at', 'action', 'entity_type', 'entity_id', 'summary', 'actor_email', 'row_hash'],
 }
@@ -239,7 +239,7 @@ async function fetchPage(kind: ExportKind, cursor: string | bigint | null): Prom
       const after = (cursor as string | null) ?? ''
       const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
         SELECT "id", "at", "environment", "method", "path", "status_code", "duration_ms",
-               "correlation_id", "receipt_id", "error_code", "fraud_headers"
+               "correlation_id", "receipt_id", "error_code", "fraud_headers", "test_scenario"
         FROM "bk_hmrc_api_calls" WHERE "id" > ${after} ORDER BY "id" ASC LIMIT ${CHUNK}
       `
       return { rows, next: (rows.at(-1)?.id as string | undefined) ?? null }

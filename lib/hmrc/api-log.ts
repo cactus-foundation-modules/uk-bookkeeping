@@ -20,13 +20,16 @@ export async function beginApiCall(input: {
   method: string
   path: string
   fraudHeaders: Record<string, string>
+  /** Gov-Test-Scenario, when the call carried one. Sandbox only. */
+  testScenario?: string | null
   actorUserId?: string | null
 }): Promise<string> {
   const [row] = await prisma.$queryRaw<{ id: string }[]>`
-    INSERT INTO "bk_hmrc_api_calls" ("environment", "method", "path", "fraud_headers", "actor_user_id")
+    INSERT INTO "bk_hmrc_api_calls" ("environment", "method", "path", "fraud_headers", "test_scenario", "actor_user_id")
     VALUES (
       ${input.environment}, ${input.method}, ${input.path},
       ${JSON.stringify(safeHeaders(input.fraudHeaders))}::jsonb,
+      ${input.testScenario ?? null},
       ${input.actorUserId ?? null}
     )
     RETURNING "id"
@@ -74,12 +77,13 @@ export type ApiCallRow = {
   correlation_id: string | null
   receipt_id: string | null
   error_code: string | null
+  test_scenario: string | null
 }
 
 export async function listRecentApiCalls(limit = 50): Promise<ApiCallRow[]> {
   return prisma.$queryRaw<ApiCallRow[]>`
     SELECT "id", "at", "environment", "method", "path", "status_code", "duration_ms",
-           "correlation_id", "receipt_id", "error_code"
+           "correlation_id", "receipt_id", "error_code", "test_scenario"
     FROM "bk_hmrc_api_calls" ORDER BY "at" DESC LIMIT ${Math.min(limit, 200)}
   `
 }

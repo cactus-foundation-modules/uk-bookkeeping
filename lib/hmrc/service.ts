@@ -316,8 +316,9 @@ async function applyObligation(
 // The sandbox answers 404 NOT_FOUND for liabilities and payments unless a
 // Gov-Test-Scenario is sent, and then only for the dates that scenario was built
 // around (checked against the published spec on 2026-10-19). A 404 is not the
-// successful response HMRC's approvals team asks to see, so on the sandbox an
-// empty answer is followed up with the documented scenarios. Production never
+// successful response HMRC's approvals team asks to see, so on the sandbox these
+// two calls are made with the documented scenarios and no scenario-less call is
+// sent first. Each call's scenario is written to the call log. Production never
 // goes near this.
 const SANDBOX_LIABILITY_SCENARIOS: { scenario: string; from: string; to: string }[] = [
   { scenario: 'MULTIPLE_LIABILITIES_2018_19', from: '2018-04-05', to: '2018-12-21' },
@@ -354,11 +355,14 @@ export async function fetchLiabilities(inputs: CallInputs, from: string, to: str
   const ctx = await buildCallContext(client, inputs)
   const vrn = await requireVrn()
   const range = clampRange({ from, to }, new Date(), MONEY_MAX_RANGE_DAYS)
-  const found = await client.liabilities({ vrn, ...range }, ctx)
-  if (found.length > 0 || ctx.environment !== 'sandbox') return found
-  return sandboxScenarios(SANDBOX_LIABILITY_SCENARIOS, ctx, (r, c) =>
-    client.liabilities({ vrn, ...r }, c),
-  )
+  // The sandbox answers 404 to this call without a scenario, whatever the dates,
+  // so it goes straight to the documented ones rather than logging a refusal first.
+  if (ctx.environment === 'sandbox') {
+    return sandboxScenarios(SANDBOX_LIABILITY_SCENARIOS, ctx, (r, c) =>
+      client.liabilities({ vrn, ...r }, c),
+    )
+  }
+  return client.liabilities({ vrn, ...range }, ctx)
 }
 
 export async function fetchPayments(inputs: CallInputs, from: string, to: string) {
@@ -366,11 +370,14 @@ export async function fetchPayments(inputs: CallInputs, from: string, to: string
   const ctx = await buildCallContext(client, inputs)
   const vrn = await requireVrn()
   const range = clampRange({ from, to }, new Date(), MONEY_MAX_RANGE_DAYS)
-  const found = await client.payments({ vrn, ...range }, ctx)
-  if (found.length > 0 || ctx.environment !== 'sandbox') return found
-  return sandboxScenarios(SANDBOX_PAYMENT_SCENARIOS, ctx, (r, c) =>
-    client.payments({ vrn, ...r }, c),
-  )
+  // The sandbox answers 404 to this call without a scenario, whatever the dates,
+  // so it goes straight to the documented ones rather than logging a refusal first.
+  if (ctx.environment === 'sandbox') {
+    return sandboxScenarios(SANDBOX_PAYMENT_SCENARIOS, ctx, (r, c) =>
+      client.payments({ vrn, ...r }, c),
+    )
+  }
+  return client.payments({ vrn, ...range }, ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -386,8 +393,8 @@ export type PaymentStatusRow = {
   checked_at: Date
 }
 
-/** Seven years of quarters is more than any page load should ever fetch. */
-const MAX_PAYMENT_WINDOWS = 8
+/** Four years of quarters is more than any page load should ever fetch, and few enough calls to stay clear of HMRC's throttle. */
+const MAX_PAYMENT_WINDOWS = 4
 
 export async function listPaymentStatuses(): Promise<PaymentStatusRow[]> {
   return prisma.$queryRaw<PaymentStatusRow[]>`SELECT * FROM "bk_vat_payment_status"`
@@ -422,6 +429,14 @@ export async function refreshPaymentStatuses(
 
   const client = getHmrcClient()
   const ctx = await buildCallContext(client, inputs)
+  // The sandbox answers liabilities with 404 unless a test scenario is named, and
+  // its sample liabilities never line up with a period filed here - so asking
+  // can only fill HMRC's logs with 404s (and, in a burst, 429s) and tell us
+  // nothing. Statuses stay "unknown" there. The Money with HMRC panel is what
+  // exercises the endpoint on the sandbox.
+  if (ctx.environment === 'sandbox') {
+    return { asked: 0, paid: 0, statuses: await listPaymentStatuses() }
+  }
   const earliest = pending.reduce((min, p) => (p.start < min ? p.start : min), pending[0]!.start)
   const today = toDateOnlyString(new Date())
   const windows = liabilityWindows(

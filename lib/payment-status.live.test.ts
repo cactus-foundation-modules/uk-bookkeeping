@@ -172,4 +172,21 @@ suite('the payment-status table, against a real database', () => {
     const again = await client.query(INSERT, ['#900', '2025-01-01', '2025-03-31', '2025-05-07', '123456789'])
     expect(again.rowCount).toBe(0)
   })
+  it('records the test scenario with the call and keeps it write-once', async () => {
+    const row = await client.query<{ id: string }>(
+      `INSERT INTO "bk_hmrc_api_calls" ("environment", "method", "path", "fraud_headers", "test_scenario")
+       VALUES ('sandbox', 'GET', '/x', '{}'::jsonb, 'MULTIPLE_LIABILITIES_2018_19') RETURNING "id"`,
+    )
+    const id = row.rows[0]!.id
+    // Completing the call, as completeApiCall does, is still allowed.
+    await client.query('UPDATE "bk_hmrc_api_calls" SET "status_code" = 200 WHERE "id" = $1', [id])
+    await expect(
+      client.query('UPDATE "bk_hmrc_api_calls" SET "test_scenario" = NULL WHERE "id" = $1', [id]),
+    ).rejects.toThrow(/cannot be rewritten/)
+    const noScenario = await client.query(
+      `INSERT INTO "bk_hmrc_api_calls" ("environment", "method", "path", "fraud_headers")
+       VALUES ('sandbox', 'GET', '/y', '{}'::jsonb) RETURNING "test_scenario"`,
+    )
+    expect(noScenario.rows[0].test_scenario).toBeNull()
+  })
 })
