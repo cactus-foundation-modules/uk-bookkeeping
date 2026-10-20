@@ -5,10 +5,15 @@ import { useAdminPath } from '@/components/admin/AdminPathContext'
 import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
 import SearchableSelect from './SearchableSelect'
 import DocumentPicker from './DocumentPicker'
+import DropArea from './DropArea'
+import EntryStyles from './EntryStyles'
+import EvidenceDropzone, { type Attachment, readableSize, Thumb } from './EvidenceDropzone'
 import { type UnfiledDocument } from './documents-shared'
 import { ErrorNotice } from './Notices'
+import { preflightFileError } from '@/modules/uk-bookkeeping/lib/file-kinds'
 import {
   addStrings,
+  formatDate,
   fromPence,
   netForGross,
   pence,
@@ -40,19 +45,11 @@ type Line = {
   /** Client-side identity for React keys and input ids. Never sent to the server. */
   uid?: string
   /**
-   * Which figure on this line is the fact, and which two are worked out from
-   * it. Client-side only, never sent.
-   *
-   * Changing the VAT rate has to hold one of the three still, and holding the
-   * net was wrong for the commonest case in the module: an entry raised from a
-   * bank line, where the gross IS the money that left the account. Putting that
-   * line onto 20% used to leave the total at £24 when the bank said £20, which
-   * is a receipt that disagrees with the statement it came from.
-   *
-   * So the last figure typed wins, and a line nobody has typed into - an
-   * imported one, or one being edited - starts on the gross.
+   * The VAT box on this line has been opened for typing, to match a supplier's
+   * own rounding. Client-side only, never sent. Typing an amount or changing the
+   * rate closes it again, because the VAT is then worked out afresh.
    */
-  anchor?: 'net' | 'gross'
+  vatEdit?: boolean
   categoryId: string
   description: string
   vatTreatment: string
@@ -87,11 +84,11 @@ const RATE_PERCENTS: Record<string, string> = {
 }
 
 const RATE_LABELS: Record<string, string> = {
-  standard: 'Standard rate (20%)',
-  reduced: 'Reduced rate (5%)',
-  zero: 'Zero rated',
+  standard: 'Standard 20%',
+  reduced: 'Reduced 5%',
+  zero: 'Zero rated 0%',
   exempt: 'Exempt',
-  outside_scope: 'Outside the scope of VAT',
+  outside_scope: 'Outside scope',
 }
 
 /**
@@ -117,32 +114,22 @@ const TREATMENT_LABELS: Record<string, string> = {
   outside_scope: 'Outside the scope of VAT',
 }
 
-const input: React.CSSProperties = {
-  padding: '0.375rem 0.625rem',
-  border: '1px solid var(--color-border)',
-  borderRadius: 6,
-  background: 'var(--color-bg)',
-  color: 'var(--color-text)',
-  width: '100%',
-}
-
-const label: React.CSSProperties = {
-  display: 'block',
-  fontSize: 'var(--text-sm)',
-  marginBottom: '0.25rem',
-  color: 'var(--color-text-muted, var(--color-text))',
-}
-
-const hint: React.CSSProperties = {
-  margin: '0.25rem 0 0',
-  fontSize: 'var(--text-sm)',
-  color: 'var(--color-text-muted, var(--color-text))',
-}
+/**
+ * Which of the three figures on every line is the one that gets typed, with the
+ * other two worked out from it.
+ *
+ * One answer for the whole entry rather than one per line, because that is how a
+ * person reads a document: either the paper shows a total including VAT (a till
+ * receipt, a bank line) or it shows figures before VAT (an invoice to a trade
+ * customer). Changing the VAT rate then holds the typed figure still, so a £20
+ * bank line put onto 20% stays £20 and the VAT comes out of it, rather than
+ * growing to £24.
+ */
+type EntryMode = 'gross' | 'net'
 
 function emptyLine(category: Pick<Category, 'id' | 'is_capital'> | null): Line {
   return {
     uid: nextLineUid(),
-    anchor: 'gross',
     categoryId: category?.id ?? '',
     description: '',
     vatTreatment: 'domestic',
@@ -213,6 +200,9 @@ export default function TransactionForm({
   initial,
   correcting,
   initialDocumentId,
+  attachments,
+  onAttachmentsChange,
+  onCancel,
 }: {
   initial?: TransactionFormValue
   correcting?: { id: string; counterparty: string; taxPointDate: string } | null
@@ -222,6 +212,11 @@ export default function TransactionForm({
    * from it and attaches it once the entry has an id to attach it to.
    */
   initialDocumentId?: string | null
+  /** The receipts already on a saved entry that is being edited. */
+  attachments?: Attachment[]
+  onAttachmentsChange?: () => void
+  /** Called by the Cancel button. Without it, Cancel goes back to the list. */
+  onCancel?: () => void
 }) {
   const adminPath = useAdminPath()
   const [askConfirm, confirmNode] = useAdminConfirm()
@@ -237,6 +232,13 @@ export default function TransactionForm({
   // there is nothing to attach them TO until the entry has been saved and has an
   // id, and a link posted before then would file a receipt against nothing.
   const [chosenDocuments, setChosenDocuments] = useState<UnfiledDocument[]>([])
+  // Files dropped on while typing, held in the browser for the same reason: the
+  // upload route wants an entry id, and there isn't one until it is saved.
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [mode, setMode] = useState<EntryMode>('gross')
+  // Set once a new entry has been saved but something after the save failed. A
+  // second press of Save must then update THAT entry, not record a duplicate.
+  const [savedId, setSavedId] = useState<string | null>(null)
   // Once a human has chosen a category, the counterparty suggestion keeps its
   // hands off - a guess must never overwrite a decision.
   const [categoryTouched, setCategoryTouched] = useState(!!initial)
@@ -376,6 +378,8 @@ export default function TransactionForm({
     setChosenDocuments((prev) =>
       prev.some((held) => held.id === document.id) ? prev : [...prev, document],
     )
+    // A document is read off its total, so that is the figure to hold still.
+    if (document.guessed_total) setMode('gross')
 
     setValue((prev) => {
       const next: TransactionFormValue = { ...prev }
@@ -406,7 +410,6 @@ export default function TransactionForm({
           next.lines = [
             {
               ...only,
-              anchor: 'gross',
               vatTreatment: document.guessed_vat_treatment,
               vatRateCode: code,
               vatRatePercent: RATE_PERCENTS[code] ?? '20.00',
@@ -423,7 +426,6 @@ export default function TransactionForm({
           next.lines = [
             {
               ...only,
-              anchor: 'gross',
               vatTreatment: document.guessed_vat_treatment ?? only.vatTreatment,
               vatRateCode: code,
               vatRatePercent: RATE_PERCENTS[code] ?? only.vatRatePercent,
@@ -442,7 +444,6 @@ export default function TransactionForm({
           next.lines = [
             {
               ...only,
-              anchor: 'gross',
               vatTreatment: document.guessed_vat_treatment ?? only.vatTreatment,
               vatRateCode: code,
               vatRatePercent: percent,
@@ -505,7 +506,7 @@ export default function TransactionForm({
     const line = value.lines[index]!
     const vat = vatForNet(net, line.vatRatePercent)
     setLine(index, {
-      anchor: 'net',
+      vatEdit: false,
       netAmount: net,
       vatAmount: vat,
       grossAmount: fromPence(pence(net) + pence(vat)),
@@ -516,7 +517,7 @@ export default function TransactionForm({
     const line = value.lines[index]!
     const net = netForGross(gross, line.vatRatePercent)
     setLine(index, {
-      anchor: 'gross',
+      vatEdit: false,
       grossAmount: gross,
       netAmount: net,
       vatAmount: fromPence(pence(gross) - pence(net)),
@@ -537,8 +538,9 @@ export default function TransactionForm({
       setLine(index, { vatTreatment: treatment })
       return
     }
-    const whole = line.anchor === 'net' ? line.netAmount : line.grossAmount
+    const whole = mode === 'net' ? line.netAmount : line.grossAmount
     setLine(index, {
+      vatEdit: false,
       vatTreatment: treatment,
       netAmount: whole,
       vatAmount: '0.00',
@@ -546,18 +548,36 @@ export default function TransactionForm({
     })
   }
 
+  /**
+   * The VAT typed over, to match the supplier's own rounding to the penny.
+   *
+   * It moves whichever figure is NOT the one being typed: entering including VAT,
+   * the total is the fact and the net absorbs the difference; entering before
+   * VAT, the net is the fact and the total follows.
+   */
   function changeVat(index: number, vat: string) {
     const line = value.lines[index]!
-    setLine(index, { vatAmount: vat, grossAmount: fromPence(pence(line.netAmount) + pence(vat)) })
+    if (mode === 'gross') {
+      setLine(index, {
+        vatEdit: true,
+        vatAmount: vat,
+        netAmount: fromPence(pence(line.grossAmount) - pence(vat)),
+      })
+    } else {
+      setLine(index, {
+        vatEdit: true,
+        vatAmount: vat,
+        grossAmount: fromPence(pence(line.netAmount) + pence(vat)),
+      })
+    }
   }
 
   /**
-   * Changing the rate re-splits the line, holding whichever figure was typed.
+   * Changing the rate re-splits the line, holding whichever figure is typed.
    *
-   * Gross-anchored - which is every imported line and every receipt somebody
-   * read the total off - the total stays put and the VAT comes OUT of it. Net
-   * -anchored, the VAT goes on top. The old behaviour was always the second
-   * one, so putting an imported £20 line onto 20% quietly made it £24.
+   * Including VAT - which is every imported line and every receipt somebody read
+   * the total off - the total stays put and the VAT comes OUT of it. Before VAT,
+   * the VAT goes on top.
    */
   function changeRate(index: number, rateCode: string) {
     const line = value.lines[index]!
@@ -570,9 +590,10 @@ export default function TransactionForm({
       return
     }
     setLine(index, {
+      vatEdit: false,
       vatRateCode: rateCode,
       vatRatePercent: percent,
-      ...resplitAtRate(line, percent, line.anchor),
+      ...resplitAtRate(line, percent, mode),
     })
   }
 
@@ -649,21 +670,23 @@ export default function TransactionForm({
       evidenceNotRequired: !!value.evidenceNotRequired,
       // Their own paperwork is already on its way; a second invoice beside it
       // would be two documents for one payment.
-      generateInvoice: chosenDocuments.length === 0 && !value.evidenceNotRequired,
+      generateInvoice:
+        chosenDocuments.length === 0 && pendingFiles.length === 0 && !value.evidenceNotRequired,
       counterparty: value.counterparty,
-      reference: value.reference || null,
+      reference: showReference ? value.reference || null : null,
       correctsTransactionId: value.correctsTransactionId ?? null,
       correctionReason: value.correctionReason || null,
-      lines: value.lines.map(({ uid: _uid, anchor: _anchor, ...line }) => line),
+      lines: value.lines.map(({ uid: _uid, vatEdit: _vatEdit, ...line }) => line),
     }
 
     try {
+      const existingId = value.id ?? savedId
       const response = await fetch(
-        value.id
-          ? `/api/m/uk-bookkeeping/admin/transactions/${value.id}`
+        existingId
+          ? `/api/m/uk-bookkeeping/admin/transactions/${existingId}`
           : '/api/m/uk-bookkeeping/admin/transactions',
         {
-          method: value.id ? 'PUT' : 'POST',
+          method: existingId ? 'PUT' : 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         },
@@ -677,6 +700,7 @@ export default function TransactionForm({
       }
 
       const saved = await response.json()
+      setSavedId(saved.id)
       if (saved.invoiceError) {
         // Saved, but the invoice was not made. Staying on the form would invite
         // a second save and a duplicate entry, so say it and carry on to the
@@ -694,7 +718,7 @@ export default function TransactionForm({
       // an id. One at a time and never fatally: the entry is saved, and a
       // receipt that would not attach is a thing to say, not a reason to leave
       // somebody staring at a form that appears not to have worked.
-      const stubborn: string[] = []
+      const stubbornDocuments: UnfiledDocument[] = []
       for (const document of chosenDocuments) {
         try {
           const attached = await fetch(
@@ -705,14 +729,36 @@ export default function TransactionForm({
               body: JSON.stringify({ transactionId: saved.id }),
             },
           )
-          if (!attached.ok) stubborn.push(document.name)
+          if (!attached.ok) stubbornDocuments.push(document)
         } catch {
-          stubborn.push(document.name)
+          stubbornDocuments.push(document)
         }
       }
+      // Files dropped onto the form go up the same way the saved entry's own
+      // dropzone sends them, one at a time and never fatally.
+      const stubbornFiles: File[] = []
+      for (const file of pendingFiles) {
+        try {
+          const body = new FormData()
+          body.append('file', file)
+          body.append('name', file.name)
+          const uploaded = await fetch(
+            `/api/m/uk-bookkeeping/admin/transactions/${saved.id}/attachments`,
+            { method: 'POST', body },
+          )
+          if (!uploaded.ok) stubbornFiles.push(file)
+        } catch {
+          stubbornFiles.push(file)
+        }
+      }
+      // Whatever did not go stays held, so the next press of Save tries only
+      // those and the ones that landed are not sent twice.
+      setChosenDocuments(stubbornDocuments)
+      setPendingFiles(stubbornFiles)
+      const stubborn = [...stubbornDocuments.map((d) => d.name), ...stubbornFiles.map((f) => f.name)]
       if (stubborn.length > 0) {
         setError(
-          `The entry is saved, but ${stubborn.join(' and ')} could not be attached to it. ${stubborn.length === 1 ? 'It is' : 'They are'} still in Receipts - try again from the entry itself.`,
+          `The entry is saved, but ${stubborn.join(' and ')} could not be attached to it. Press Save again to retry ${stubborn.length === 1 ? 'it' : 'them'}, or add ${stubborn.length === 1 ? 'it' : 'them'} from the entry itself.`,
         )
         setSaving(false)
         return
@@ -728,9 +774,52 @@ export default function TransactionForm({
     }
   }
 
+  const bankLabel = (account: BankAccount) =>
+    `${account.name}${BANK_KIND_LABELS[account.kind] ? ` (${BANK_KIND_LABELS[account.kind]})` : ''}`
+
+  // The VAT split by rate, for the summary. Only worth a breakdown when there is
+  // more than one rate in play; a single rate IS the VAT line above it.
+  const vatByRate = useMemo(() => {
+    const groups = new Map<string, string>()
+    for (const line of value.lines) {
+      if (pence(line.vatAmount) === 0 && value.lines.length > 1) continue
+      groups.set(line.vatRateCode, addStrings(groups.get(line.vatRateCode) ?? '0.00', line.vatAmount || '0.00'))
+    }
+    return [...groups.entries()]
+  }, [value.lines])
+
+  const paidFrom = bankAccounts.find((account) => account.id === value.bankAccountId)
+  const cancelHref = `/${adminPath}/m/uk-bookkeeping/transactions`
+  const submitLabel = saving
+    ? 'Saving…'
+    : value.id || savedId
+      ? 'Save changes'
+      : isTransfer
+        ? 'Record this transfer'
+        : 'Record this entry'
+  const heldCount = chosenDocuments.length + pendingFiles.length
+
+  function addFiles(files: File[]) {
+    const accepted: File[] = []
+    for (const file of files) {
+      const reason = preflightFileError(file)
+      if (reason) {
+        setError(reason)
+        continue
+      }
+      accepted.push(file)
+    }
+    if (accepted.length > 0) setPendingFiles((prev) => [...prev, ...accepted])
+  }
+
+  const settledValue = toDateInput(value.settledDate)
+  // Money coming in gets OUR invoice number, handed out when the invoice is
+  // made on save, so there is nothing to type. An older entry that already
+  // carries a reference of the customer's keeps the box so it can be seen.
+  const showReference = value.direction !== 'income' || !!value.id || !!value.reference.trim()
+
   return (
     <form
-      style={{ maxWidth: 960 }}
       onSubmit={(e) => {
         e.preventDefault()
         if (saving) return
@@ -738,444 +827,635 @@ export default function TransactionForm({
         else save()
       }}
     >
+      <EntryStyles />
       {confirmNode}
       <ErrorNotice message={error} />
 
-      {correcting && (
-        <div
-          className="card"
-          style={{ padding: '0.875rem 1rem', marginBottom: '1rem', background: 'var(--color-surface)' }}
-        >
-          <strong>This is a correction</strong> to the entry for {correcting.counterparty} dated{' '}
-          {correcting.taxPointDate}. It goes on the current open return, not on the one already filed
-          - which is how HMRC expects a mistake on a past return to be put right.
-        </div>
-      )}
-
-      {/*
-        Only while the entry is being written. Once it is saved, its evidence is
-        managed on the entry's own page, where the receipts already on it are
-        listed alongside the ones still waiting - two places offering to attach
-        the same file would be two places to get it wrong.
-      */}
-      {isNewEntry && !isTransfer && (
-        <DocumentPicker
-          chosen={chosenDocuments}
-          onChoose={applyDocument}
-          onRelease={(id) =>
-            setChosenDocuments((prev) => prev.filter((document) => document.id !== id))
-          }
-          disabled={saving}
-        />
-      )}
-
-      <div className="card" style={{ padding: '1.25rem', marginBottom: '1rem' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
-          <div>
-            <label style={label} htmlFor="bk-direction">Money in or out</label>
-            <select
-              id="bk-direction"
-              style={input}
-              value={value.direction}
-              onChange={(e) => setValue({ ...value, direction: e.target.value })}
-            >
-              <option value="expense">Money out (an expense)</option>
-              <option value="income">Money in (a sale)</option>
-              <option value="transfer">Internal transfer (between your own accounts)</option>
-            </select>
-            {isTransfer && (
-              <p style={hint}>
-                Neither a sale nor a cost - the same money, somewhere else. It moves both balances
-                and touches nothing on the VAT return.
-              </p>
-            )}
-          </div>
-          <div>
-            <label style={label} htmlFor="bk-date">{isTransfer ? 'Date it moved' : 'Invoice or receipt date'}</label>
-            <input
-              id="bk-date"
-              type="date"
-              style={input}
-              value={toDateInput(value.taxPointDate)}
-              onChange={(e) => setValue({ ...value, taxPointDate: e.target.value })}
-            />
-          </div>
-          {!isTransfer && (
-          <div>
-            <label style={label} htmlFor="bk-settled">Date it was paid</label>
-            <input
-              id="bk-settled"
-              type="date"
-              style={input}
-              value={toDateInput(value.settledDate)}
-              onChange={(e) => setValue({ ...value, settledDate: e.target.value })}
-              aria-describedby="bk-settled-hint"
-            />
-            <p id="bk-settled-hint" style={hint}>
-              Leave empty if it has not been paid yet. It will show under what is owed until you fill
-              this in.
-            </p>
-          </div>
+      <div className="bkx-layout">
+        <div className="bkx-main">
+          {correcting && (
+            <div className="bkx-card" style={{ borderColor: 'var(--color-warning, var(--color-border))' }}>
+              <strong>This is a correction</strong> to the entry for {correcting.counterparty} dated{' '}
+              {correcting.taxPointDate}. It goes on the current open return, not on the one already
+              filed - which is how HMRC expects a mistake on a past return to be put right.
+            </div>
           )}
-          {bankAccounts.length > 0 && (
-            <div>
-              <label style={label} htmlFor="bk-bank-account">
-                {isTransfer ? 'Out of' : value.direction === 'income' ? 'Paid into' : 'Paid from'}
-              </label>
-              <select
-                id="bk-bank-account"
-                style={input}
-                value={value.bankAccountId ?? ''}
-                onChange={(e) => setValue({ ...value, bankAccountId: e.target.value })}
-              >
-                {/*
-                  Only offered while nothing is chosen, which on a site with
-                  bank accounts set up means an older entry saved before the
-                  question was asked. It reads as the gap it is rather than as
-                  a sensible default, and once a real account is picked it goes
-                  away for good.
-                */}
-                {!value.bankAccountId && <option value="">Not recorded yet</option>}
-                {bankAccounts.map((account) => (
-                  <option key={account.id} value={account.id}>
-                    {account.name}
-                    {BANK_KIND_LABELS[account.kind] ? ` (${BANK_KIND_LABELS[account.kind]})` : ''}
-                  </option>
+
+          <section className="bkx-card" aria-label="Details">
+            <div className="bkx-card-head">
+              <div className="bkx-seg" role="group" aria-label="Money in or out">
+                {(
+                  [
+                    ['expense', 'Money out'],
+                    ['income', 'Money in'],
+                    ['transfer', 'Transfer'],
+                  ] as const
+                ).map(([code, text]) => (
+                  <button
+                    key={code}
+                    type="button"
+                    aria-pressed={value.direction === code}
+                    onClick={() => setValue({ ...value, direction: code })}
+                  >
+                    {text}
+                  </button>
                 ))}
-              </select>
-            </div>
-          )}
-          {isTransfer && (
-            <div>
-              <label style={label} htmlFor="bk-transfer-to">Into</label>
-              <select
-                id="bk-transfer-to"
-                style={input}
-                value={value.transferToBankAccountId ?? ''}
-                onChange={(e) => setValue({ ...value, transferToBankAccountId: e.target.value })}
-              >
-                <option value="">Choose an account</option>
-                {bankAccounts
-                  // Never the account it came out of. Offering it would only
-                  // ever produce a refusal from the server a moment later.
-                  .filter((account) => account.id !== value.bankAccountId)
-                  .map((account) => (
-                    <option key={account.id} value={account.id}>
-                      {account.name}
-                      {BANK_KIND_LABELS[account.kind] ? ` (${BANK_KIND_LABELS[account.kind]})` : ''}
-                    </option>
-                  ))}
-              </select>
-            </div>
-          )}
-          {isTransfer && (
-            <div>
-              <label style={label} htmlFor="bk-transfer-amount">How much moved</label>
-              <input
-                id="bk-transfer-amount"
-                style={input}
-                inputMode="decimal"
-                placeholder="0.00"
-                value={value.transferAmount ?? ''}
-                onChange={(e) => setValue({ ...value, transferAmount: e.target.value })}
-                aria-describedby="bk-transfer-amount-hint"
-              />
-              <p id="bk-transfer-amount-hint" style={hint}>
-                Always a positive figure. To send it the other way, swap the two accounts over.
-              </p>
-            </div>
-          )}
-          {!isTransfer && (
-          <div>
-            <label style={label} htmlFor="bk-counterparty">Who it was with</label>
-            <input
-              id="bk-counterparty"
-              style={input}
-              value={value.counterparty}
-              placeholder="Supplier or customer"
-              list="bk-counterparty-suggestions"
-              onChange={(e) => setValue({ ...value, counterparty: e.target.value })}
-              onBlur={(e) => suggestCategory(e.target.value)}
-            />
-            <datalist id="bk-counterparty-suggestions">
-              {knownCounterparties.map((name) => (
-                <option key={name} value={name} />
-              ))}
-            </datalist>
-          </div>
-          )}
-          <div>
-            <label style={label} htmlFor="bk-reference">
-              {isTransfer ? 'Reference, if it had one' : 'Their invoice number'}
-            </label>
-            <input
-              id="bk-reference"
-              style={input}
-              value={value.reference}
-              onChange={(e) => setValue({ ...value, reference: e.target.value })}
-            />
-          </div>
-          {value.entryType === 'adjustment' && (
-            <div style={{ gridColumn: '1 / -1' }}>
-              <label style={label} htmlFor="bk-reason">Why this correction is needed</label>
-              <input
-                id="bk-reason"
-                style={input}
-                value={value.correctionReason ?? ''}
-                onChange={(e) => setValue({ ...value, correctionReason: e.target.value })}
-              />
-            </div>
-          )}
-        </div>
-
-        {!isTransfer && (
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: '0.5rem',
-            marginTop: '1rem',
-            fontSize: 'var(--text-sm)',
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={!!value.evidenceNotRequired}
-            onChange={(e) => setValue({ ...value, evidenceNotRequired: e.target.checked })}
-            style={{ marginTop: '0.2rem' }}
-          />
-          <span>
-            No receipt needed for this one
-            <span
-              style={{
-                display: 'block',
-                fontSize: 'var(--text-xs, 0.75rem)',
-                color: 'var(--color-text-muted, var(--color-text))',
-              }}
-            >
-              For the entries that are never going to have one - money put onto an account held
-              with a supplier, a bank charge. It stops this entry counting as paperwork still
-              owed, and nothing else.
-            </span>
-          </span>
-        </label>
-        )}
-      </div>
-
-      {/*
-        No lines on a transfer. There is nothing to split it into: no category,
-        no VAT rate, and no part of it that could be treated differently from the
-        rest. One amount, two accounts, and that is the whole of it.
-      */}
-      {!isTransfer && (
-      <div className="card" style={{ padding: '1.25rem', marginBottom: '1rem' }}>
-        <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9375rem' }}>What it was made up of</h3>
-        <p style={{ margin: '0 0 1rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
-          One line is usually plenty. Add more when a single receipt covers more than one thing - a
-          tank of fuel with a sandwich on it needs two, because they are taxed differently.
-        </p>
-
-        {value.lines.map((line, index) => (
-          <div
-            key={line.uid ?? index}
-            style={{
-              border: '1px solid var(--color-border)',
-              borderRadius: 8,
-              padding: '0.875rem',
-              marginBottom: '0.75rem',
-            }}
-          >
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.75rem' }}>
-              <div style={{ gridColumn: '1 / -1' }}>
-                <label style={label} htmlFor={`bk-line-${line.uid}-description`}>What it was for</label>
-                <input
-                  id={`bk-line-${line.uid}-description`}
-                  style={input}
-                  value={line.description}
-                  placeholder={value.direction === 'income' ? 'What was sold' : 'What was bought'}
-                  onChange={(e) => setLine(index, { description: e.target.value })}
-                />
               </div>
-              <div>
-                <label style={label} htmlFor={`bk-line-${line.uid}-category`}>Category</label>
-                <SearchableSelect
-                  id={`bk-line-${line.uid}-category`}
-                  style={{ ...input, width: '100%' }}
-                  value={line.categoryId}
-                  options={categories.map((category) => ({ value: category.id, label: category.name }))}
-                  onChange={(categoryId) => {
-                    const category = categories.find((c) => c.id === categoryId)
-                    setCategoryTouched(true)
-                    setLine(index, {
-                      categoryId,
-                      isCapital: category?.is_capital ?? false,
-                      registerAsset: category?.is_capital ?? false,
-                    })
-                  }}
-                />
-              </div>
-              <div>
-                <label style={label} htmlFor={`bk-line-${line.uid}-rate`}>VAT rate</label>
-                <select
-                  id={`bk-line-${line.uid}-rate`}
-                  style={input}
-                  value={line.vatRateCode}
-                  onChange={(e) => changeRate(index, e.target.value)}
-                >
-                  {Object.entries(RATE_LABELS).map(([code, text]) => (
-                    <option key={code} value={code}>
-                      {text}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label style={label} htmlFor={`bk-line-${line.uid}-treatment`}>VAT treatment</label>
-                <select
-                  id={`bk-line-${line.uid}-treatment`}
-                  style={input}
-                  value={line.vatTreatment}
-                  onChange={(e) => changeTreatment(index, e.target.value)}
-                >
-                  {Object.entries(TREATMENT_LABELS).map(([code, text]) => (
-                    <option key={code} value={code}>
-                      {text}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label style={label} htmlFor={`bk-line-${line.uid}-gross`}>Total including VAT</label>
-                <input
-                  id={`bk-line-${line.uid}-gross`}
-                  style={input}
-                  inputMode="decimal"
-                  value={line.grossAmount}
-                  onChange={(e) => changeGross(index, e.target.value)}
-                />
-              </div>
-              <div>
-                <label style={label} htmlFor={`bk-line-${line.uid}-net`}>Before VAT</label>
-                <input
-                  id={`bk-line-${line.uid}-net`}
-                  style={input}
-                  inputMode="decimal"
-                  value={line.netAmount}
-                  onChange={(e) => changeNet(index, e.target.value)}
-                />
-              </div>
-              <div>
-                <label style={label} htmlFor={`bk-line-${line.uid}-vat`}>VAT</label>
-                <input
-                  id={`bk-line-${line.uid}-vat`}
-                  style={input}
-                  inputMode="decimal"
-                  value={line.vatAmount}
-                  onChange={(e) => changeVat(index, e.target.value)}
-                  readOnly={BUYER_ACCOUNTS_FOR_VAT.includes(line.vatTreatment)}
-                />
-              </div>
-              {BUYER_ACCOUNTS_FOR_VAT.includes(line.vatTreatment) && (
-                <p style={{ ...hint, gridColumn: '1 / -1' }}>
-                  Your supplier charges no VAT on this one and you account for it yourself, which
-                  is why the VAT box is nothing and the total is what you actually paid. The VAT
-                  goes on your return twice - once as owed, once as reclaimed - so it costs you
-                  nothing. The rate above is the rate it WOULD have been at in the UK, and it is
-                  what that sum is worked out from, so it is worth being right.
-                </p>
+              {isTransfer && (
+                <span className="bkx-tiny">
+                  The same money, somewhere else. Touches nothing on the VAT return.
+                </span>
               )}
             </div>
 
-            {/*
-              Only on capital lines, and that is not tidiness. Everything on the
-              asset register had its cost put on the balance sheet by a capital
-              line; offering the tick on an ordinary cost would let someone put
-              a desk in the P&L AND depreciate it, which counts it twice.
-            */}
-            {line.isCapital && (
+            {isTransfer ? (
+              <div className="bkx-grid bkx-grid-2">
+                <div className="bkx-field">
+                  <label htmlFor="bk-date">Date it moved</label>
+                  <input
+                    id="bk-date"
+                    type="date"
+                    className="bkx-input"
+                    value={toDateInput(value.taxPointDate)}
+                    onChange={(e) => setValue({ ...value, taxPointDate: e.target.value })}
+                  />
+                </div>
+                <div className="bkx-field">
+                  <label htmlFor="bk-transfer-amount">How much moved</label>
+                  <input
+                    id="bk-transfer-amount"
+                    className="bkx-input bkx-money"
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={value.transferAmount ?? ''}
+                    onChange={(e) => setValue({ ...value, transferAmount: e.target.value })}
+                  />
+                </div>
+                <div className="bkx-field">
+                  <label htmlFor="bk-bank-account">Out of</label>
+                  <select
+                    id="bk-bank-account"
+                    className="bkx-input"
+                    value={value.bankAccountId ?? ''}
+                    onChange={(e) => setValue({ ...value, bankAccountId: e.target.value })}
+                  >
+                    {!value.bankAccountId && <option value="">Choose an account</option>}
+                    {bankAccounts.map((account) => (
+                      <option key={account.id} value={account.id}>{bankLabel(account)}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="bkx-field">
+                  <label htmlFor="bk-transfer-to">Into</label>
+                  <select
+                    id="bk-transfer-to"
+                    className="bkx-input"
+                    value={value.transferToBankAccountId ?? ''}
+                    onChange={(e) => setValue({ ...value, transferToBankAccountId: e.target.value })}
+                  >
+                    <option value="">Choose an account</option>
+                    {bankAccounts
+                      // Never the account it came out of. Offering it would only
+                      // ever produce a refusal from the server a moment later.
+                      .filter((account) => account.id !== value.bankAccountId)
+                      .map((account) => (
+                        <option key={account.id} value={account.id}>{bankLabel(account)}</option>
+                      ))}
+                  </select>
+                </div>
+                <div className="bkx-field bkx-spanall">
+                  <label htmlFor="bk-reference">Reference, if it had one</label>
+                  <input
+                    id="bk-reference"
+                    className="bkx-input"
+                    value={value.reference}
+                    onChange={(e) => setValue({ ...value, reference: e.target.value })}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="bkx-grid">
+                <div className={`bkx-field ${showReference ? 'bkx-span2' : 'bkx-spanall'}`}>
+                  <label htmlFor="bk-counterparty">
+                    {value.direction === 'income' ? 'Customer' : 'Supplier'}
+                  </label>
+                  <input
+                    id="bk-counterparty"
+                    className="bkx-input"
+                    value={value.counterparty}
+                    placeholder={value.direction === 'income' ? 'Who paid you' : 'Who you paid'}
+                    list="bk-counterparty-suggestions"
+                    onChange={(e) => setValue({ ...value, counterparty: e.target.value })}
+                    onBlur={(e) => suggestCategory(e.target.value)}
+                  />
+                  <datalist id="bk-counterparty-suggestions">
+                    {knownCounterparties.map((name) => (
+                      <option key={name} value={name} />
+                    ))}
+                  </datalist>
+                </div>
+                {showReference && (
+                  <div className="bkx-field">
+                    <label htmlFor="bk-reference">
+                      {value.direction === 'income' ? 'Their reference' : 'Their invoice number'}
+                    </label>
+                    <input
+                      id="bk-reference"
+                      className="bkx-input"
+                      value={value.reference}
+                      onChange={(e) => setValue({ ...value, reference: e.target.value })}
+                    />
+                  </div>
+                )}
+                <div className="bkx-field">
+                  <label htmlFor="bk-date">Invoice date</label>
+                  <input
+                    id="bk-date"
+                    type="date"
+                    className="bkx-input"
+                    value={toDateInput(value.taxPointDate)}
+                    onChange={(e) => setValue({ ...value, taxPointDate: e.target.value })}
+                  />
+                </div>
+                <div className={`bkx-field${bankAccounts.length > 0 ? '' : ' bkx-span2'}`}>
+                  <label htmlFor="bk-settled">
+                    Date paid{' '}
+                    {settledValue ? (
+                      <button
+                        type="button"
+                        className="bkx-linkbtn"
+                        onClick={() => setValue({ ...value, settledDate: '' })}
+                      >
+                        not paid yet
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="bkx-linkbtn"
+                        onClick={() => setValue({ ...value, settledDate: today() })}
+                      >
+                        today
+                      </button>
+                    )}
+                  </label>
+                  <input
+                    id="bk-settled"
+                    type="date"
+                    className="bkx-input"
+                    value={settledValue}
+                    onChange={(e) => setValue({ ...value, settledDate: e.target.value })}
+                    aria-describedby="bk-settled-hint"
+                  />
+                  <div id="bk-settled-hint" className="bkx-tiny" style={{ marginTop: '0.25rem' }}>
+                    {settledValue ? 'Paid.' : 'Blank means unpaid - it shows under what is owed.'}
+                  </div>
+                </div>
+                {bankAccounts.length > 0 && (
+                  <div className="bkx-field">
+                    <label htmlFor="bk-bank-account">
+                      {value.direction === 'income' ? 'Paid into' : 'Paid from'}
+                    </label>
+                    <select
+                      id="bk-bank-account"
+                      className="bkx-input"
+                      value={value.bankAccountId ?? ''}
+                      onChange={(e) => setValue({ ...value, bankAccountId: e.target.value })}
+                    >
+                      {/*
+                        Only offered while nothing is chosen, which on a site with
+                        bank accounts set up means an older entry saved before the
+                        question was asked. It reads as the gap it is rather than as
+                        a sensible default, and once a real account is picked it goes
+                        away for good.
+                      */}
+                      {!value.bankAccountId && <option value="">Not recorded yet</option>}
+                      {bankAccounts.map((account) => (
+                        <option key={account.id} value={account.id}>{bankLabel(account)}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                {value.entryType === 'adjustment' && (
+                  <div className="bkx-field bkx-spanall">
+                    <label htmlFor="bk-reason">Why this correction is needed</label>
+                    <input
+                      id="bk-reason"
+                      className="bkx-input"
+                      value={value.correctionReason ?? ''}
+                      onChange={(e) => setValue({ ...value, correctionReason: e.target.value })}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
+          {/*
+            No lines on a transfer. There is nothing to split it into: no category,
+            no VAT rate, and no part of it that could be treated differently from the
+            rest. One amount, two accounts, and that is the whole of it.
+          */}
+          {!isTransfer && (
+            <section className="bkx-card" aria-label="Line items">
+              <div className="bkx-card-head">
+                <h2 className="bkx-title">What it was for</h2>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <span className="bkx-tiny">I am typing amounts</span>
+                  <div className="bkx-seg" role="group" aria-label="Which amount you type">
+                    <button type="button" aria-pressed={mode === 'gross'} onClick={() => setMode('gross')}>
+                      Including VAT
+                    </button>
+                    <button type="button" aria-pressed={mode === 'net'} onClick={() => setMode('net')}>
+                      Before VAT
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bkx-lines-head" aria-hidden="true">
+                <span>Description</span>
+                <span>Category</span>
+                <span>VAT rate</span>
+                <span className="bkx-r">Before VAT</span>
+                <span className="bkx-r">VAT</span>
+                <span className="bkx-r">Total</span>
+              </div>
+
+              {value.lines.map((line, index) => {
+                const buyerAccounts = BUYER_ACCOUNTS_FOR_VAT.includes(line.vatTreatment)
+                const warning = vatWarning(line)
+                return (
+                  <div key={line.uid ?? index} className="bkx-line">
+                    <div className="bkx-line-row">
+                      <div className="bkx-c-desc">
+                        <span className="bkx-cell-label">Description</span>
+                        <input
+                          id={`bk-line-${line.uid}-description`}
+                          className="bkx-input"
+                          aria-label="What it was for"
+                          value={line.description}
+                          placeholder={value.direction === 'income' ? 'What was sold' : 'What was bought'}
+                          onChange={(e) => setLine(index, { description: e.target.value })}
+                        />
+                      </div>
+                      <div>
+                        <span className="bkx-cell-label">Category</span>
+                        <SearchableSelect
+                          id={`bk-line-${line.uid}-category`}
+                          aria-label="Category"
+                          style={{
+                            width: '100%',
+                            minHeight: '2.25rem',
+                            padding: '0.375rem 0.625rem',
+                            border: '1px solid var(--color-border)',
+                            borderRadius: 8,
+                            background: 'var(--color-bg)',
+                            color: 'var(--color-text)',
+                          }}
+                          value={line.categoryId}
+                          options={categories.map((category) => ({ value: category.id, label: category.name }))}
+                          onChange={(categoryId) => {
+                            const category = categories.find((c) => c.id === categoryId)
+                            setCategoryTouched(true)
+                            setLine(index, {
+                              categoryId,
+                              isCapital: category?.is_capital ?? false,
+                              registerAsset: category?.is_capital ?? false,
+                            })
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <span className="bkx-cell-label">VAT rate</span>
+                        <select
+                          id={`bk-line-${line.uid}-rate`}
+                          className="bkx-input"
+                          aria-label="VAT rate"
+                          value={line.vatRateCode}
+                          onChange={(e) => changeRate(index, e.target.value)}
+                        >
+                          {Object.entries(RATE_LABELS).map(([code, text]) => (
+                            <option key={code} value={code}>{text}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <span className="bkx-cell-label">Before VAT</span>
+                        {mode === 'net' || buyerAccounts ? (
+                          <input
+                            id={`bk-line-${line.uid}-net`}
+                            className="bkx-input bkx-money"
+                            aria-label="Before VAT"
+                            inputMode="decimal"
+                            value={line.netAmount}
+                            onChange={(e) =>
+                              buyerAccounts
+                                ? setLine(index, { netAmount: e.target.value, grossAmount: e.target.value })
+                                : changeNet(index, e.target.value)
+                            }
+                          />
+                        ) : (
+                          <output className="bkx-derived" aria-label="Before VAT">
+                            {poundsFromString(line.netAmount)}
+                          </output>
+                        )}
+                      </div>
+                      <div>
+                        <span className="bkx-cell-label">VAT</span>
+                        {line.vatEdit && !buyerAccounts ? (
+                          <input
+                            id={`bk-line-${line.uid}-vat`}
+                            className="bkx-input bkx-money"
+                            aria-label="VAT"
+                            inputMode="decimal"
+                            value={line.vatAmount}
+                            onChange={(e) => changeVat(index, e.target.value)}
+                          />
+                        ) : (
+                          <output className="bkx-derived" aria-label="VAT">
+                            {!buyerAccounts && (
+                              <button
+                                type="button"
+                                title="Type the VAT yourself, to match the supplier's rounding"
+                                onClick={() => setLine(index, { vatEdit: true })}
+                              >
+                                edit
+                              </button>
+                            )}
+                            {poundsFromString(line.vatAmount)}
+                          </output>
+                        )}
+                      </div>
+                      <div>
+                        <span className="bkx-cell-label">Total</span>
+                        {mode === 'gross' && !buyerAccounts ? (
+                          <input
+                            id={`bk-line-${line.uid}-gross`}
+                            className="bkx-input bkx-money"
+                            aria-label="Total including VAT"
+                            inputMode="decimal"
+                            value={line.grossAmount}
+                            onChange={(e) => changeGross(index, e.target.value)}
+                          />
+                        ) : (
+                          <output className="bkx-derived" aria-label="Total including VAT">
+                            {poundsFromString(line.grossAmount)}
+                          </output>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="bkx-line-foot">
+                      <label>
+                        VAT treatment
+                        <select
+                          aria-label="VAT treatment"
+                          value={line.vatTreatment}
+                          onChange={(e) => changeTreatment(index, e.target.value)}
+                        >
+                          {Object.entries(TREATMENT_LABELS).map(([code, text]) => (
+                            <option key={code} value={code}>{text}</option>
+                          ))}
+                        </select>
+                      </label>
+                      {/*
+                        Only on capital lines, and that is not tidiness. Everything on
+                        the asset register had its cost put on the balance sheet by a
+                        capital line; offering the tick on an ordinary cost would let
+                        someone put a desk in the P&L AND depreciate it, which counts
+                        it twice.
+                      */}
+                      {line.isCapital && (
+                        <label
+                          htmlFor={`bk-line-${line.uid}-asset`}
+                          title="Starts an entry under Assets to finish off: how to spread the cost, and which allowances it qualifies for. Leave it ticked unless this is a deposit or part payment towards something already registered."
+                        >
+                          <input
+                            id={`bk-line-${line.uid}-asset`}
+                            type="checkbox"
+                            checked={line.registerAsset}
+                            onChange={(e) => setLine(index, { registerAsset: e.target.checked })}
+                          />
+                          Put on the asset register
+                        </label>
+                      )}
+                      {line.vatEdit && !buyerAccounts && (
+                        <button type="button" className="bkx-linkbtn" onClick={() => changeRate(index, line.vatRateCode)}>
+                          work the VAT out again
+                        </button>
+                      )}
+                      {warning && <span className="bkx-warn">{warning}</span>}
+                      {value.lines.length > 1 && (
+                        <button
+                          type="button"
+                          className="bkx-linkbtn bkx-spacer"
+                          onClick={() =>
+                            setValue({ ...value, lines: value.lines.filter((_, i) => i !== index) })
+                          }
+                        >
+                          Remove line
+                        </button>
+                      )}
+                    </div>
+
+                    {buyerAccounts && (
+                      <p className="bkx-tiny" style={{ margin: '0.375rem 0 0' }}>
+                        Your supplier charges no VAT here and you account for it yourself, so the
+                        total is what you paid. The VAT goes on your return twice - owed and
+                        reclaimed - and costs nothing. The rate is what it WOULD have been in the
+                        UK, and the sum is worked out from it.
+                      </p>
+                    )}
+                  </div>
+                )
+              })}
+
+              <button
+                type="button"
+                className="btn btn-sm"
+                style={{ marginTop: '0.25rem' }}
+                onClick={() =>
+                  setValue({ ...value, lines: [...value.lines, emptyLine(categories[0] ?? null)] })
+                }
+              >
+                + Add another line
+              </button>
+              {value.lines.length === 1 && (
+                <span className="bkx-tiny" style={{ marginLeft: '0.75rem' }}>
+                  One receipt, two rates - fuel and a sandwich, say - needs a line each.
+                </span>
+              )}
+            </section>
+          )}
+        </div>
+
+        <aside className="bkx-side" aria-label="Totals and receipts">
+          <section className="bkx-card" aria-label="Summary">
+            <div className="bkx-card-head">
+              <h2 className="bkx-title">Summary</h2>
+            </div>
+            {isTransfer ? (
+              <dl className="bkx-sum">
+                <div className="bkx-sum-total">
+                  <dt>Moving</dt>
+                  <dd className="bkx-big" style={{ margin: 0 }}>
+                    {poundsFromString((value.transferAmount ?? '').trim() || '0.00')}
+                  </dd>
+                </div>
+              </dl>
+            ) : (
+              <dl className="bkx-sum">
+                <div className="bkx-sum-row">
+                  <dt>Before VAT</dt>
+                  <dd>{poundsFromString(totals.net)}</dd>
+                </div>
+                <div className="bkx-sum-row">
+                  <dt>VAT</dt>
+                  <dd>{poundsFromString(totals.vat)}</dd>
+                </div>
+                {vatByRate.length > 1 &&
+                  vatByRate.map(([code, vat]) => (
+                    <div key={code} className="bkx-sum-row bkx-sub">
+                      <dt>{RATE_LABELS[code] ?? code}</dt>
+                      <dd>{poundsFromString(vat)}</dd>
+                    </div>
+                  ))}
+                <div className="bkx-sum-total">
+                  <dt>Total</dt>
+                  <dd className="bkx-big" style={{ margin: 0 }}>{poundsFromString(totals.gross)}</dd>
+                </div>
+                <div className="bkx-tiny">
+                  {settledValue
+                    ? `Paid ${formatDate(settledValue)}${paidFrom ? ` ${value.direction === 'income' ? 'into' : 'from'} ${paidFrom.name}` : ''}.`
+                    : 'Not paid yet - it will show under what is owed.'}
+                </div>
+              </dl>
+            )}
+            <div className="bkx-actions">
+              <button type="submit" className="btn btn-primary" disabled={saving}>
+                {submitLabel}
+              </button>
+              {onCancel ? (
+                <button type="button" className="btn" onClick={onCancel} disabled={saving}>
+                  Cancel
+                </button>
+              ) : (
+                <a className="btn" href={cancelHref} style={{ textDecoration: 'none' }}>
+                  Cancel
+                </a>
+              )}
+            </div>
+          </section>
+
+          {!isTransfer && (
+            <section className="bkx-card" aria-label="Receipts">
+              <div className="bkx-card-head">
+                <h2 className="bkx-title">Receipts</h2>
+                {heldCount > 0 && <span className="bkx-tiny">Attached when you save</span>}
+              </div>
+
+              {value.id && attachments ? (
+                // An entry that already exists has somewhere to put a receipt, so
+                // they go straight on, with no holding back.
+                <EvidenceDropzone
+                  transactionId={value.id}
+                  attachments={attachments}
+                  locked={false}
+                  canRecord
+                  onChange={onAttachmentsChange ?? (() => undefined)}
+                />
+              ) : (
+                <>
+                  {heldCount > 0 && (
+                    <ul className="bkx-files">
+                      {chosenDocuments.map((document) => (
+                        <li key={document.id} className="bkx-file">
+                          <Thumb mime={document.mime_type} id={document.id} />
+                          <span className="bkx-file-body">
+                            <a
+                              href={`/api/m/uk-bookkeeping/admin/attachments/${document.id}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title={document.name}
+                            >
+                              {document.name}
+                            </a>
+                            <span className="bkx-tiny">From the receipts inbox</span>
+                          </span>
+                          {!saving && (
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() =>
+                                setChosenDocuments((prev) => prev.filter((held) => held.id !== document.id))
+                              }
+                            >
+                              Take off
+                            </button>
+                          )}
+                        </li>
+                      ))}
+                      {pendingFiles.map((file, index) => (
+                        <li key={`${file.name}-${file.size}-${index}`} className="bkx-file">
+                          <Thumb mime={file.type} />
+                          <span className="bkx-file-body">
+                            <span className="bkx-file-name" title={file.name}>{file.name}</span>
+                            <span className="bkx-tiny">{readableSize(file.size)}</span>
+                          </span>
+                          {!saving && (
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() => setPendingFiles((prev) => prev.filter((_, i) => i !== index))}
+                            >
+                              Take off
+                            </button>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <DropArea onFiles={addFiles} disabled={saving} compact={heldCount > 0} />
+                  <DocumentPicker
+                    plain
+                    chosen={chosenDocuments}
+                    onChoose={applyDocument}
+                    onRelease={(id) =>
+                      setChosenDocuments((prev) => prev.filter((document) => document.id !== id))
+                    }
+                    disabled={saving}
+                  />
+                </>
+              )}
+
               <label
-                htmlFor={`bk-line-${line.uid}-asset`}
                 style={{
                   display: 'flex',
                   alignItems: 'flex-start',
                   gap: '0.5rem',
-                  margin: '0.75rem 0 0',
-                  padding: '0.625rem 0.75rem',
-                  border: '1px solid var(--color-border)',
-                  borderRadius: 6,
-                  background: 'var(--color-bg)',
+                  marginTop: '0.875rem',
                   fontSize: 'var(--text-sm)',
-                  lineHeight: 1.5,
                   cursor: 'pointer',
                 }}
               >
                 <input
-                  id={`bk-line-${line.uid}-asset`}
                   type="checkbox"
-                  checked={line.registerAsset}
-                  onChange={(e) => setLine(index, { registerAsset: e.target.checked })}
-                  style={{ marginTop: '0.2rem', flexShrink: 0 }}
+                  checked={!!value.evidenceNotRequired}
+                  onChange={(e) => setValue({ ...value, evidenceNotRequired: e.target.checked })}
+                  style={{ marginTop: '0.2rem' }}
                 />
                 <span>
-                  <strong>Put this one on the asset register.</strong> It starts an entry for you to
-                  finish off under Assets - how to spread the cost, and which tax allowances it
-                  qualifies for. Leave it ticked unless this is a deposit or a part payment towards
-                  something already on the register.
+                  No receipt needed for this one
+                  <span className="bkx-tiny" style={{ display: 'block' }}>
+                    For entries that never have one - a top-up onto a supplier balance, a bank
+                    charge. Stops it counting as paperwork still owed.
+                  </span>
                 </span>
               </label>
-            )}
-
-            {vatWarning(line) && (
-              <p style={{ margin: '0.5rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-warning, var(--color-text))' }}>
-                {vatWarning(line)}
-              </p>
-            )}
-
-            {value.lines.length > 1 && (
-              <button
-                type="button"
-                className="btn btn-sm"
-                style={{ marginTop: '0.5rem' }}
-                onClick={() =>
-                  setValue({ ...value, lines: value.lines.filter((_, i) => i !== index) })
-                }
-              >
-                Remove this line
-              </button>
-            )}
-          </div>
-        ))}
-
-        <button
-          type="button"
-          className="btn btn-sm"
-          onClick={() =>
-            setValue({ ...value, lines: [...value.lines, emptyLine(categories[0] ?? null)] })
-          }
-        >
-          Add another line
-        </button>
-
-        <div
-          style={{
-            marginTop: '1rem',
-            paddingTop: '0.75rem',
-            borderTop: '1px solid var(--color-border)',
-            display: 'flex',
-            gap: '1.5rem',
-            flexWrap: 'wrap',
-          }}
-        >
-          <span>Before VAT: <strong>{poundsFromString(totals.net)}</strong></span>
-          <span>VAT: <strong>{poundsFromString(totals.vat)}</strong></span>
-          <span>Total: <strong>{poundsFromString(totals.gross)}</strong></span>
-        </div>
+            </section>
+          )}
+        </aside>
       </div>
-      )}
-
-      <button type="submit" className="btn btn-primary" disabled={saving}>
-        {saving ? 'Saving…' : value.id ? 'Save changes' : isTransfer ? 'Record this transfer' : 'Record this'}
-      </button>
     </form>
   )
 }

@@ -1062,8 +1062,10 @@ export default function TransactionsScreen({
                             title={row.reconciled ? 'Matched to a bank statement line' : 'Not matched to a bank statement line yet'}
                           />
                         )}
-                        {!isTransfer &&
-                          (row.attachment_count > 0 ? (
+                        {isTransfer ? (
+                          <Pill text="No receipt needed" colour="var(--color-text-muted, var(--color-text))" />
+                        ) : (
+                          row.attachment_count > 0 ? (
                             <Pill
                               text={`📎 ${row.attachment_count}`}
                               colour="var(--color-text-muted, var(--color-text))"
@@ -1075,7 +1077,8 @@ export default function TransactionsScreen({
                             <Pill text="No receipt needed" colour="var(--color-text-muted, var(--color-text))" />
                           ) : (
                             <Pill text="Needs receipt" colour="var(--color-danger, var(--color-text))" />
-                          ))}
+                          )
+                        )}
                       </div>
                     </td>
                   </tr>

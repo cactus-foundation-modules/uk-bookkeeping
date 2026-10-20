@@ -16,9 +16,6 @@ export default async function BookkeepingOverviewPage() {
 
   return (
     <div>
-      <div className="page-header">
-        <h1 className="page-title">Bookkeeping</h1>
-      </div>
       <DashboardScreen environment={settings.hmrc_environment} canRecord={access.canRecord} />
     </div>
   )

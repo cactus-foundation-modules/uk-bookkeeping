@@ -4,11 +4,10 @@ import { useCallback, useEffect, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
 import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
 import { BookkeepingNav, ErrorNotice, LockedNotice, SandboxBanner } from './Notices'
-import DocumentPicker from './DocumentPicker'
+import EntryStyles from './EntryStyles'
 import EvidenceDropzone from './EvidenceDropzone'
-import { type UnfiledDocument } from './documents-shared'
 import TransactionForm, { type TransactionFormValue } from './TransactionForm'
-import { formatDate, poundsFromString, toDateInput } from './format'
+import { addStrings, formatDate, poundsFromString, toDateInput } from './format'
 
 type Line = {
   id: string
@@ -72,13 +71,8 @@ export default function TransactionDetail({
   const [editing, setEditing] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Bumped after a receipt is filed from here, so the picker drops the one that
-  // has just gone. Filing on this screen happens straight away - the entry
-  // already exists, so there is nothing to hold anything back for.
   const [makingInvoice, setMakingInvoice] = useState(false)
   const [invoiceError, setInvoiceError] = useState<string | null>(null)
-  const [pickerKey, setPickerKey] = useState(0)
-  const [pickerError, setPickerError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -235,17 +229,48 @@ export default function TransactionDetail({
       <div>
         <BookkeepingNav active="transactions" />
         <SandboxBanner environment={environment} />
-        <button className="btn btn-sm" style={{ marginBottom: '1rem' }} onClick={() => setEditing(false)}>
-          Stop editing
-        </button>
-        <TransactionForm initial={value} />
+        <div className="page-header">
+          <h1 className="page-title">Edit entry</h1>
+        </div>
+        <TransactionForm
+          initial={value}
+          attachments={transaction.attachments}
+          onAttachmentsChange={load}
+          onCancel={() => setEditing(false)}
+        />
       </div>
     )
   }
 
+  const totals = transaction.lines.reduce(
+    (acc, line) => ({
+      net: addStrings(acc.net, line.net_amount),
+      vat: addStrings(acc.vat, line.vat_amount),
+      gross: addStrings(acc.gross, line.gross_amount),
+    }),
+    { net: '0.00', vat: '0.00', gross: '0.00' },
+  )
+  const income = transaction.direction === 'income'
+  const paidAccount = transaction.bank_account_id
+    ? (bankAccountNames[transaction.bank_account_id] ?? 'An account since removed')
+    : 'Main current account'
+  const canChange = canRecord && !locked && !finalised
+  // One line per rate that actually carried VAT, so a mixed receipt shows where
+  // each pound of it went. A single rate IS the VAT row, so it is not repeated.
+  const vatByRate = [
+    ...transaction.lines
+      .reduce((groups, line) => {
+        if (Number(line.vat_amount) === 0 && transaction.lines.length > 1) return groups
+        groups.set(line.vat_rate_code, addStrings(groups.get(line.vat_rate_code) ?? '0.00', line.vat_amount))
+        return groups
+      }, new Map<string, string>())
+      .entries(),
+  ]
+
   return (
     <div>
       {confirmNode}
+      <EntryStyles />
       <BookkeepingNav active="transactions" />
       <SandboxBanner environment={environment} />
       <ErrorNotice message={error} />
@@ -261,152 +286,188 @@ export default function TransactionDetail({
       )}
 
       {finalised && (
-        <div
-          className="card"
-          style={{ padding: '0.875rem 1rem', marginBottom: '1rem', background: 'var(--color-surface)' }}
-        >
+        <div className="bkx-card" style={{ marginBottom: '1rem' }}>
           This entry is on a return that has been finalised but not yet filed. Reopen that return if
           you need to change it.
         </div>
       )}
 
-      <div className="page-header" style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
-        <h1 className="page-title" style={{ margin: 0 }}>
-          {transaction.counterparty}
-        </h1>
-        {canRecord && !locked && !finalised && (
-          <>
-            <button className="btn btn-sm" onClick={() => setEditing(true)}>Edit</button>
-            <button className="btn btn-sm" onClick={remove}>Delete</button>
-          </>
-        )}
-        {canRecord && transaction.status === 'draft' && (
-          <button className="btn btn-sm btn-primary" onClick={post}>
-            Looks right - record it
-          </button>
-        )}
-      </div>
-
-      <div className="card" style={{ padding: '1.25rem', marginBottom: '1rem', maxWidth: 900 }}>
-        <dl style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '0.5rem 1.5rem', margin: 0 }}>
-          <dt style={{ color: 'var(--color-text-muted, var(--color-text))' }}>Date</dt>
-          <dd style={{ margin: 0 }}>{formatDate(transaction.tax_point_date)}</dd>
-          <dt style={{ color: 'var(--color-text-muted, var(--color-text))' }}>Paid</dt>
-          <dd style={{ margin: 0 }}>{formatDate(transaction.settled_date)}</dd>
-          <dt style={{ color: 'var(--color-text-muted, var(--color-text))' }}>In or out</dt>
-          <dd style={{ margin: 0 }}>{transaction.direction === 'income' ? 'Money in' : 'Money out'}</dd>
-          <dt style={{ color: 'var(--color-text-muted, var(--color-text))' }}>
-            {transaction.direction === 'income' ? 'Paid into' : 'Paid from'}
-          </dt>
-          <dd style={{ margin: 0 }}>
-            {transaction.bank_account_id
-              ? (bankAccountNames[transaction.bank_account_id] ?? 'An account since removed')
-              : 'Main current account'}
-          </dd>
-          <dt style={{ color: 'var(--color-text-muted, var(--color-text))' }}>What for</dt>
-          <dd style={{ margin: 0 }}>{transaction.description || '—'}</dd>
-          <dt style={{ color: 'var(--color-text-muted, var(--color-text))' }}>Their reference</dt>
-          <dd style={{ margin: 0 }}>{transaction.reference || '—'}</dd>
-          {transaction.correction_reason && (
+      <div className="bkx-head">
+        <div className="bkx-head-title">
+          <a href={`/${adminPath}/m/uk-bookkeeping/transactions`} className="bkx-tiny">
+            ← All entries
+          </a>
+          <h1 className="page-title">{transaction.counterparty}</h1>
+          {transaction.description && (
+            <div className="bkx-muted" style={{ marginTop: '0.125rem' }}>{transaction.description}</div>
+          )}
+          <div className="bkx-chips">
+            <span className={`bkx-pill ${income ? 'bkx-pill-in' : 'bkx-pill-out'}`}>
+              {income ? 'Money in' : 'Money out'}
+            </span>
+            <span className={`bkx-pill ${transaction.settled_date ? '' : 'bkx-pill-warn'}`}>
+              {transaction.settled_date ? `Paid ${formatDate(transaction.settled_date)}` : 'Not paid yet'}
+            </span>
+            {transaction.status === 'draft' && <span className="bkx-pill bkx-pill-warn">Draft</span>}
+            {transaction.entry_type === 'adjustment' && <span className="bkx-pill">Correction</span>}
+            {!income && transaction.invoice_number && <span className="bkx-pill">Invoice {transaction.invoice_number}</span>}
+            {locked && <span className="bkx-pill">🔒 On a filed return</span>}
+          </div>
+        </div>
+        <div className="bkx-head-actions">
+          {canRecord && transaction.status === 'draft' && (
+            <button className="btn btn-primary" onClick={post}>
+              Looks right - record it
+            </button>
+          )}
+          {canChange && (
             <>
-              <dt style={{ color: 'var(--color-text-muted, var(--color-text))' }}>Correcting</dt>
-              <dd style={{ margin: 0 }}>
-                {transaction.correction_reason}{' '}
-                {transaction.corrects_transaction_id && (
-                  <a href={`/${adminPath}/m/uk-bookkeeping/transactions/${transaction.corrects_transaction_id}`}>
-                    (see the original)
-                  </a>
-                )}
-              </dd>
+              <button className="btn" onClick={() => setEditing(true)}>Edit</button>
+              <button className="btn" onClick={remove}>Delete</button>
             </>
           )}
-        </dl>
-      </div>
-
-      <div className="card" style={{ padding: 0, marginBottom: '1rem', overflowX: 'auto', maxWidth: 900 }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
-          <thead>
-            <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--color-border)' }}>
-              <th style={{ padding: '0.625rem 0.75rem' }}>What it was for</th>
-              <th style={{ padding: '0.625rem 0.75rem' }}>Category</th>
-              <th style={{ padding: '0.625rem 0.75rem' }}>VAT</th>
-              <th style={{ padding: '0.625rem 0.75rem', textAlign: 'right' }}>Before VAT</th>
-              <th style={{ padding: '0.625rem 0.75rem', textAlign: 'right' }}>VAT</th>
-              <th style={{ padding: '0.625rem 0.75rem', textAlign: 'right' }}>Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            {transaction.lines.map((line) => (
-              <tr key={line.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
-                <td style={{ padding: '0.5rem 0.75rem' }}>{line.description || '—'}</td>
-                <td style={{ padding: '0.5rem 0.75rem' }}>
-                  {transaction.category_names[line.category_id] ?? '—'}
-                </td>
-                <td style={{ padding: '0.5rem 0.75rem' }}>{line.vat_rate_code.replace('_', ' ')}</td>
-                <td style={{ padding: '0.5rem 0.75rem', textAlign: 'right' }}>{poundsFromString(line.net_amount)}</td>
-                <td style={{ padding: '0.5rem 0.75rem', textAlign: 'right' }}>{poundsFromString(line.vat_amount)}</td>
-                <td style={{ padding: '0.5rem 0.75rem', textAlign: 'right' }}>{poundsFromString(line.gross_amount)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {canMakeInvoice && (
-        <div className="card" style={{ padding: '0.875rem 1rem', marginBottom: '1rem', maxWidth: 900 }}>
-          <p style={{ margin: '0 0 0.625rem', fontSize: 'var(--text-sm)' }}>
-            {transaction.invoice_number
-              ? `Invoice ${transaction.invoice_number} has been numbered but not made yet.`
-              : 'No invoice has been made for this payment.'}
-          </p>
-          <ErrorNotice message={invoiceError} />
-          <button type="button" className="btn btn-sm" onClick={makeInvoice} disabled={makingInvoice}>
-            {makingInvoice ? 'Making the invoice…' : 'Make the invoice'}
-          </button>
         </div>
-      )}
+      </div>
 
-      <EvidenceDropzone
-        transactionId={transaction.id}
-        attachments={transaction.attachments}
-        notRequired={transaction.evidence_not_required}
-        locked={locked || finalised}
-        canRecord={canRecord}
-        onChange={load}
-      />
+      <div className="bkx-layout">
+        <div className="bkx-main">
+          <section className="bkx-card" aria-label="Details">
+            <dl className="bkx-facts">
+              <div>
+                <dt>Invoice date</dt>
+                <dd>{formatDate(transaction.tax_point_date)}</dd>
+              </div>
+              <div>
+                <dt>Date paid</dt>
+                <dd>{formatDate(transaction.settled_date)}</dd>
+              </div>
+              <div>
+                <dt>{income ? 'Paid into' : 'Paid from'}</dt>
+                <dd>{paidAccount}</dd>
+              </div>
+              <div>
+                <dt>{income ? 'Invoice number' : 'Their reference'}</dt>
+                <dd>
+                  {income
+                    ? (transaction.invoice_number ?? '—')
+                    : transaction.reference || '—'}
+                </dd>
+              </div>
+              {income && transaction.reference && (
+                <div>
+                  <dt>Their reference</dt>
+                  <dd>{transaction.reference}</dd>
+                </div>
+              )}
+              {transaction.correction_reason && (
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <dt>Correcting</dt>
+                  <dd>
+                    {transaction.correction_reason}{' '}
+                    {transaction.corrects_transaction_id && (
+                      <a href={`/${adminPath}/m/uk-bookkeeping/transactions/${transaction.corrects_transaction_id}`}>
+                        (see the original)
+                      </a>
+                    )}
+                  </dd>
+                </div>
+              )}
+            </dl>
+          </section>
 
-      {canRecord && !locked && !finalised && (
-        <>
-          <ErrorNotice message={pickerError} />
-          <DocumentPicker
-            chosen={[]}
-            reloadKey={pickerKey}
-            onRelease={() => undefined}
-            onChoose={async (document: UnfiledDocument) => {
-              setPickerError(null)
-              try {
-                const response = await fetch(
-                  `/api/m/uk-bookkeeping/admin/documents/${document.id}/attach`,
-                  {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ transactionId: transaction.id }),
-                  },
-                )
-                if (!response.ok) {
-                  const payload = await response.json().catch(() => ({}))
-                  setPickerError(payload.error ?? 'That receipt could not be attached.')
-                  return
-                }
-                setPickerKey((key) => key + 1)
-                load()
-              } catch {
-                setPickerError('That did not reach the server. Check the connection and try again.')
-              }
-            }}
-          />
-        </>
-      )}
+          <section className="bkx-card bkx-card-flush" aria-label="Line items">
+            <div className="bkx-card-head">
+              <h2 className="bkx-title">What it was for</h2>
+            </div>
+            <div className="bkx-table-wrap">
+              <table className="bkx-table">
+                <thead>
+                  <tr>
+                    <th>Description</th>
+                    <th>Category</th>
+                    <th>VAT</th>
+                    <th className="bkx-r">Before VAT</th>
+                    <th className="bkx-r">VAT</th>
+                    <th className="bkx-r">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {transaction.lines.map((line) => (
+                    <tr key={line.id}>
+                      <td>{line.description || '—'}</td>
+                      <td>{transaction.category_names[line.category_id] ?? '—'}</td>
+                      <td>{line.vat_rate_code.replace('_', ' ')}</td>
+                      <td className="bkx-r">{poundsFromString(line.net_amount)}</td>
+                      <td className="bkx-r">{poundsFromString(line.vat_amount)}</td>
+                      <td className="bkx-r">{poundsFromString(line.gross_amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <aside className="bkx-side" aria-label="Totals and receipts">
+          <section className="bkx-card" aria-label="Summary">
+            <div className="bkx-card-head">
+              <h2 className="bkx-title">Summary</h2>
+            </div>
+            <dl className="bkx-sum">
+              <div className="bkx-sum-row">
+                <dt>Before VAT</dt>
+                <dd>{poundsFromString(totals.net)}</dd>
+              </div>
+              <div className="bkx-sum-row">
+                <dt>VAT</dt>
+                <dd>{poundsFromString(totals.vat)}</dd>
+              </div>
+              {vatByRate.length > 1 &&
+                vatByRate.map(([code, vat]) => (
+                  <div key={code} className="bkx-sum-row bkx-sub">
+                    <dt>{code.replace('_', ' ')}</dt>
+                    <dd>{poundsFromString(vat)}</dd>
+                  </div>
+                ))}
+              <div className="bkx-sum-total">
+                <dt>Total</dt>
+                <dd className="bkx-big" style={{ margin: 0 }}>{poundsFromString(totals.gross)}</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section className="bkx-card" aria-label="Receipts">
+            <div className="bkx-card-head">
+              <h2 className="bkx-title">Receipts</h2>
+              {transaction.evidence_not_required && (
+                <span className="bkx-tiny">Marked as needing none</span>
+              )}
+            </div>
+
+            {canMakeInvoice && (
+              <div style={{ marginBottom: '0.875rem' }}>
+                <p className="bkx-muted" style={{ margin: '0 0 0.5rem' }}>
+                  {transaction.invoice_number
+                    ? `Invoice ${transaction.invoice_number} has been numbered but not made yet.`
+                    : 'No invoice has been made for this payment.'}
+                </p>
+                <ErrorNotice message={invoiceError} />
+                <button type="button" className="btn btn-sm" onClick={makeInvoice} disabled={makingInvoice}>
+                  {makingInvoice ? 'Making the invoice…' : 'Make the invoice'}
+                </button>
+              </div>
+            )}
+
+            <EvidenceDropzone
+              transactionId={transaction.id}
+              attachments={transaction.attachments}
+              locked={locked || finalised}
+              canRecord={canRecord}
+              onChange={load}
+            />
+          </section>
+        </aside>
+      </div>
     </div>
   )
 }

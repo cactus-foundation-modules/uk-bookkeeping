@@ -42,6 +42,7 @@ export default function DocumentPicker({
   onRelease,
   disabled = false,
   reloadKey = 0,
+  plain = false,
 }: {
   /** Held but not yet attached. Empty where the caller attaches immediately. */
   chosen: UnfiledDocument[]
@@ -50,6 +51,8 @@ export default function DocumentPicker({
   disabled?: boolean
   /** Bumped by a caller that attaches immediately, to take the used one off the list. */
   reloadKey?: number
+  /** Sits inside a card somebody else drew: no card, no heading, no footnote, and the caller lists what is chosen. */
+  plain?: boolean
 }) {
   const adminPath = useAdminPath()
   const [available, setAvailable] = useState<UnfiledDocument[]>([])
@@ -86,10 +89,13 @@ export default function DocumentPicker({
   if (loaded && offered.length === 0 && chosen.length === 0 && !search) return null
 
   return (
-    <div className="card" style={{ padding: '1.25rem', marginBottom: '1rem' }}>
-      <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Receipts already uploaded</h3>
+    <div
+      className={plain ? undefined : 'bkx-card'}
+      style={plain ? { marginTop: '0.75rem' } : undefined}
+    >
+      {!plain && <h3 className="bkx-title" style={{ marginBottom: '0.5rem' }}>Receipts already uploaded</h3>}
 
-      {chosen.length > 0 && (
+      {!plain && chosen.length > 0 && (
         <ul style={{ listStyle: 'none', margin: '0 0 0.75rem', padding: 0 }}>
           {chosen.map((document) => (
             <li
@@ -124,7 +130,7 @@ export default function DocumentPicker({
         </ul>
       )}
 
-      {chosen.length > 0 && (
+      {!plain && chosen.length > 0 && (
         <p style={{ ...mutedStyle, margin: '0 0 0.75rem' }}>
           {chosen.length === 1 ? 'This receipt is' : 'These receipts are'} attached when you save.
         </p>
@@ -132,7 +138,7 @@ export default function DocumentPicker({
 
       {!disabled && !open && offered.length > 0 && (
         <button type="button" className="btn btn-sm" onClick={() => setOpen(true)}>
-          {chosen.length > 0 ? 'Pick another' : `Pick one (${offered.length} waiting)`}
+          {chosen.length > 0 ? 'Pick another' : `Pick from the inbox (${offered.length} waiting)`}
         </button>
       )}
 
@@ -206,10 +212,12 @@ export default function DocumentPicker({
         </>
       )}
 
-      <p style={{ ...mutedStyle, margin: '0.75rem 0 0', fontSize: 'var(--text-xs, 0.75rem)' }}>
-        Uploaded but not yet filed against anything. Drop new ones on the{' '}
-        <a href={`/${adminPath}/m/uk-bookkeeping/documents`}>Receipts</a> tab the day they arrive.
-      </p>
+      {!plain && (
+        <p style={{ ...mutedStyle, margin: '0.75rem 0 0', fontSize: 'var(--text-xs, 0.75rem)' }}>
+          Uploaded but not yet filed against anything. Drop new ones on the{' '}
+          <a href={`/${adminPath}/m/uk-bookkeeping/documents`}>Receipts</a> tab the day they arrive.
+        </p>
+      )}
     </div>
   )
 }

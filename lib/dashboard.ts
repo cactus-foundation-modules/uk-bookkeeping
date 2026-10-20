@@ -6,6 +6,7 @@ import { isOverdue, listPeriods, toDateOnly } from './periods'
 import { getSettings } from './settings'
 import { isHmrcConfigured } from './hmrc/endpoints'
 import { getConnection } from './hmrc/tokens'
+import { monthlyBreakdown } from './reports'
 import { listTransactions } from './transactions'
 import { assembleBoxes, computeVatTotals, netVatDirection } from './vat-boxes'
 
@@ -42,6 +43,10 @@ export type DashboardData = {
     daysLeft: number
   } | null
   month: { from: string; income: string; expenses: string; profit: string }
+  /** The last six calendar months, oldest first, quiet months included as zeros. */
+  trend: { month: string; income: string; expenses: string; profit: string }[]
+  /** Calendar year to date, off the ledger like the trend. */
+  year: { from: string; income: string; expenses: string; profit: string }
   drafts: number
   /** Statement lines the bank has and the books do not, on live accounts. */
   unreconciled: number
@@ -134,6 +139,36 @@ export async function getDashboard(): Promise<DashboardData> {
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
   const month = await tradingTotals(monthStart, today)
 
+  // Six months back plus the calendar year, in one ledger read. The trend is
+  // padded with zeros so a quiet month is a short bar rather than a gap that
+  // shifts every bar after it.
+  const trendStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 5, 1))
+  const yearStart = new Date(Date.UTC(now.getUTCFullYear(), 0, 1))
+  const ledgerFrom = trendStart < yearStart ? trendStart : yearStart
+  const ledgerRows = await monthlyBreakdown(ledgerFrom, today)
+  const byMonth = new Map(ledgerRows.map((row) => [row.month, row]))
+  const trend: DashboardData['trend'] = []
+  for (let i = 0; i < 6; i++) {
+    const key = toDateOnly(
+      new Date(Date.UTC(trendStart.getUTCFullYear(), trendStart.getUTCMonth() + i, 1)),
+    )
+    const row = byMonth.get(key)
+    trend.push({
+      month: key,
+      income: row?.income ?? '0.00',
+      expenses: row?.expenses ?? '0.00',
+      profit: row?.profit ?? '0.00',
+    })
+  }
+  let yearIncome = new Prisma.Decimal(0)
+  let yearExpenses = new Prisma.Decimal(0)
+  for (const row of ledgerRows) {
+    if (row.month >= toDateOnly(yearStart)) {
+      yearIncome = yearIncome.plus(row.income)
+      yearExpenses = yearExpenses.plus(row.expenses)
+    }
+  }
+
   const [draftRow] = await prisma.$queryRaw<{ count: bigint }[]>`
     SELECT COUNT(*)::bigint AS count FROM "bk_transactions" WHERE "status" = 'draft'
   `
@@ -178,6 +213,13 @@ export async function getDashboard(): Promise<DashboardData> {
       income: formatMoney(month.income),
       expenses: formatMoney(month.expenses),
       profit: formatMoney(month.income.minus(month.expenses)),
+    },
+    trend,
+    year: {
+      from: toDateOnly(yearStart),
+      income: formatMoney(yearIncome),
+      expenses: formatMoney(yearExpenses),
+      profit: formatMoney(yearIncome.minus(yearExpenses)),
     },
     drafts: Number(draftRow?.count ?? 0n),
     unreconciled: Number(unreconciledRow?.count ?? 0n),

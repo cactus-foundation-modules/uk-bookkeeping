@@ -5,6 +5,7 @@ import { useAdminPath } from '@/components/admin/AdminPathContext'
 import SearchableSelect from './SearchableSelect'
 import { BookkeepingNav, EmptyState, ErrorNotice, SandboxBanner } from './Notices'
 import BalanceCheckPanel from './BalanceCheckPanel'
+import ReconcileStyles from './ReconcileStyles'
 import { addStrings, formatDate, poundsFromString } from './format'
 
 // Reconciliation: does what the bank says match what the books say.
@@ -166,12 +167,12 @@ function negated(value: string): string {
   return value.startsWith('-') ? value.slice(1) : `-${value}`
 }
 
-const headStyle: React.CSSProperties = { padding: '0.625rem 0.75rem', textAlign: 'left' }
-const cellStyle: React.CSSProperties = { padding: '0.625rem 0.75rem', verticalAlign: 'top' }
+
+// Handed to SearchableSelect, whose trigger button takes its look from this.
 const controlStyle: React.CSSProperties = {
   padding: '0.3125rem 0.5rem',
   border: '1px solid var(--color-border)',
-  borderRadius: 6,
+  borderRadius: 8,
   background: 'var(--color-bg)',
   color: 'var(--color-text)',
   fontSize: 'var(--text-sm)',
@@ -439,30 +440,76 @@ export default function ReconcileScreen({
     (row) => row.status === 'unreconciled' && (feed?.suggestions[row.id]?.length ?? 0) > 0,
   ).length
 
+
   if (accounts.length === 0) {
     return (
-      <div>
+      <div className="bkr">
+        <ReconcileStyles />
         <BookkeepingNav active="reconcile" />
         <SandboxBanner environment={environment} />
-        <EmptyState title="No accounts yet.">
-          <p style={{ margin: 0 }}>
+        <div className="bkr-empty">
+          <div className="bkr-empty-ico">
+            <Icon name="bank" size={22} />
+          </div>
+          <p className="bkr-empty-title">No accounts yet.</p>
+          <p>
             Add the account your money sits in under{' '}
             <a href={`/${adminPath}/settings?tab=uk-bookkeeping`}>the bookkeeping settings</a>, then{' '}
             <a href={`/${adminPath}/m/uk-bookkeeping/statements`}>import a statement</a> for it. Once there is
             a statement to compare against, this is where you tick it off.
           </p>
-        </EmptyState>
+        </div>
       </div>
     )
   }
 
   const account = accounts.find((item) => item.id === accountId)
+  const summary = feed?.summary ?? null
+  const allTicked = rows.length > 0 && selected.size === rows.length
+
+  const statusTabs: { key: typeof status; label: string; count: number | null }[] = [
+    { key: 'unreconciled', label: 'Still to explain', count: summary?.unreconciledLines ?? null },
+    { key: 'reconciled', label: 'Ticked off', count: summary?.reconciledLines ?? null },
+    { key: 'ignored', label: 'Set aside', count: summary?.ignoredLines ?? null },
+    { key: '', label: 'Everything', count: summary?.statementLines ?? null },
+  ]
 
   return (
-    <div>
+    <div className="bkr">
+      <ReconcileStyles />
       <BookkeepingNav active="reconcile" />
       <SandboxBanner environment={environment} />
       <ErrorNotice message={error} />
+
+      {accounts.length > 1 && (
+        <div className="bkr-accts" role="group" aria-label="Which account to reconcile">
+          {accounts.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className="bkr-acct"
+              aria-pressed={item.id === accountId}
+              onClick={() => changeView(() => setAccountId(item.id))}
+            >
+              <span className="bkr-acct-ico">
+                <Icon name={item.kind === 'card' ? 'card' : item.kind === 'cash' ? 'cash' : 'bank'} />
+              </span>
+              <span className="bkr-acct-body">
+                <span className="bkr-acct-name">{item.name}</span>
+                <span className="bkr-tiny">
+                  {item.kind === 'card' ? 'Card' : item.kind === 'cash' ? 'Cash' : 'Bank account'}
+                  {item.account_last4 ? ` ending ${item.account_last4}` : ''}
+                </span>
+              </span>
+              {item.position_summary.unreconciledCount > 0 && (
+                <span className="bkr-count" data-hot="true" title="Lines still to explain">
+                  {item.position_summary.unreconciledCount}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/*
         Said out loud rather than swallowed. A cap that quietly stops looking
@@ -470,294 +517,200 @@ export default function ReconcileScreen({
         and much worse statement than "we did not look at all of them".
       */}
       {feed?.documentsTruncated && (
-        <div
-          className="card"
-          style={{
-            padding: '0.75rem 1rem',
-            marginBottom: '1rem',
-            fontSize: 'var(--text-sm)',
-            color: 'var(--color-text-muted, var(--color-text))',
-          }}
-          role="status"
-        >
-          There are more unfiled receipts than we look through in one go, so only the most recent
-          few hundred were offered against these lines. Filing some of them from the Receipts tab
-          will bring the rest into view.
+        <div className="bkr-note" data-tone="warn" role="status">
+          <span className="bkr-note-ico">
+            <Icon name="info" size={14} />
+          </span>
+          <div className="bkr-note-body">
+            There are more unfiled receipts than we look through in one go, so only the most recent few
+            hundred were offered against these lines. Filing some of them from the Receipts tab will bring
+            the rest into view.
+          </div>
         </div>
       )}
 
       {outcome && <Outcome outcome={outcome} rows={rows} onDismiss={() => setOutcome(null)} />}
 
-      <div className="card" style={{ padding: '0.875rem 1rem', marginBottom: '1rem' }}>
-        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <label style={{ fontSize: 'var(--text-sm)' }}>
-            <span style={{ display: 'block', marginBottom: '0.25rem' }}>Account</span>
-            <select
-              value={accountId}
-              onChange={(event) => changeView(() => setAccountId(event.target.value))}
-              style={controlStyle}
-            >
-              {accounts.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                  {item.account_last4 ? ` (…${item.account_last4})` : ''}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label style={{ fontSize: 'var(--text-sm)' }}>
-            <span style={{ display: 'block', marginBottom: '0.25rem' }}>Show</span>
-            <select
-              value={status}
-              onChange={(event) => changeView(() => setStatus(event.target.value as typeof status))}
-              style={controlStyle}
-            >
-              <option value="unreconciled">Still to explain</option>
-              <option value="reconciled">Ticked off</option>
-              <option value="ignored">Set aside</option>
-              <option value="">Everything</option>
-            </select>
-          </label>
-          <label style={{ fontSize: 'var(--text-sm)' }}>
-            <span style={{ display: 'block', marginBottom: '0.25rem' }}>From</span>
-            <input
-              type="date"
-              value={from}
-              onChange={(event) => changeView(() => setFrom(event.target.value))}
-              style={controlStyle}
-            />
-          </label>
-          <label style={{ fontSize: 'var(--text-sm)' }}>
-            <span style={{ display: 'block', marginBottom: '0.25rem' }}>To</span>
-            <input
-              type="date"
-              value={to}
-              onChange={(event) => changeView(() => setTo(event.target.value))}
-              style={controlStyle}
-            />
-          </label>
-          <label style={{ fontSize: 'var(--text-sm)', flex: '1 1 14rem' }}>
-            <span style={{ display: 'block', marginBottom: '0.25rem' }}>Find</span>
-            <input
-              type="search"
-              value={search}
-              placeholder="Part of what the bank printed"
-              onChange={(event) => changeView(() => setSearch(event.target.value))}
-              style={{ ...controlStyle, width: '100%' }}
-            />
-          </label>
-        </div>
-        <p style={{ margin: '0.5rem 0 0', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
-          Searching is how you get all the alike ones together - type the name the bank prints on your
-          director&rsquo;s loan payments, tick the lot, and code them in one go.
-        </p>
-      </div>
-
       {account?.kind === 'cash' && (
         <BalanceCheckPanel key={account.id} bankAccountId={account.id} accountName={account.name} canRecord={canRecord} />
       )}
 
-      {account && feed?.summary && <Position account={account} summary={feed.summary} />}
+      {account && summary && <Position account={account} summary={summary} />}
 
-      {canRecord && rows.length > 0 && (
-        <div className="card" style={{ padding: '0.875rem 1rem', marginBottom: '1rem' }}>
-          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-            <span style={{ fontSize: 'var(--text-sm)', alignSelf: 'center' }}>
-              <strong>{selected.size}</strong> of {rows.length} ticked
-            </span>
-
-            <label style={{ fontSize: 'var(--text-sm)' }}>
-              <span style={{ display: 'block', marginBottom: '0.25rem' }}>What they were for</span>
-              <SearchableSelect
-                aria-label="What they were for"
-                value={bulkCategory}
-                onChange={setBulkCategory}
-                disabled={selected.size === 0}
-                style={controlStyle}
-                emptyLabel="Choose a category"
-                options={bulkCategories.map((category) => ({ value: category.id, label: category.name }))}
-              />
-            </label>
-
-            {/* Not disabled with an empty selection: the per-line "Record it as
-                this" buttons use this rate and this tick box too, so locking them
-                out would mean a single line could only ever be recorded with no
-                VAT on it. */}
-            <label style={{ fontSize: 'var(--text-sm)' }}>
-              <span style={{ display: 'block', marginBottom: '0.25rem' }}>VAT on what you record</span>
-              <select
-                value={vatRateCode}
-                onChange={(event) => setVatRateCode(event.target.value)}
-                style={controlStyle}
-              >
-                {VAT_CHOICES.map((choice) => (
-                  <option key={choice.code} value={choice.code}>
-                    {choice.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <button
-              type="button"
-              className="btn btn-sm btn-primary"
-              disabled={busy || selected.size === 0 || !bulkCategory}
-              onClick={() =>
-                bulk(
-                  [...selected],
-                  { action: 'record', categoryId: bulkCategory, vatRateCode, leaveForReview },
-                  'recorded',
-                  'were left as they were',
-                )
-              }
-            >
-              {busy ? 'Working…' : `Record ${selected.size || ''}`.trim()}
-            </button>
-
-            <label style={{ fontSize: 'var(--text-sm)', alignSelf: 'center', display: 'flex', gap: '0.375rem', alignItems: 'center' }}>
-              <input
-                type="checkbox"
-                checked={leaveForReview}
-                onChange={(event) => setLeaveForReview(event.target.checked)}
-              />
-              Leave them for review
-            </label>
-          </div>
-
-          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', marginTop: '0.75rem' }}>
-            <button
-              type="button"
-              className="btn btn-sm"
-              disabled={busy || suggestedInSelection === 0}
-              onClick={() =>
-                bulk(
-                  [...selected],
-                  { action: 'accept-suggested' },
-                  'ticked off',
-                  'had nothing in the books sure enough to match, so they are still waiting',
-                )
-              }
-            >
-              Tick off the ones we are sure about
-              {suggestedInSelection > 0 ? ` (${suggestedInSelection})` : ''}
-            </button>
-            <input
-              aria-label="Why these lines are being set aside"
-              placeholder="Why they need no entry"
-              value={reason}
-              onChange={(event) => setReason(event.target.value)}
-              style={{ ...controlStyle, minWidth: 200 }}
-            />
-            <button
-              type="button"
-              className="btn btn-sm"
-              disabled={busy || selected.size === 0}
-              onClick={() =>
-                bulk([...selected], { action: 'ignore', reason }, 'set aside', 'were already set aside')
-              }
-            >
-              Set aside
-            </button>
-            {status === 'ignored' && (
+      <div className="bkr-card">
+        <div className="bkr-toolbar">
+          <div className="bkr-seg" role="group" aria-label="Which lines to show">
+            {statusTabs.map((tab) => (
               <button
+                key={tab.key || 'all'}
                 type="button"
-                className="btn btn-sm"
-                disabled={busy || selected.size === 0}
-                onClick={() =>
-                  bulk([...selected], { action: 'unignore' }, 'put back', 'were not set aside anyway')
-                }
+                aria-pressed={status === tab.key}
+                onClick={() => changeView(() => setStatus(tab.key))}
               >
-                Put back
+                {tab.label}
+                {tab.count !== null && <small>{tab.count}</small>}
               </button>
-            )}
+            ))}
           </div>
 
-          <p style={{ margin: '0.625rem 0 0', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
-            Recording takes the date, the name and the amount straight off the bank&rsquo;s own line. The
-            VAT rate and &ldquo;leave them for review&rdquo; apply to the buttons on the lines below as
-            well as to a whole selection. Left for review, entries go in as drafts and reach no VAT return
-            until you post them.
-          </p>
+          <div className="bkr-grow">
+            <Icon name="search" size={15} />
+            <input
+              type="search"
+              className="bkr-input"
+              aria-label="Find a statement line"
+              value={search}
+              placeholder="Search what the bank printed"
+              onChange={(event) => changeView(() => setSearch(event.target.value))}
+            />
+          </div>
+
+          <div className="bkr-dates">
+            <label>
+              From
+              <input
+                type="date"
+                className="bkr-input"
+                value={from}
+                onChange={(event) => changeView(() => setFrom(event.target.value))}
+              />
+            </label>
+            <label>
+              To
+              <input
+                type="date"
+                className="bkr-input"
+                value={to}
+                onChange={(event) => changeView(() => setTo(event.target.value))}
+              />
+            </label>
+          </div>
+        </div>
+        <p className="bkr-tiny" style={{ margin: 0, padding: '0 1rem .75rem' }}>
+          Searching is how you get all the alike ones together: type the name the bank prints on your
+          director&rsquo;s loan payments, tick the lot, and code them in one go.
+        </p>
+      </div>
+
+      {!feed && !error && (
+        <div className="bkr-card" aria-busy="true" aria-label="Loading statement lines">
+          <div className="bkr-skel" />
+          <div className="bkr-skel" />
+          <div className="bkr-skel" />
         </div>
       )}
 
       {feed && rows.length === 0 && (
-        <EmptyState title={status === 'unreconciled' ? 'Nothing left to explain.' : 'Nothing here.'}>
-          <p style={{ margin: 0 }}>
+        <div className="bkr-empty" data-tone={status === 'unreconciled' ? 'good' : undefined}>
+          <div className="bkr-empty-ico">
+            <Icon name={status === 'unreconciled' ? 'check' : 'search'} size={22} />
+          </div>
+          <p className="bkr-empty-title">
+            {status === 'unreconciled' ? 'Nothing left to explain.' : 'Nothing here.'}
+          </p>
+          <p>
             {status === 'unreconciled'
               ? 'Every line on this account is either ticked off against an entry or set aside. That is the whole point of the exercise, so: well done.'
               : 'Try a different filter, or import a statement for this account.'}
           </p>
-        </EmptyState>
+        </div>
       )}
 
       {rows.length > 0 && (
-        <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                {canRecord && (
-                  <th style={{ ...headStyle, width: '2rem' }}>
-                    <input
-                      type="checkbox"
-                      aria-label="Tick every line on this page"
-                      checked={selected.size > 0 && selected.size === rows.length}
-                      onChange={(event) =>
-                        setSelected(event.target.checked ? new Set(rows.map((row) => row.id)) : new Set())
-                      }
-                    />
-                  </th>
-                )}
-                <th style={headStyle}>Date</th>
-                <th style={headStyle}>What the bank says</th>
-                <th style={{ ...headStyle, textAlign: 'right' }}>Amount</th>
-                <th style={headStyle}>What it is</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <StatementRow
-                  key={row.id}
-                  row={row}
-                  suggestions={feed?.suggestions[row.id] ?? []}
-                  documents={feed?.documentSuggestions?.[row.id] ?? []}
-                  transfers={feed?.transferSuggestions?.[row.id] ?? []}
-                  matched={matches[row.id] ?? []}
-                  categories={categories}
-                  categoryId={rowCategory[row.id] ?? ''}
-                  vatRateCode={vatRateCode}
-                  leaveForReview={leaveForReview}
-                  ticked={selected.has(row.id)}
-                  open={openLine === row.id}
-                  settleOpen={settleLine === row.id}
-                  busy={busy}
-                  canRecord={canRecord}
-                  adminPath={adminPath}
-                  onTick={(ticked) => {
-                    const next = new Set(selected)
-                    if (ticked) next.add(row.id)
-                    else next.delete(row.id)
-                    setSelected(next)
+        <div className="bkr-card">
+          <div className="bkr-list-head">
+            {canRecord && (
+              <label>
+                <input
+                  type="checkbox"
+                  className="bkr-tick"
+                  style={{ marginTop: 0 }}
+                  aria-label="Tick every line on this page"
+                  checked={allTicked}
+                  ref={(element) => {
+                    if (element) element.indeterminate = selected.size > 0 && !allTicked
                   }}
-                  onCategory={(categoryId) =>
-                    setRowCategory((current) => ({ ...current, [row.id]: categoryId }))
-                  }
-                  onToggle={() => openMatches(row.id)}
-                  onSettleToggle={() => setSettleLine(settleLine === row.id ? null : row.id)}
-                  onAct={(body) => act(row.id, body)}
-                  onBulk={(body, what, leftNote) => bulk([row.id], body, what, leftNote)}
-                  onRecordFromDocument={(documentId, categoryId) =>
-                    recordFromDocument(row.id, documentId, categoryId)
+                  onChange={(event) =>
+                    setSelected(event.target.checked ? new Set(rows.map((row) => row.id)) : new Set())
                   }
                 />
-              ))}
-            </tbody>
-          </table>
+                <span>
+                  {selected.size > 0 ? `${selected.size} of ${rows.length} ticked` : 'Tick all'}
+                </span>
+              </label>
+            )}
+            <span className="bkr-muted">
+              {feed && feed.total > rows.length
+                ? `${offset + 1} to ${offset + rows.length} of ${feed.total} lines`
+                : `${rows.length} line${rows.length === 1 ? '' : 's'}`}
+            </span>
+
+            {/* Not tied to a selection: the per-line "Record" buttons use this
+                rate and this tick box too, so locking them to a selection would
+                mean a single line could only ever be recorded with no VAT on it. */}
+            {canRecord && (
+              <div className="bkr-defaults">
+                <label>
+                  VAT on what you record
+                  <select value={vatRateCode} onChange={(event) => setVatRateCode(event.target.value)}>
+                    {VAT_CHOICES.map((choice) => (
+                      <option key={choice.code} value={choice.code}>
+                        {choice.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label title="Entries go in as drafts and reach no VAT return until you post them.">
+                  <input
+                    type="checkbox"
+                    checked={leaveForReview}
+                    onChange={(event) => setLeaveForReview(event.target.checked)}
+                  />
+                  Save as drafts for review
+                </label>
+              </div>
+            )}
+          </div>
+
+          {rows.map((row) => (
+            <StatementRow
+              key={row.id}
+              row={row}
+              suggestions={feed?.suggestions[row.id] ?? []}
+              documents={feed?.documentSuggestions?.[row.id] ?? []}
+              transfers={feed?.transferSuggestions?.[row.id] ?? []}
+              matched={matches[row.id] ?? []}
+              categories={categories}
+              categoryId={rowCategory[row.id] ?? ''}
+              ticked={selected.has(row.id)}
+              open={openLine === row.id}
+              settleOpen={settleLine === row.id}
+              vatRateCode={vatRateCode}
+              leaveForReview={leaveForReview}
+              busy={busy}
+              canRecord={canRecord}
+              adminPath={adminPath}
+              onTick={(ticked) => {
+                const next = new Set(selected)
+                if (ticked) next.add(row.id)
+                else next.delete(row.id)
+                setSelected(next)
+              }}
+              onCategory={(categoryId) => setRowCategory((current) => ({ ...current, [row.id]: categoryId }))}
+              onToggle={() => openMatches(row.id)}
+              onSettleToggle={() => setSettleLine(settleLine === row.id ? null : row.id)}
+              onAct={(body) => act(row.id, body)}
+              onBulk={(body, what, leftNote) => bulk([row.id], body, what, leftNote)}
+              onRecordFromDocument={(documentId, categoryId) =>
+                recordFromDocument(row.id, documentId, categoryId)
+              }
+            />
+          ))}
         </div>
       )}
 
       {feed && feed.total > PAGE_SIZE && (
-        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginTop: '1rem', fontSize: 'var(--text-sm)' }}>
+        <div className="bkr-pager">
           <button
             type="button"
             className="btn btn-sm"
@@ -769,7 +722,7 @@ export default function ReconcileScreen({
           >
             Previous
           </button>
-          <span>
+          <span className="bkr-muted bkr-num">
             {offset + 1} to {Math.min(offset + PAGE_SIZE, feed.total)} of {feed.total}
           </span>
           <button
@@ -785,7 +738,178 @@ export default function ReconcileScreen({
           </button>
         </div>
       )}
+
+      {canRecord && selected.size > 0 && (
+        <div className="bkr-bulk" role="region" aria-label="Actions for the ticked lines">
+          <div className="bkr-bulk-row">
+            <span className="bkr-bulk-count">{selected.size} ticked</span>
+
+            <SearchableSelect
+              aria-label="What they were for"
+              value={bulkCategory}
+              onChange={setBulkCategory}
+              style={{ ...controlStyle, minWidth: '14rem', minHeight: '2.25rem' }}
+              emptyLabel="What they were for"
+              options={bulkCategories.map((category) => ({ value: category.id, label: category.name }))}
+            />
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              disabled={busy || !bulkCategory}
+              onClick={() =>
+                bulk(
+                  [...selected],
+                  { action: 'record', categoryId: bulkCategory, vatRateCode, leaveForReview },
+                  'recorded',
+                  'were left as they were',
+                )
+              }
+            >
+              {busy ? 'Working…' : `Record ${selected.size}`}
+            </button>
+
+            <span className="bkr-bulk-sep" aria-hidden="true" />
+
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={busy || suggestedInSelection === 0}
+              onClick={() =>
+                bulk(
+                  [...selected],
+                  { action: 'accept-suggested' },
+                  'ticked off',
+                  'had nothing in the books sure enough to match, so they are still waiting',
+                )
+              }
+            >
+              Tick off the sure ones{suggestedInSelection > 0 ? ` (${suggestedInSelection})` : ''}
+            </button>
+
+            <button
+              type="button"
+              className="btn btn-sm"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => setSelected(new Set())}
+            >
+              Clear
+            </button>
+          </div>
+
+          <div className="bkr-bulk-row">
+            <input
+              className="bkr-input"
+              aria-label="Why these lines are being set aside"
+              placeholder="Why they need no entry"
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              style={{ minWidth: '14rem', flex: '1 1 14rem' }}
+            />
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={busy}
+              onClick={() =>
+                bulk([...selected], { action: 'ignore', reason }, 'set aside', 'were already set aside')
+              }
+            >
+              Set aside
+            </button>
+            {status === 'ignored' && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={busy}
+                onClick={() =>
+                  bulk([...selected], { action: 'unignore' }, 'put back', 'were not set aside anyway')
+                }
+              >
+                Put back
+              </button>
+            )}
+          </div>
+          <p className="bkr-tiny" style={{ margin: 0 }}>
+            Recording takes the date, the name and the amount straight off the bank&rsquo;s own line.
+          </p>
+        </div>
+      )}
     </div>
+  )
+}
+
+type IconName = 'bank' | 'card' | 'cash' | 'check' | 'swap' | 'clip' | 'search' | 'info' | 'alert'
+
+function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
+  const paths: Record<IconName, React.ReactNode> = {
+    bank: (
+      <>
+        <path d="M3 21h18" />
+        <path d="M5 21V10" />
+        <path d="M9 21V10" />
+        <path d="M15 21V10" />
+        <path d="M19 21V10" />
+        <path d="m3 10 9-6 9 6" />
+      </>
+    ),
+    card: (
+      <>
+        <rect x="2" y="5" width="20" height="14" rx="2" />
+        <path d="M2 10h20" />
+      </>
+    ),
+    cash: (
+      <>
+        <rect x="2" y="6" width="20" height="12" rx="2" />
+        <circle cx="12" cy="12" r="2.5" />
+      </>
+    ),
+    check: <path d="M20 6 9 17l-5-5" />,
+    swap: (
+      <>
+        <path d="M7 4 3 8l4 4" />
+        <path d="M3 8h14" />
+        <path d="m17 20 4-4-4-4" />
+        <path d="M21 16H7" />
+      </>
+    ),
+    clip: (
+      <path d="m21.4 11.6-9.2 9.2a5.5 5.5 0 0 1-7.8-7.8l9.2-9.2a3.7 3.7 0 0 1 5.2 5.2l-9.2 9.2a1.8 1.8 0 0 1-2.6-2.6l8.5-8.5" />
+    ),
+    search: (
+      <>
+        <circle cx="11" cy="11" r="7" />
+        <path d="m21 21-4.3-4.3" />
+      </>
+    ),
+    info: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 16v-4" />
+        <path d="M12 8h.01" />
+      </>
+    ),
+    alert: (
+      <>
+        <path d="M12 9v4" />
+        <path d="M12 17h.01" />
+        <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+      </>
+    ),
+  }
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {paths[name]}
+    </svg>
   )
 }
 
@@ -810,109 +934,120 @@ function Outcome({
     if (!row) return 'One line'
     return `${formatDate(row.date)} · ${row.counterparty || row.details} · ${poundsFromString(row.amount)}`
   }
+  const rest = outcome.attempted - outcome.done - outcome.failed.length
 
   return (
-    <div
-      className="card"
-      role="status"
-      style={{
-        padding: '0.875rem 1rem',
-        marginBottom: '1rem',
-        fontSize: 'var(--text-sm)',
-        borderColor: outcome.failed.length > 0 ? 'var(--color-warning, var(--color-border))' : 'var(--color-border)',
-      }}
-    >
-      <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'baseline' }}>
-        <strong style={{ flex: 1 }}>
+    <div className="bkr-note" data-tone={outcome.failed.length > 0 ? 'warn' : 'good'} role="status">
+      <span className="bkr-note-ico">
+        <Icon name={outcome.failed.length > 0 ? 'alert' : 'check'} size={14} />
+      </span>
+      <div className="bkr-note-body">
+        <strong>
           {outcome.done} line{outcome.done === 1 ? '' : 's'} {outcome.what}.
         </strong>
-        <button type="button" className="btn btn-sm" onClick={onDismiss}>
-          Right you are
-        </button>
-      </div>
-      {outcome.attempted > outcome.done + outcome.failed.length && (
-        <p style={{ margin: '0.5rem 0 0' }}>
-          The other {outcome.attempted - outcome.done - outcome.failed.length} {outcome.leftNote}.
-        </p>
-      )}
-      {outcome.failed.length > 0 && (
-        <>
-          <p style={{ margin: '0.5rem 0 0.25rem' }}>
-            {outcome.failed.length} {outcome.failed.length === 1 ? 'was' : 'were'} left alone:
+        {rest > 0 && (
+          <p>
+            The other {rest} {outcome.leftNote}.
           </p>
-          <ul style={{ margin: 0, paddingLeft: '1.25rem' }}>
-            {outcome.failed.map((failure) => (
-              <li key={failure.id}>
-                {describe(failure.id)} - {failure.error}
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
+        )}
+        {outcome.failed.length > 0 && (
+          <>
+            <p>
+              {outcome.failed.length} {outcome.failed.length === 1 ? 'was' : 'were'} left alone:
+            </p>
+            <ul>
+              {outcome.failed.map((failure) => (
+                <li key={failure.id}>
+                  {describe(failure.id)} - {failure.error}
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
+      <button type="button" className="btn btn-sm" onClick={onDismiss}>
+        Right you are
+      </button>
     </div>
   )
 }
 
 /**
- * The score at the top. Two figures that answer different questions: what the
- * bank last said the account held, and how much of that nobody has explained.
+ * The score at the top. Figures that answer different questions: what the bank
+ * last said the account held, how much of that nobody has explained, and how far
+ * through the statement the work has got.
  */
 function Position({ account, summary }: { account: BankAccount; summary: Summary }) {
   const position = account.position_summary
   const clear = summary.unreconciledLines === 0
+  const dealtWith = summary.reconciledLines + summary.ignoredLines
+  const percent =
+    summary.statementLines === 0 ? 0 : Math.round((dealtWith / summary.statementLines) * 100)
 
   return (
-    <div
-      className="card"
-      style={{
-        padding: '0.875rem 1rem',
-        marginBottom: '1rem',
-        fontSize: 'var(--text-sm)',
-        borderColor: clear ? 'var(--color-success, var(--color-border))' : 'var(--color-border)',
-      }}
-    >
-      <div style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap' }}>
-        <div>
-          <div style={{ color: 'var(--color-text-muted, var(--color-text))' }}>According to the bank</div>
-          <div style={{ fontSize: '1.125rem', fontWeight: 600 }}>
-            {poundsFromString(position.statementBalance)}
-          </div>
-          {position.lastStatementDate && (
-            <div style={{ color: 'var(--color-text-muted, var(--color-text))' }}>
-              as at {formatDate(position.lastStatementDate)}
-            </div>
-          )}
+    <div className="bkr-card" style={{ overflow: 'hidden' }}>
+      <div className="bkr-stats">
+        <div className="bkr-stat">
+          <span className="bkr-stat-label">According to the bank</span>
+          <span className="bkr-stat-value">{poundsFromString(position.statementBalance)}</span>
+          <span className="bkr-tiny">
+            {position.lastStatementDate
+              ? `as at ${formatDate(position.lastStatementDate)}`
+              : 'no statement imported yet'}
+          </span>
         </div>
-        <div>
-          <div style={{ color: 'var(--color-text-muted, var(--color-text))' }}>Still to explain</div>
-          <div style={{ fontSize: '1.125rem', fontWeight: 600 }}>
+        <div className="bkr-stat">
+          <span className="bkr-stat-label">Still to explain</span>
+          <span className="bkr-stat-value" data-tone={clear ? 'good' : undefined}>
             {summary.unreconciledLines} line{summary.unreconciledLines === 1 ? '' : 's'}
-          </div>
-          <div style={{ color: 'var(--color-text-muted, var(--color-text))' }}>
-            {poundsFromString(summary.unreconciledTotal)} between them
-          </div>
+          </span>
+          <span className="bkr-tiny">
+            {clear ? 'all caught up' : `${poundsFromString(summary.unreconciledTotal)} between them`}
+          </span>
         </div>
-        <div>
-          <div style={{ color: 'var(--color-text-muted, var(--color-text))' }}>Ticked off</div>
-          <div style={{ fontSize: '1.125rem', fontWeight: 600 }}>
-            {summary.reconciledLines} of {summary.statementLines}
+        <div className="bkr-stat">
+          <span className="bkr-stat-label">Ticked off</span>
+          <span className="bkr-stat-value">
+            {summary.reconciledLines}
+            <span className="bkr-muted" style={{ fontSize: '1rem', fontWeight: 500 }}>
+              {' '}
+              of {summary.statementLines}
+            </span>
+          </span>
+          <span className="bkr-tiny">{poundsFromString(summary.reconciledTotal)} matched to entries</span>
+        </div>
+        <div className="bkr-stat">
+          <span className="bkr-stat-label">Dealt with</span>
+          <span className="bkr-stat-value" data-tone={clear ? 'good' : undefined}>
+            {percent}%
+          </span>
+          <span className="bkr-tiny">
+            {summary.ignoredLines > 0
+              ? `including ${summary.ignoredLines} set aside`
+              : 'of the lines on this account'}
+          </span>
+          <div
+            className="bkr-progress"
+            data-clear={clear}
+            role="progressbar"
+            aria-label="Share of statement lines dealt with"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={percent}
+          >
+            <span style={{ width: `${percent}%` }} />
           </div>
-          {summary.ignoredLines > 0 && (
-            <div style={{ color: 'var(--color-text-muted, var(--color-text))' }}>
-              {summary.ignoredLines} set aside
-            </div>
-          )}
         </div>
       </div>
 
       {summary.unmatchedEntryCount > 0 && (
-        <p style={{ margin: '0.75rem 0 0' }}>
+        <div className="bkr-stats-foot">
           There {summary.unmatchedEntryCount === 1 ? 'is' : 'are'} also {summary.unmatchedEntryCount} entr
           {summary.unmatchedEntryCount === 1 ? 'y' : 'ies'} in your books, worth{' '}
           {poundsFromString(summary.unmatchedEntryTotal)}, with no statement line behind{' '}
-          {summary.unmatchedEntryCount === 1 ? 'it' : 'them'} at all. Either the statement they belong to
-          has not been imported yet, or they have not actually gone through the bank.
-        </p>
+          {summary.unmatchedEntryCount === 1 ? 'it' : 'them'} at all. Either the statement they belong to has
+          not been imported yet, or they have not actually gone through the bank.
+        </div>
       )}
     </div>
   )
@@ -927,9 +1062,6 @@ function Position({ account, summary }: { account: BankAccount; summary: Summary
  * whose date is months from the payment. None of those should be OFFERED - a
  * plausible wrong match is the one failure worth designing against - but all of
  * them are things a human can look at and know.
- *
- * Compact on purpose. It opens inside a table cell, and the thing being decided
- * is one row of it.
  */
 function PickReceipt({
   onPick,
@@ -982,60 +1114,56 @@ function PickReceipt({
   }, [search])
 
   return (
-    <div style={{ border: '1px solid var(--color-border)', borderRadius: 6, padding: '0.5rem' }}>
+    <div className="bkr-sub">
+      <p className="bkr-sub-title">Pick a receipt</p>
       <input
-        style={{ ...controlStyle, width: '100%', marginBottom: '0.5rem' }}
+        className="bkr-input"
+        aria-label="Search receipts"
         placeholder="Search receipts by supplier, number or filename"
         value={search}
         onChange={(event) => setSearch(event.target.value)}
       />
-      {rows === null && <div style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>Loading…</div>}
-      {rows !== null && rows.length === 0 && (
-        <div style={{ fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
-          Nothing unfiled matches that.
-        </div>
-      )}
-      {(rows ?? []).map((candidate) => (
-        <div
-          key={candidate.documentId}
-          style={{
-            display: 'flex',
-            gap: '0.5rem',
-            alignItems: 'baseline',
-            flexWrap: 'wrap',
-            padding: '0.25rem 0',
-            borderTop: '1px solid var(--color-border)',
-          }}
-        >
-          <a
-            href={`/api/m/uk-bookkeeping/admin/attachments/${candidate.documentId}`}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            {candidate.counterparty ?? candidate.name}
-          </a>
-          <span style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
-            {[
-              candidate.documentNumber && `no. ${candidate.documentNumber}`,
-              candidate.documentDate && formatDate(candidate.documentDate),
-              candidate.total && poundsFromString(candidate.total),
-            ]
-              .filter(Boolean)
-              .join(' · ') || 'nothing read off it'}
-          </span>
-          <button
-            type="button"
-            className="btn btn-sm"
-            disabled={disabled}
-            onClick={() => onPick(candidate.documentId)}
-          >
-            Use this one
-          </button>
-        </div>
-      ))}
-      <button type="button" className="btn btn-sm" style={{ marginTop: '0.5rem' }} onClick={onClose}>
-        Close
-      </button>
+      <div className="bkr-scroll">
+        {rows === null && <div className="bkr-pick bkr-tiny">Loading…</div>}
+        {rows !== null && rows.length === 0 && (
+          <div className="bkr-pick bkr-tiny">Nothing unfiled matches that.</div>
+        )}
+        {(rows ?? []).map((candidate) => (
+          <div key={candidate.documentId} className="bkr-pick">
+            <div className="bkr-pick-main">
+              <a
+                href={`/api/m/uk-bookkeeping/admin/attachments/${candidate.documentId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {candidate.counterparty ?? candidate.name}
+              </a>
+              <span className="bkr-tiny">
+                {[
+                  candidate.documentNumber && `no. ${candidate.documentNumber}`,
+                  candidate.documentDate && formatDate(candidate.documentDate),
+                  candidate.total && poundsFromString(candidate.total),
+                ]
+                  .filter(Boolean)
+                  .join(' · ') || 'nothing read off it'}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={disabled}
+              onClick={() => onPick(candidate.documentId)}
+            >
+              Use this one
+            </button>
+          </div>
+        ))}
+      </div>
+      <div>
+        <button type="button" className="btn btn-sm" onClick={onClose}>
+          Close
+        </button>
+      </div>
     </div>
   )
 }
@@ -1092,94 +1220,110 @@ function StatementRow({
     (category) => category.direction === 'both' || category.direction === direction,
   )
   const [pickingReceipt, setPickingReceipt] = useState(false)
+  const hasCandidates = transfers.length + suggestions.length + documents.length > 0
 
   return (
-    <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-      {canRecord && (
-        <td style={cellStyle}>
+    <div className="bkr-line" data-selected={ticked}>
+      <div className="bkr-bank" data-check={canRecord}>
+        {canRecord && (
           <input
             type="checkbox"
+            className="bkr-tick"
             aria-label={`Tick the ${formatDate(row.date)} line for ${row.counterparty || 'an unnamed counterparty'}`}
             checked={ticked}
             onChange={(event) => onTick(event.target.checked)}
           />
-        </td>
-      )}
-      <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>{formatDate(row.date)}</td>
-      <td style={cellStyle}>
-        <div>{row.counterparty || '—'}</div>
-        {row.details !== row.counterparty && (
-          <div style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
-            {row.details}
-          </div>
         )}
-        {row.transaction_type && (
-          <div style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
-            {row.transaction_type}
+        <div className="bkr-bank-main">
+          <p className="bkr-date">{formatDate(row.date)}</p>
+          <div className="bkr-who">{row.counterparty || row.details || 'No name on the line'}</div>
+          {row.counterparty && row.details && row.details !== row.counterparty && (
+            <div className="bkr-tiny bkr-det">{row.details}</div>
+          )}
+          {(row.transaction_type || row.reference) && (
+            <div className="bkr-chips">
+              {row.transaction_type && <span className="bkr-pill">{row.transaction_type}</span>}
+              {row.reference && <span className="bkr-pill">Ref {row.reference}</span>}
+            </div>
+          )}
+        </div>
+        <div className="bkr-amount">
+          <div className="bkr-amt" data-dir={direction}>
+            {direction === 'income' ? '+' : ''}
+            {poundsFromString(row.amount)}
           </div>
-        )}
-      </td>
-      <td style={{ ...cellStyle, textAlign: 'right', whiteSpace: 'nowrap' }}>
-        {poundsFromString(row.amount)}
-      </td>
-      <td style={cellStyle}>
+          {row.statement_balance !== null && (
+            <div className="bkr-tiny bkr-num">Balance {poundsFromString(row.statement_balance)}</div>
+          )}
+        </div>
+      </div>
+
+      <div className="bkr-books">
         {row.status === 'reconciled' && (
-          <div>
-            <span style={{ color: 'var(--color-success, var(--color-text))' }}>Ticked off.</span>{' '}
-            <button
-              type="button"
-              className="btn btn-sm"
-              onClick={onToggle}
-              style={{ marginLeft: '0.25rem' }}
-            >
-              {open ? 'Hide' : `Show what it is matched to (${row.match_count})`}
-            </button>
-          </div>
+          <>
+            <p className="bkr-kicker">In your books</p>
+            <div className="bkr-done">
+              <span className="bkr-pill bkr-pill-good">
+                <Icon name="check" size={12} /> Ticked off
+              </span>
+              <button type="button" className="bkr-linkbtn" onClick={onToggle}>
+                {open ? 'Hide' : `Show what it is matched to (${row.match_count})`}
+              </button>
+            </div>
+          </>
         )}
 
         {row.status === 'ignored' && (
-          <div>
-            <span style={{ color: 'var(--color-text-muted, var(--color-text))' }}>
-              Set aside{row.ignored_reason ? `: ${row.ignored_reason}` : '.'}
-            </span>{' '}
-            {canRecord && (
-              <button type="button" className="btn btn-sm" disabled={busy} onClick={() => onAct({ action: 'unignore' })}>
-                Put it back
-              </button>
-            )}
-          </div>
+          <>
+            <p className="bkr-kicker">Set aside</p>
+            <div className="bkr-done">
+              <span className="bkr-muted">
+                {row.ignored_reason ? `Set aside: ${row.ignored_reason}` : 'Set aside, no entry needed.'}
+              </span>
+              {canRecord && (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={busy}
+                  onClick={() => onAct({ action: 'unignore' })}
+                >
+                  Put it back
+                </button>
+              )}
+            </div>
+          </>
         )}
 
         {row.status === 'unreconciled' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <>
             {row.match_count > 0 && (
-              <div style={{ color: 'var(--color-danger, var(--color-text))' }}>
-                Only {poundsFromString(row.matched_total)} of this is explained so far.
+              <div>
+                <span className="bkr-pill bkr-pill-bad">
+                  <Icon name="alert" size={12} /> Only {poundsFromString(row.matched_total)} of this is
+                  explained so far
+                </span>
               </div>
             )}
 
+            {hasCandidates && <p className="bkr-kicker">Looks like</p>}
+
             {transfers.map((candidate) => (
-              <div
-                key={candidate.journalId}
-                style={{
-                  display: 'flex',
-                  gap: '0.5rem',
-                  alignItems: 'baseline',
-                  flexWrap: 'wrap',
-                  padding: '0.375rem 0.5rem',
-                  borderRadius: 6,
-                  border: '1px solid var(--color-border)',
-                }}
-              >
-                <span aria-hidden="true">↔</span>
-                <a href={`/${adminPath}/m/uk-bookkeeping/transfers/${candidate.journalId}`}>
-                  {formatDate(candidate.date)} · {candidate.fromBankName} → {candidate.toBankName} ·{' '}
-                  {poundsFromString(candidate.amount)}
-                </a>
-                <span style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
-                  the {candidate.side === 'out' ? 'money leaving' : 'money arriving'} on a transfer
-                  you have already recorded
+              <div key={candidate.journalId} className="bkr-match">
+                <span className="bkr-match-ico">
+                  <Icon name="swap" size={15} />
                 </span>
+                <div className="bkr-match-body">
+                  <div className="bkr-match-title">
+                    <a href={`/${adminPath}/m/uk-bookkeeping/transfers/${candidate.journalId}`}>
+                      {candidate.fromBankName} to {candidate.toBankName}
+                    </a>
+                  </div>
+                  <div className="bkr-tiny">
+                    {formatDate(candidate.date)} · {poundsFromString(candidate.amount)} · the{' '}
+                    {candidate.side === 'out' ? 'money leaving' : 'money arriving'} on a transfer you have
+                    already recorded
+                  </div>
+                </div>
                 {canRecord && (
                   <button
                     type="button"
@@ -1189,28 +1333,47 @@ function StatementRow({
                       onAct({ action: 'match-transfer', journalId: candidate.journalId, method: 'suggested' })
                     }
                   >
-                    That is what it is
+                    Match
                   </button>
                 )}
               </div>
             ))}
 
             {suggestions.map((candidate) => (
-              <div key={candidate.transactionId} style={{ display: 'flex', gap: '0.5rem', alignItems: 'baseline', flexWrap: 'wrap' }}>
-                <a href={`/${adminPath}/m/uk-bookkeeping/transactions/${candidate.transactionId}`}>
-                  {formatDate(candidate.date)} · {candidate.counterparty} · {poundsFromString(candidate.gross)}
-                </a>
-                <span style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
-                  {candidate.reasons.join(', ')}
+              <div key={candidate.transactionId} className="bkr-match">
+                <span className="bkr-match-ico">
+                  <Icon name="check" size={15} />
                 </span>
+                <div className="bkr-match-body">
+                  <div className="bkr-match-title">
+                    <a href={`/${adminPath}/m/uk-bookkeeping/transactions/${candidate.transactionId}`}>
+                      {candidate.counterparty}
+                    </a>
+                  </div>
+                  <div className="bkr-tiny">
+                    {formatDate(candidate.date)} · {poundsFromString(candidate.gross)}
+                    {candidate.status === 'draft' ? ' · waiting for review' : ''}
+                  </div>
+                  {candidate.reasons.length > 0 && (
+                    <div className="bkr-chips" style={{ marginTop: '.25rem' }}>
+                      {candidate.reasons.map((why) => (
+                        <span key={why} className="bkr-pill">
+                          {why}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 {canRecord && (
                   <button
                     type="button"
                     className="btn btn-sm btn-primary"
                     disabled={busy}
-                    onClick={() => onAct({ action: 'match', transactionId: candidate.transactionId, method: 'suggested' })}
+                    onClick={() =>
+                      onAct({ action: 'match', transactionId: candidate.transactionId, method: 'suggested' })
+                    }
                   >
-                    That is what it is
+                    Match
                   </button>
                 )}
               </div>
@@ -1222,34 +1385,37 @@ function StatementRow({
               hand is the slower way round AND the one that loses the receipt.
             */}
             {documents.map((candidate) => (
-              <div
-                key={candidate.documentId}
-                style={{
-                  display: 'flex',
-                  gap: '0.5rem',
-                  alignItems: 'baseline',
-                  flexWrap: 'wrap',
-                  padding: '0.375rem 0.5rem',
-                  borderRadius: 6,
-                  border: '1px solid var(--color-border)',
-                }}
-              >
-                <span aria-hidden="true">📎</span>
-                <a
-                  href={`/api/m/uk-bookkeeping/admin/attachments/${candidate.documentId}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {candidate.counterparty ?? candidate.name}
-                  {candidate.documentNumber ? ` · no. ${candidate.documentNumber}` : ''}
-                </a>
-                <span style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
-                  {candidate.reasons.join(', ')}
-                  {candidate.vat !== null &&
-                    (candidate.vat === '0.00'
-                      ? ' · no VAT on it'
-                      : ` · ${poundsFromString(candidate.vat)} VAT`)}
+              <div key={candidate.documentId} className="bkr-match">
+                <span className="bkr-match-ico">
+                  <Icon name="clip" size={15} />
                 </span>
+                <div className="bkr-match-body">
+                  <div className="bkr-match-title">
+                    <a
+                      href={`/api/m/uk-bookkeeping/admin/attachments/${candidate.documentId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {candidate.counterparty ?? candidate.name}
+                      {candidate.documentNumber ? ` · no. ${candidate.documentNumber}` : ''}
+                    </a>
+                  </div>
+                  <div className="bkr-tiny">
+                    Unfiled receipt
+                    {candidate.total ? ` · ${poundsFromString(candidate.total)}` : ''}
+                    {candidate.vat !== null &&
+                      (candidate.vat === '0.00' ? ' · no VAT on it' : ` · ${poundsFromString(candidate.vat)} VAT`)}
+                  </div>
+                  {candidate.reasons.length > 0 && (
+                    <div className="bkr-chips" style={{ marginTop: '.25rem' }}>
+                      {candidate.reasons.map((why) => (
+                        <span key={why} className="bkr-pill">
+                          {why}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 {canRecord && (
                   <button
                     type="button"
@@ -1262,7 +1428,7 @@ function StatementRow({
                     }
                     onClick={() => onRecordFromDocument(candidate.documentId, categoryId)}
                   >
-                    That is the invoice
+                    Use this invoice
                   </button>
                 )}
               </div>
@@ -1280,58 +1446,61 @@ function StatementRow({
             )}
 
             {canRecord && (
-              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
-                <SearchableSelect
-                  aria-label={`What the ${formatDate(row.date)} line was for`}
-                  value={categoryId}
-                  onChange={onCategory}
-                  style={controlStyle}
-                  emptyLabel="Choose a category"
-                  options={usable.map((category) => ({ value: category.id, label: category.name }))}
-                />
-                <button
-                  type="button"
-                  className="btn btn-sm"
-                  disabled={busy || !categoryId}
-                  onClick={() =>
-                    onBulk(
-                      { action: 'record', categoryId, vatRateCode, leaveForReview },
-                      'recorded',
-                      'were left as they were',
-                    )
-                  }
-                >
-                  Record it as this
-                </button>
-                {/*
-                  For when the right receipt is in the pile but was not offered -
-                  a part payment, a photograph nothing could be read off, an
-                  invoice dated months from the payment. None of those should be
-                  suggested, and all of them are things a human can recognise.
-                */}
-                <button
-                  type="button"
-                  className="btn btn-sm"
-                  disabled={busy || !categoryId}
-                  title={
-                    categoryId ? undefined : 'Choose what it was for first.'
-                  }
-                  onClick={() => setPickingReceipt(!pickingReceipt)}
-                >
-                  {pickingReceipt ? 'Never mind' : 'Pick a receipt'}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-sm"
-                  disabled={busy}
-                  onClick={() => onAct({ action: 'ignore', reason: '' })}
-                >
-                  Set it aside
-                </button>
-                <button type="button" className="btn btn-sm" disabled={busy} onClick={onSettleToggle}>
-                  {settleOpen ? 'Never mind' : 'It paid several invoices'}
-                </button>
-              </div>
+              <>
+                <p className="bkr-kicker">{hasCandidates ? 'Or record it as something new' : 'What was this for?'}</p>
+                <div className="bkr-record">
+                  <SearchableSelect
+                    aria-label={`What the ${formatDate(row.date)} line was for`}
+                    value={categoryId}
+                    onChange={onCategory}
+                    style={{ ...controlStyle, minWidth: '13rem', minHeight: '2.25rem' }}
+                    emptyLabel="Choose a category"
+                    options={usable.map((category) => ({ value: category.id, label: category.name }))}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    disabled={busy || !categoryId}
+                    onClick={() =>
+                      onBulk(
+                        { action: 'record', categoryId, vatRateCode, leaveForReview },
+                        'recorded',
+                        'were left as they were',
+                      )
+                    }
+                  >
+                    Record it
+                  </button>
+                </div>
+                <div className="bkr-more">
+                  {/*
+                    For when the right receipt is in the pile but was not offered -
+                    a part payment, a photograph nothing could be read off, an
+                    invoice dated months from the payment. None of those should be
+                    suggested, and all of them are things a human can recognise.
+                  */}
+                  <button
+                    type="button"
+                    className="bkr-linkbtn"
+                    disabled={busy || !categoryId}
+                    title={categoryId ? undefined : 'Choose what it was for first.'}
+                    onClick={() => setPickingReceipt(!pickingReceipt)}
+                  >
+                    {pickingReceipt ? 'Never mind' : 'Pick a receipt'}
+                  </button>
+                  <button type="button" className="bkr-linkbtn" disabled={busy} onClick={onSettleToggle}>
+                    {settleOpen ? 'Never mind' : 'It paid several invoices'}
+                  </button>
+                  <button
+                    type="button"
+                    className="bkr-linkbtn"
+                    disabled={busy}
+                    onClick={() => onAct({ action: 'ignore', reason: '' })}
+                  >
+                    Set it aside
+                  </button>
+                </div>
+              </>
             )}
 
             {canRecord && settleOpen && (
@@ -1344,32 +1513,38 @@ function StatementRow({
                 onSettle={onAct}
               />
             )}
-          </div>
+          </>
         )}
 
         {open && matched.length > 0 && (
-          <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.25rem' }}>
+          <ul className="bkr-matched">
             {matched.map((entry) => (
               // A transfer is a journal, so it links to the transfer form rather
               // than to an entry page, and it comes off by its journal id.
               <li key={entry.transactionId ?? entry.journalId}>
-                <a
-                  href={
-                    entry.journalId
-                      ? `/${adminPath}/m/uk-bookkeeping/transfers/${entry.journalId}`
-                      : `/${adminPath}/m/uk-bookkeeping/transactions/${entry.transactionId}`
-                  }
-                >
-                  {formatDate(entry.date)} · {entry.counterparty}
-                </a>{' '}
-                {poundsFromString(entry.amount)}
-                {entry.locked && ' 🔒'}
+                <span className="bkr-grow-text">
+                  <a
+                    href={
+                      entry.journalId
+                        ? `/${adminPath}/m/uk-bookkeeping/transfers/${entry.journalId}`
+                        : `/${adminPath}/m/uk-bookkeeping/transactions/${entry.transactionId}`
+                    }
+                  >
+                    {entry.counterparty}
+                  </a>{' '}
+                  <span className="bkr-tiny">{formatDate(entry.date)}</span>
+                </span>
+                <span className="bkr-num">{poundsFromString(entry.amount)}</span>
+                {entry.locked && (
+                  <span className="bkr-pill" title="Part of a filed VAT return">
+                    Filed
+                  </span>
+                )}
                 {canRecord && !entry.locked && (
                   <button
                     type="button"
                     className="btn btn-sm"
                     disabled={busy}
-                    style={{ marginLeft: '0.5rem' }}
                     onClick={() =>
                       onAct(
                         entry.journalId
@@ -1385,8 +1560,8 @@ function StatementRow({
             ))}
           </ul>
         )}
-      </td>
-    </tr>
+      </div>
+    </div>
   )
 }
 
@@ -1468,15 +1643,16 @@ function SettlePanel({
     }
   }, [bankTransactionId])
 
+
   if (failed) {
     return (
-      <p style={{ margin: '0.5rem 0 0', color: 'var(--color-danger, var(--color-text))' }}>
+      <p role="alert" className="bkr-pill bkr-pill-bad" style={{ alignSelf: 'flex-start' }}>
         The entries this line might have paid for could not be loaded.
       </p>
     )
   }
   if (!view) {
-    return <p style={{ margin: '0.5rem 0 0' }}>Looking for what this might have paid for…</p>
+    return <p className="bkr-tiny">Looking for what this might have paid for…</p>
   }
 
   const needle = find.trim().toLowerCase()
@@ -1521,10 +1697,13 @@ function SettlePanel({
   const fallbackCategory = usable.find((category) => category.code === 'bank-charges')?.id ?? ''
   const differenceCategoryId = chosenDifferenceCategory ?? fallbackCategory
 
+
   return (
-    <div style={{ marginTop: '0.625rem', borderTop: '1px solid var(--color-border)', paddingTop: '0.625rem' }}>
+    <div className="bkr-sub">
+      <p className="bkr-sub-title">Which invoices did this line pay?</p>
+
       {view.candidates.length === 0 && (
-        <p style={{ margin: 0 }}>
+        <p className="bkr-muted" style={{ margin: 0 }}>
           There is nothing unaccounted for in your books around this date for it to have paid.
         </p>
       )}
@@ -1533,32 +1712,24 @@ function SettlePanel({
         <>
           <input
             type="search"
+            className="bkr-input"
             aria-label="Find an entry this line paid for"
             placeholder="Find an entry"
             value={find}
             onChange={(event) => setFind(event.target.value)}
-            style={{ ...controlStyle, minWidth: 220, marginBottom: '0.5rem' }}
           />
 
-          <div style={{ maxHeight: '15rem', overflowY: 'auto', border: '1px solid var(--color-border)', borderRadius: 6 }}>
+          <div className="bkr-scroll">
             {shown.map((candidate) => {
               const isPicked = picked.has(candidate.transactionId)
               const partIsBad = isPicked && appliedFor(candidate) === null
               return (
-                <div
-                  key={candidate.transactionId}
-                  style={{
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '0.5rem',
-                    alignItems: 'baseline',
-                    padding: '0.375rem 0.5rem',
-                    borderBottom: '1px solid var(--color-border)',
-                  }}
-                >
-                  <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'baseline', flex: 1, minWidth: 0 }}>
+                <div key={candidate.transactionId} className="bkr-pick">
+                  <label>
                     <input
                       type="checkbox"
+                      className="bkr-tick"
+                      style={{ marginTop: 0 }}
                       checked={isPicked}
                       onChange={(event) => {
                         const next = new Set(picked)
@@ -1574,53 +1745,44 @@ function SettlePanel({
                         }
                       }}
                     />
-                    <span style={{ whiteSpace: 'nowrap' }}>{formatDate(candidate.date)}</span>
-                    <a
-                      href={`/${adminPath}/m/uk-bookkeeping/transactions/${candidate.transactionId}`}
-                      style={{ flex: 1 }}
-                    >
+                    <span className="bkr-tiny" style={{ whiteSpace: 'nowrap' }}>
+                      {formatDate(candidate.date)}
+                    </span>
+                    <a href={`/${adminPath}/m/uk-bookkeeping/transactions/${candidate.transactionId}`}>
                       {candidate.counterparty}
                     </a>
-                    {candidate.reference && (
-                      <span style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
-                        {candidate.reference}
-                      </span>
-                    )}
+                    {candidate.reference && <span className="bkr-tiny">{candidate.reference}</span>}
                     {candidate.status === 'draft' && (
-                      <span style={{ fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-warning, var(--color-text))' }}>
-                        waiting for review
-                      </span>
+                      <span className="bkr-pill bkr-pill-warn">waiting for review</span>
                     )}
                   </label>
                   {isPicked ? (
-                    <span style={{ display: 'flex', gap: '0.375rem', alignItems: 'baseline', whiteSpace: 'nowrap' }}>
+                    <span style={{ display: 'flex', gap: '0.375rem', alignItems: 'center', whiteSpace: 'nowrap' }}>
                       <input
                         type="text"
                         inputMode="decimal"
+                        className="bkr-input bkr-part"
                         aria-label={`How much of ${candidate.counterparty} this line paid`}
                         aria-invalid={partIsBad}
                         value={parts[candidate.transactionId] ?? candidate.outstanding}
                         onChange={(event) => setParts({ ...parts, [candidate.transactionId]: event.target.value })}
                         style={{
-                          ...controlStyle,
-                          width: '6.5rem',
-                          textAlign: 'right',
-                          borderColor: partIsBad ? 'var(--color-danger, var(--color-border))' : 'var(--color-border)',
+                          borderColor: partIsBad ? 'var(--color-danger, var(--color-border))' : undefined,
                         }}
                       />
-                      <span style={{ color: 'var(--color-text-muted, var(--color-text))', fontSize: 'var(--text-xs, 0.75rem)' }}>
-                        of {poundsFromString(candidate.contribution)}
-                      </span>
+                      <span className="bkr-tiny">of {poundsFromString(candidate.contribution)}</span>
                     </span>
                   ) : (
-                    <span style={{ whiteSpace: 'nowrap' }}>{poundsFromString(candidate.contribution)}</span>
+                    <span className="bkr-num" style={{ whiteSpace: 'nowrap' }}>
+                      {poundsFromString(candidate.contribution)}
+                    </span>
                   )}
                 </div>
               )
             })}
           </div>
 
-          <p style={{ margin: '0.5rem 0 0.375rem' }}>
+          <div className="bkr-sum" data-settled={settled}>
             {picked.size} picked, coming to <strong>{poundsFromString(total)}</strong>.{' '}
             {poundsFromString(view.remaining)} arrived.{' '}
             {settled ? (
@@ -1633,38 +1795,38 @@ function SettlePanel({
                 {differenceDirection === 'expense' ? 'was kept out of it' : 'more arrived than these come to'}.
               </strong>
             )}
-          </p>
+          </div>
 
           {picked.size > 0 && (
-            <p style={{ margin: '0 0 0.375rem', fontSize: 'var(--text-xs, 0.75rem)', color: 'var(--color-text-muted, var(--color-text))' }}>
-              If this line only paid part of one, change its amount. The rest stays unpaid on it, ready for the payout that
-              brought the rest.
+            <p className="bkr-tiny" style={{ margin: 0 }}>
+              If this line only paid part of one, change its amount. The rest stays unpaid on it, ready for the
+              payout that brought the rest.
             </p>
           )}
 
           {badPart && (
-            <p role="alert" style={{ margin: '0 0 0.375rem', color: 'var(--color-danger, var(--color-text))' }}>
-              One of those amounts will not do: it has to be more than nothing, and no more than is still unpaid on that
-              entry.
+            <p role="alert" className="bkr-pill bkr-pill-bad" style={{ alignSelf: 'flex-start', whiteSpace: 'normal' }}>
+              One of those amounts will not do: it has to be more than nothing, and no more than is still unpaid
+              on that entry.
             </p>
           )}
 
           {!settled && picked.size > 0 && (
-            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '0.5rem' }}>
-              <span style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>Record that difference as</span>
+            <div className="bkr-record">
+              <span className="bkr-tiny">Record that difference as</span>
               <SearchableSelect
                 aria-label="What the difference was"
                 value={differenceCategoryId}
                 onChange={setChosenDifferenceCategory}
-                style={controlStyle}
+                style={{ ...controlStyle, minWidth: '12rem', minHeight: '2.25rem' }}
                 emptyLabel="Choose a category"
                 options={usable.map((category) => ({ value: category.id, label: category.name }))}
               />
               <select
                 aria-label="VAT on the difference"
+                className="bkr-input"
                 value={differenceVatRateCode}
                 onChange={(event) => setDifferenceVatRateCode(event.target.value)}
-                style={controlStyle}
               >
                 {VAT_CHOICES.map((choice) => (
                   <option key={choice.code} value={choice.code}>
@@ -1675,23 +1837,25 @@ function SettlePanel({
             </div>
           )}
 
-          <button
-            type="button"
-            className="btn btn-sm btn-primary"
-            disabled={busy || picked.size === 0 || badPart || (!settled && !differenceCategoryId)}
-            onClick={() =>
-              onSettle({
-                action: 'settle',
-                transactionIds: [...picked],
-                amounts,
-                differenceCategoryId: settled ? null : differenceCategoryId,
-                differenceVatRateCode,
-                leaveForReview,
-              })
-            }
-          >
-            Settle this line
-          </button>
+          <div>
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              disabled={busy || picked.size === 0 || badPart || (!settled && !differenceCategoryId)}
+              onClick={() =>
+                onSettle({
+                  action: 'settle',
+                  transactionIds: [...picked],
+                  amounts,
+                  differenceCategoryId: settled ? null : differenceCategoryId,
+                  differenceVatRateCode,
+                  leaveForReview,
+                })
+              }
+            >
+              Settle this line
+            </button>
+          </div>
         </>
       )}
     </div>

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
 import { EmptyState, ErrorNotice } from './Notices'
 import { formatDate, poundsFromString } from './format'
+import EntryStyles from './EntryStyles'
 
 // Bringing a bank statement in.
 //
@@ -116,6 +117,8 @@ export default function ImportScreen({
     fileNote: string | null
   } | null>(null)
   const [dragging, setDragging] = useState(false)
+  // Only set once the file has been read and the bank could not be worked out.
+  const [needsBank, setNeedsBank] = useState(false)
 
   useEffect(() => {
     fetch('/api/m/uk-bookkeeping/admin/import')
@@ -129,28 +132,43 @@ export default function ImportScreen({
       .catch(() => undefined)
   }, [])
 
-  async function readFile(file: File) {
+  // `overrides` carries a just-made choice: state is not updated yet when the
+  // dropdown's change handler re-reads the file.
+  async function readFile(file: File, overrides: { preset?: string; bankAccountId?: string } = {}) {
+    const usePreset = overrides.preset ?? preset
+    const useAccount = overrides.bankAccountId ?? bankAccountId
     setBusy(true)
     setError(null)
     setDone(null)
     setChosen(file)
+    setPreview(null)
     setReplaceExisting(true)
 
     const body = new FormData()
     body.append('file', file)
-    if (preset) body.append('preset', preset)
-    if (bankAccountId) body.append('bankAccountId', bankAccountId)
+    if (usePreset) body.append('preset', usePreset)
+    if (useAccount) body.append('bankAccountId', useAccount)
 
     try {
       const response = await fetch('/api/m/uk-bookkeeping/admin/import', { method: 'POST', body })
       const payload = await response.json().catch(() => ({}))
 
       if (!response.ok) {
+        // A CSV we could not place is the one case where the bank has to be
+        // asked about. The file stays held so choosing a bank re-reads it
+        // rather than sending the person back to the drop box.
+        if (payload.code === 'unmapped') {
+          setNeedsBank(true)
+          setError(null)
+          return
+        }
         setError(payload.error ?? 'That file could not be read.')
         setPreview(null)
         setChosen(null)
+        setNeedsBank(false)
         return
       }
+      setNeedsBank(false)
 
       setPreview(payload)
       if (!bankAccountId && payload.bankAccountId) setBankAccountId(payload.bankAccountId)
@@ -206,6 +224,9 @@ export default function ImportScreen({
       setDone(payload)
       setPreview(null)
       setChosen(null)
+      setNeedsBank(false)
+      setBankAccountId('')
+      setPreset('')
       onImported?.()
     } catch {
       setError('The import did not reach the server. Check the connection and try again - nothing has been brought in.')
@@ -214,11 +235,14 @@ export default function ImportScreen({
     }
   }
 
+  // The account is only asked about when reading the file did not settle it.
+  const needsAccount = !!preview && !preview.bankAccountId && !bankAccountId
   const fresh = preview ? preview.lines.length - preview.duplicates : 0
   const updating = !!preview?.existingStatement && replaceExisting
 
   return (
     <div>
+      <EntryStyles />
       <ErrorNotice message={error} />
 
       {done && (
@@ -270,16 +294,15 @@ export default function ImportScreen({
           padding: '1.25rem',
           marginBottom: '1rem',
           maxWidth: 760,
-          border: dragging ? '2px dashed var(--color-primary, var(--color-border))' : undefined,
         }}
         onDragOver={(event) => {
-          if (!canRecord) return
+          if (!canRecord || chosen) return
           event.preventDefault()
           setDragging(true)
         }}
         onDragLeave={() => setDragging(false)}
         onDrop={(event) => {
-          if (!canRecord) return
+          if (!canRecord || chosen) return
           event.preventDefault()
           setDragging(false)
           const file = event.dataTransfer.files?.[0]
@@ -288,64 +311,121 @@ export default function ImportScreen({
       >
         <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Import a bank statement</h3>
         <p style={{ margin: '0 0 1rem', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
-          Drop a statement on this card, or choose one below. A PDF downloaded from your online banking
-          works as well as a CSV - what will not work is a photograph or a scan of a paper one, because
-          there is no text in those to read. You will not be asked what any of it was for here; that
-          happens afterwards, on the reconciliation screen, where you can do the alike ones in one go.
+          A PDF downloaded from your online banking works as well as a CSV - what will not work is a
+          photograph or a scan of a paper one, because there is no text in those to read. We will work
+          out which account and which bank it is from the file. You will not be asked what any of it was
+          for here; that happens afterwards, on the reconciliation screen.
         </p>
 
-        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
-          <label style={{ fontSize: 'var(--text-sm)' }}>
-            <span style={{ display: 'block', marginBottom: '0.25rem' }}>Which account</span>
-            <select
-              value={bankAccountId}
-              onChange={(event) => setBankAccountId(event.target.value)}
-              style={controlStyle}
-            >
-              <option value="">Choose an account</option>
-              {accounts.map((account) => (
-                <option key={account.id} value={account.id}>
-                  {account.name}
-                  {account.accountLast4 ? ` (…${account.accountLast4})` : ''}
-                </option>
-              ))}
-            </select>
-          </label>
+        <input
+          ref={fileInput}
+          type="file"
+          accept=".csv,text/csv,.pdf,application/pdf"
+          style={{ display: 'none' }}
+          aria-label="Choose a bank statement file"
+          onChange={(event) => {
+            const file = event.target.files?.[0]
+            if (file) readFile(file)
+          }}
+        />
 
-          <label style={{ fontSize: 'var(--text-sm)' }}>
-            <span style={{ display: 'block', marginBottom: '0.25rem' }}>Which bank the file came from</span>
-            <select value={preset} onChange={(event) => setPreset(event.target.value)} style={controlStyle}>
-              <option value="">Work it out from the file</option>
-              {presets.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-          </label>
+        {!chosen && (
+          <div className="bkx-drop" data-dragging={dragging}>
+            {busy ? (
+              'Reading…'
+            ) : (
+              <>
+                Drop a statement here, or{' '}
+                <button
+                  type="button"
+                  className="bkx-linkbtn"
+                  style={{ fontSize: 'inherit' }}
+                  disabled={!canRecord}
+                  onClick={() => fileInput.current?.click()}
+                >
+                  browse
+                </button>
+                <div className="bkx-tiny" style={{ marginTop: '0.5rem' }}>
+                  CSV or PDF, up to 8 MB.
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
-          <input
-            ref={fileInput}
-            type="file"
-            accept=".csv,text/csv,.pdf,application/pdf"
-            style={{ display: 'none' }}
-            onChange={(event) => {
-              const file = event.target.files?.[0]
-              if (file) readFile(file)
-            }}
-          />
-          {canRecord && (
+        {chosen && (
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+            <div style={{ fontSize: 'var(--text-sm)' }}>
+              <strong>{chosen.name}</strong>
+              {busy && ' - reading…'}
+            </div>
             <button
               type="button"
-              className="btn btn-sm btn-primary"
+              className="btn btn-sm"
               disabled={busy}
-              style={{ alignSelf: 'flex-end' }}
-              onClick={() => fileInput.current?.click()}
+              onClick={() => {
+                setChosen(null)
+                setPreview(null)
+                setNeedsBank(false)
+                setError(null)
+                setBankAccountId(accounts.length === 1 ? (accounts[0]?.id ?? '') : '')
+                setPreset('')
+              }}
             >
-              {busy ? 'Reading…' : 'Choose a file'}
+              Choose a different file
             </button>
-          )}
-        </div>
+          </div>
+        )}
+
+        {chosen && !busy && (needsBank || needsAccount) && (
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginTop: '1rem' }}>
+            {needsBank && (
+              <label style={{ fontSize: 'var(--text-sm)' }}>
+                <span style={{ display: 'block', marginBottom: '0.25rem' }}>
+                  We could not tell which bank the file came from
+                </span>
+                <select
+                  value={preset}
+                  onChange={(event) => {
+                    setPreset(event.target.value)
+                    if (event.target.value) readFile(chosen, { preset: event.target.value })
+                  }}
+                  style={controlStyle}
+                >
+                  <option value="">Choose a bank</option>
+                  {presets.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {needsAccount && (
+              <label style={{ fontSize: 'var(--text-sm)' }}>
+                <span style={{ display: 'block', marginBottom: '0.25rem' }}>
+                  We could not tell which account this is for
+                </span>
+                <select
+                  value={bankAccountId}
+                  onChange={(event) => {
+                    setBankAccountId(event.target.value)
+                    if (event.target.value) readFile(chosen, { bankAccountId: event.target.value })
+                  }}
+                  style={controlStyle}
+                >
+                  <option value="">Choose an account</option>
+                  {accounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.name}
+                      {account.accountLast4 ? ` (…${account.accountLast4})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+        )}
 
         {accounts.length === 0 && (
           <p style={{ margin: '0.875rem 0 0', fontSize: 'var(--text-sm)' }}>
