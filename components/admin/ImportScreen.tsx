@@ -293,7 +293,6 @@ export default function ImportScreen({
         style={{
           padding: '1.25rem',
           marginBottom: '1rem',
-          maxWidth: 760,
         }}
         onDragOver={(event) => {
           if (!canRecord || chosen) return

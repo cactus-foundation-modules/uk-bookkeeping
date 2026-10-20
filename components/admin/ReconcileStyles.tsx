@@ -149,8 +149,8 @@ const css = `
 .bkr-empty{padding:3rem 1.5rem;text-align:center;border:1px dashed var(--color-border);border-radius:14px;color:var(--color-text-muted,var(--color-text))}
 .bkr-empty-ico{width:3rem;height:3rem;margin:0 auto .75rem;display:flex;align-items:center;justify-content:center;border-radius:999px;border:1px solid var(--color-border);background:var(--color-surface)}
 .bkr-empty[data-tone="good"] .bkr-empty-ico{color:var(--color-success,var(--color-text));border-color:var(--color-success,var(--color-border))}
-.bkr-empty p{margin:0 auto;max-width:34rem}
-.bkr-empty .bkr-empty-title{margin:0 0 .375rem;font-weight:600;font-size:1.0625rem;color:var(--color-text)}
+.bkr-empty p{margin:0 auto;max-width:34rem;text-align:center}
+.bkr-empty .bkr-empty-title{margin:0 auto .375rem;font-weight:600;font-size:1.0625rem;color:var(--color-text)}
 
 @media (max-width:1180px){
   .bkr-line{grid-template-columns:minmax(0,1fr)}
