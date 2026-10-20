@@ -6,7 +6,7 @@ import { BookkeepingError, NotFoundError } from './errors'
 import { refreshBankTransactionStatuses } from './reconciliation'
 import { removeAssetDraftsForTransaction, syncAssetDraftsForTransaction } from './fixed-assets'
 import { assertDatesNotInClosedPeriod, assertTransactionMutable } from './guards'
-import { formatMoney, toMoney } from './money'
+import { formatMoney, isMoneyString, toMoney } from './money'
 import type {
   BkAttachmentRow,
   BkTransactionLineRow,
@@ -158,6 +158,8 @@ function validateInput(input: TransactionInput): void {
 // Reads
 // ---------------------------------------------------------------------------
 
+export type TransactionSort = 'date' | 'who' | 'amount'
+
 export type TransactionFilter = {
   from?: string | null
   to?: string | null
@@ -176,6 +178,17 @@ export type TransactionFilter = {
   hasEvidence?: boolean | null
   /** Only the ones marked as needing no receipt, or only the ones not marked. */
   evidenceNotRequired?: boolean | null
+  /** Matched to a bank statement line (true) or to none (false). Entries only. */
+  reconciled?: boolean | null
+  /** Free text, matched against who, what for, the reference and the line descriptions. */
+  search?: string | null
+  /** Bounds on the entry's total (gross) as a two-place decimal string, unsigned. */
+  minAmount?: string | null
+  maxAmount?: string | null
+  /** The account the money moved through. A transfer matches on either end. */
+  bankAccountId?: string | null
+  sort?: TransactionSort | null
+  sortDirection?: 'asc' | 'desc' | null
   limit?: number
   offset?: number
 }
@@ -201,12 +214,33 @@ export type TransactionListRow = Omit<BkTransactionRow, 'direction'> & {
   /** Set on a transfer row only, for the "Current → Savings" line on screen. */
   transfer_from_name: string | null
   transfer_to_name: string | null
+  /** Every category the lines sit in, comma-joined; null on a transfer. */
+  category_names: string | null
+  /** The account an imported or reconciled entry came through, where there is one. */
+  bank_account_name: string | null
+  /** Matched to at least one bank statement line. Always false on a transfer. */
+  reconciled: boolean
 }
 
 export type TransactionList = {
   rows: TransactionListRow[]
   total: number
   totals: { net: string; vat: string; gross: string }
+  /**
+   * What the whole filtered set adds up to, not just the page on screen: money
+   * in against money out, with the VAT on each side, and the two counts anybody
+   * working through a pile asks for. Entries only - a transfer is the same money
+   * somewhere else.
+   */
+  summary: {
+    income_gross: string
+    income_vat: string
+    expense_gross: string
+    expense_vat: string
+    entries: number
+    drafts: number
+    needing_evidence: number
+  }
 }
 
 /**
@@ -222,6 +256,18 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
   const from = filter.from ? parseDate(filter.from, 'The "from" date') : null
   const to = filter.to ? parseDate(filter.to, 'The "to" date') : null
   const counterparty = filter.counterparty?.trim() ? `%${filter.counterparty.trim().toLowerCase()}%` : null
+  // LIKE treats % and _ as wildcards; somebody searching "50%" means the symbol.
+  const search = filter.search?.trim()
+    ? `%${filter.search.trim().toLowerCase().replace(/[\\%_]/g, (c) => `\\${c}`)}%`
+    : null
+  const amountBound = (value: string | null | undefined, label: string): string | null => {
+    if (value == null || value.trim() === '') return null
+    if (!isMoneyString(value.trim())) throw new BookkeepingError('invalid', `${label} must be an amount such as 25.00.`)
+    return value.trim()
+  }
+  const minAmount = amountBound(filter.minAmount, 'The smallest amount')
+  const maxAmount = amountBound(filter.maxAmount, 'The largest amount')
+  const bankAccountId = filter.bankAccountId?.trim() || null
 
   // A transfer is neither income nor an expense, so asking for one of those
   // rules them out; so does any filter that only an entry can answer - a
@@ -232,9 +278,18 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
     filter.categoryId != null ||
     filter.vatRateCode != null ||
     filter.hasEvidence != null ||
-    filter.evidenceNotRequired != null
+    filter.evidenceNotRequired != null ||
+    filter.reconciled != null
   const wantsTransfers = filter.direction === 'transfer' || !entryOnlyFilter
   const wantsEntries = filter.direction !== 'transfer'
+
+  // The size of an entry is the sum of its lines; of a transfer, what left the
+  // account. Both are correlated subqueries so they can sit in a WHERE or a
+  // select list alike.
+  const entryAmount = Prisma.sql`(SELECT COALESCE(SUM(l."gross_amount"), 0)
+      FROM "bk_transaction_lines" l WHERE l."transaction_id" = t."id")`
+  const transferAmount = Prisma.sql`(SELECT COALESCE(SUM(jl."debit"), 0)
+      FROM "bk_journal_lines" jl WHERE jl."journal_id" = j."id")`
 
   const where = Prisma.sql`
     WHERE (${from}::date IS NULL OR t."tax_point_date" >= ${from}::date)
@@ -261,6 +316,21 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
                  SELECT 1 FROM "bk_attachments" a WHERE a."transaction_id" = t."id")))
       AND (${filter.evidenceNotRequired ?? null}::boolean IS NULL
            OR t."evidence_not_required" = ${filter.evidenceNotRequired ?? null}::boolean)
+      AND (${filter.reconciled ?? null}::boolean IS NULL
+           OR (${filter.reconciled ?? null}::boolean = TRUE AND EXISTS (
+                 SELECT 1 FROM "bk_reconciliations" r WHERE r."transaction_id" = t."id"))
+           OR (${filter.reconciled ?? null}::boolean = FALSE AND NOT EXISTS (
+                 SELECT 1 FROM "bk_reconciliations" r WHERE r."transaction_id" = t."id")))
+      AND (${search}::text IS NULL
+           OR lower(t."counterparty") LIKE ${search}
+           OR lower(t."description") LIKE ${search}
+           OR lower(COALESCE(t."reference", '')) LIKE ${search}
+           OR EXISTS (
+                SELECT 1 FROM "bk_transaction_lines" l
+                WHERE l."transaction_id" = t."id" AND lower(l."description") LIKE ${search}))
+      AND (${bankAccountId}::text IS NULL OR t."bank_account_id" = ${bankAccountId})
+      AND (${minAmount}::numeric IS NULL OR ${entryAmount} >= ${minAmount}::numeric)
+      AND (${maxAmount}::numeric IS NULL OR ${entryAmount} <= ${maxAmount}::numeric)
   `
 
   // Transfers live in bk_journals, so one page of "what happened" is two tables.
@@ -271,17 +341,19 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
   // So the union carries identity and sort key only. It picks the page; the two
   // hydrating queries below fill it in, each in the shape its own table has.
   const paged = Prisma.sql`
-    SELECT id, kind, sort_date, sort_created FROM (
+    SELECT id, kind, sort_date, sort_created, sort_name, sort_amount FROM (
       ${
         wantsEntries
           ? Prisma.sql`
         SELECT t."id" AS id, 'entry'::text AS kind,
-               t."tax_point_date" AS sort_date, t."created_at" AS sort_created
+               t."tax_point_date" AS sort_date, t."created_at" AS sort_created,
+               lower(t."counterparty") AS sort_name, ${entryAmount} AS sort_amount
         FROM "bk_transactions" t
         ${where}`
           : Prisma.sql`
         SELECT NULL::text AS id, NULL::text AS kind,
-               NULL::date AS sort_date, NULL::timestamptz AS sort_created
+               NULL::date AS sort_date, NULL::timestamptz AS sort_created,
+               NULL::text AS sort_name, NULL::numeric AS sort_amount
         WHERE FALSE`
       }
       UNION ALL
@@ -289,27 +361,47 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
         wantsTransfers
           ? Prisma.sql`
         SELECT j."id" AS id, 'transfer'::text AS kind,
-               j."date" AS sort_date, j."created_at" AS sort_created
+               j."date" AS sort_date, j."created_at" AS sort_created,
+               lower(j."narrative") AS sort_name, ${transferAmount} AS sort_amount
         FROM "bk_journals" j
         WHERE j."kind" = 'transfer'
           AND (${from}::date IS NULL OR j."date" >= ${from}::date)
           AND (${to}::date IS NULL OR j."date" <= ${to}::date)
           AND (${filter.status ?? null}::text IS NULL OR j."status" = ${filter.status ?? null})
           AND (${counterparty}::text IS NULL OR lower(j."narrative") LIKE ${counterparty})
+          AND (${search}::text IS NULL
+               OR lower(j."narrative") LIKE ${search}
+               OR lower(COALESCE(j."reference", '')) LIKE ${search})
+          AND (${bankAccountId}::text IS NULL
+               OR j."from_bank_account_id" = ${bankAccountId}
+               OR j."to_bank_account_id" = ${bankAccountId})
+          AND (${minAmount}::numeric IS NULL OR ${transferAmount} >= ${minAmount}::numeric)
+          AND (${maxAmount}::numeric IS NULL OR ${transferAmount} <= ${maxAmount}::numeric)
           AND (${filter.locked ?? null}::boolean IS NULL
                OR (${filter.locked ?? null}::boolean = TRUE AND j."locked_period_id" IS NOT NULL)
                OR (${filter.locked ?? null}::boolean = FALSE AND j."locked_period_id" IS NULL))`
           : Prisma.sql`
         SELECT NULL::text AS id, NULL::text AS kind,
-               NULL::date AS sort_date, NULL::timestamptz AS sort_created
+               NULL::date AS sort_date, NULL::timestamptz AS sort_created,
+               NULL::text AS sort_name, NULL::numeric AS sort_amount
         WHERE FALSE`
       }
     ) merged
   `
 
+  // Whitelisted fragments, never the caller's string: the sort is one of three
+  // words and the direction one of two.
+  const way = filter.sortDirection === 'asc' ? Prisma.sql`ASC` : Prisma.sql`DESC`
+  const order =
+    filter.sort === 'who'
+      ? Prisma.sql`sort_name ${way}, sort_date DESC, id`
+      : filter.sort === 'amount'
+        ? Prisma.sql`sort_amount ${way}, sort_date DESC, id`
+        : Prisma.sql`sort_date ${way}, sort_created ${way}, id`
+
   const page = await prisma.$queryRaw<{ id: string; kind: 'entry' | 'transfer' }[]>`
     ${paged}
-    ORDER BY sort_date DESC, sort_created DESC
+    ORDER BY ${order}
     LIMIT ${limit} OFFSET ${offset}
   `
 
@@ -326,12 +418,19 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
           COALESCE(a."attachment_count", 0)::int AS attachment_count,
           'entry'::text AS entry_kind,
           NULL::text AS transfer_from_name,
-          NULL::text AS transfer_to_name
+          NULL::text AS transfer_to_name,
+          l."category_names" AS category_names,
+          ba."name" AS bank_account_name,
+          EXISTS (SELECT 1 FROM "bk_reconciliations" r WHERE r."transaction_id" = t."id") AS reconciled
         FROM "bk_transactions" t
+        LEFT JOIN "bk_bank_accounts" ba ON ba."id" = t."bank_account_id"
         LEFT JOIN LATERAL (
-          SELECT SUM("net_amount") AS net_total, SUM("vat_amount") AS vat_total,
-                 SUM("gross_amount") AS gross_total, COUNT(*) AS line_count
-          FROM "bk_transaction_lines" WHERE "transaction_id" = t."id"
+          SELECT SUM(tl."net_amount") AS net_total, SUM(tl."vat_amount") AS vat_total,
+                 SUM(tl."gross_amount") AS gross_total, COUNT(*) AS line_count,
+                 string_agg(DISTINCT c."name", ', ' ORDER BY c."name") AS category_names
+          FROM "bk_transaction_lines" tl
+          JOIN "bk_categories" c ON c."id" = tl."category_id"
+          WHERE tl."transaction_id" = t."id"
         ) l ON TRUE
         LEFT JOIN LATERAL (
           SELECT COUNT(*) AS attachment_count FROM "bk_attachments" WHERE "transaction_id" = t."id"
@@ -377,7 +476,10 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
           0::int AS attachment_count,
           'transfer'::text AS entry_kind,
           f."name" AS transfer_from_name,
-          b."name" AS transfer_to_name
+          b."name" AS transfer_to_name,
+          NULL::text AS category_names,
+          NULL::text AS bank_account_name,
+          FALSE AS reconciled
         FROM "bk_journals" j
         JOIN "bk_journal_lines" l ON l."journal_id" = j."id"
         LEFT JOIN "bk_bank_accounts" f ON f."id" = j."from_bank_account_id"
@@ -412,6 +514,31 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
       `
     : []
 
+  const [sides] = wantsEntries
+    ? await prisma.$queryRaw<
+        { income_gross: Prisma.Decimal; income_vat: Prisma.Decimal; expense_gross: Prisma.Decimal; expense_vat: Prisma.Decimal }[]
+      >`
+        SELECT COALESCE(SUM(l."gross_amount") FILTER (WHERE t."direction" = 'income'), 0)::numeric  AS income_gross,
+               COALESCE(SUM(l."vat_amount")   FILTER (WHERE t."direction" = 'income'), 0)::numeric  AS income_vat,
+               COALESCE(SUM(l."gross_amount") FILTER (WHERE t."direction" = 'expense'), 0)::numeric AS expense_gross,
+               COALESCE(SUM(l."vat_amount")   FILTER (WHERE t."direction" = 'expense'), 0)::numeric AS expense_vat
+        FROM "bk_transactions" t
+        JOIN "bk_transaction_lines" l ON l."transaction_id" = t."id"
+        ${where}
+      `
+    : []
+  const [counts] = wantsEntries
+    ? await prisma.$queryRaw<{ entries: bigint; drafts: bigint; needing_evidence: bigint }[]>`
+        SELECT COUNT(*)::bigint AS entries,
+               COUNT(*) FILTER (WHERE t."status" = 'draft')::bigint AS drafts,
+               COUNT(*) FILTER (WHERE t."evidence_not_required" = FALSE
+                                  AND NOT EXISTS (SELECT 1 FROM "bk_attachments" a
+                                                  WHERE a."transaction_id" = t."id"))::bigint AS needing_evidence
+        FROM "bk_transactions" t
+        ${where}
+      `
+    : []
+
   return {
     rows,
     total: Number(counted?.count ?? 0n),
@@ -419,6 +546,15 @@ export async function listTransactions(filter: TransactionFilter): Promise<Trans
       net: formatMoney(totals?.net ?? null),
       vat: formatMoney(totals?.vat ?? null),
       gross: formatMoney(totals?.gross ?? null),
+    },
+    summary: {
+      income_gross: formatMoney(sides?.income_gross ?? null),
+      income_vat: formatMoney(sides?.income_vat ?? null),
+      expense_gross: formatMoney(sides?.expense_gross ?? null),
+      expense_vat: formatMoney(sides?.expense_vat ?? null),
+      entries: Number(counts?.entries ?? 0n),
+      drafts: Number(counts?.drafts ?? 0n),
+      needing_evidence: Number(counts?.needing_evidence ?? 0n),
     },
   }
 }

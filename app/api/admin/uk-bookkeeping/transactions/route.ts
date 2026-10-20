@@ -36,6 +36,15 @@ export async function GET(request: NextRequest) {
       locked: boolean('locked'),
       hasEvidence: boolean('hasEvidence'),
       evidenceNotRequired: boolean('evidenceNotRequired'),
+      reconciled: boolean('reconciled'),
+      search: query.get('search'),
+      minAmount: query.get('minAmount'),
+      maxAmount: query.get('maxAmount'),
+      bankAccountId: query.get('bankAccountId'),
+      sort: ['date', 'who', 'amount'].includes(query.get('sort') ?? '')
+        ? (query.get('sort') as 'date' | 'who' | 'amount')
+        : null,
+      sortDirection: query.get('dir') === 'asc' ? 'asc' : 'desc',
       limit: integer('limit', 50),
       offset: integer('offset', 0),
     })

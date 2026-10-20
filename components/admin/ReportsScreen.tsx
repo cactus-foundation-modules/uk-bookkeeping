@@ -1,6 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import SearchableSelect from './SearchableSelect'
 import { BookkeepingNav, EmptyState, ErrorNotice, SandboxBanner } from './Notices'
 import {
   DateField,
@@ -62,7 +63,7 @@ type MonthlyRow = { month: string; income: string; expenses: string; profit: str
 type Report = {
   from: string
   to: string
-  summary: { categoryId: string; name: string; net: string; vat: string; entries: number }[]
+  summary: { categoryId: string; code: string; name: string; net: string; vat: string; gross: string; entries: number }[]
   monthly: MonthlyRow[]
   profitAndLoss: Pl
   balanceSheet: Bs
@@ -131,7 +132,30 @@ type Aged = {
   totals: { current: string; days30: string; days60: string; days90: string; older: string; total: string }
 }
 
-type Tab = 'pl' | 'bs' | 'tb' | 'nominal' | 'aged' | 'export'
+type AllEntries = {
+  rows: {
+    date: string
+    settledDate: string | null
+    kind: string
+    counterparty: string
+    description: string
+    reference: string | null
+    categoryName: string | null
+    ledgerAccount: string | null
+    net: string
+    vat: string
+    gross: string
+    debit: string | null
+    credit: string | null
+    status: string
+    paidFrom: string | null
+    entryId: string
+  }[]
+  totals: { net: string; vat: string; gross: string }
+  truncated: boolean
+}
+
+type Tab = 'pl' | 'bs' | 'tb' | 'nominal' | 'aged' | 'entries' | 'export'
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'pl', label: 'Profit and loss' },
@@ -139,7 +163,19 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'tb', label: 'Trial balance' },
   { key: 'nominal', label: 'Account history' },
   { key: 'aged', label: 'Who owes what' },
+  { key: 'entries', label: 'All entries' },
   { key: 'export', label: 'Take a copy' },
+]
+
+const REPORT_EXPORTS: [string, string][] = [
+  ['profit-and-loss', 'Profit and loss'],
+  ['balance-sheet', 'Balance sheet'],
+  ['trial-balance', 'Trial balance'],
+  ['aged-debtors', 'Owed to the business'],
+  ['aged-creditors', 'Owed by the business'],
+  ['monthly', 'Month by month'],
+  ['categories', 'Totals by category'],
+  ['all-entries', 'All entries with categories'],
 ]
 
 const EXPORTS = [
@@ -161,6 +197,7 @@ export default function ReportsScreen({ environment }: { environment: string }) 
   const [nominal, setNominal] = useState<Nominal | null>(null)
   const [accountId, setAccountId] = useState('')
   const [aged, setAged] = useState<{ owedToUs: Aged; weOwe: Aged } | null>(null)
+  const [entries, setEntries] = useState<AllEntries | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const get = useCallback(async (url: string, signal?: AbortSignal) => {
@@ -176,16 +213,18 @@ export default function ReportsScreen({ environment }: { environment: string }) 
     async (signal: AbortSignal) => {
       try {
         const query = new URLSearchParams(range)
-        const [main, balances, ageing] = await Promise.all([
+        const [main, balances, ageing, everything] = await Promise.all([
           get(`/api/m/uk-bookkeeping/admin/reports?${query.toString()}`, signal),
           get(`/api/m/uk-bookkeeping/admin/reports/trial-balance?asAt=${range.to}`, signal),
           get(`/api/m/uk-bookkeeping/admin/reports/aged?asAt=${range.to}`, signal),
+          get(`/api/m/uk-bookkeeping/admin/reports/entries?${query.toString()}`, signal),
         ])
         if (signal.aborted) return
         setError(null)
         setReport(main)
         setTb(balances)
         setAged(ageing)
+        setEntries(everything)
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return
         setError(err instanceof Error ? err.message : 'The reports could not be loaded.')
@@ -240,6 +279,18 @@ export default function ReportsScreen({ environment }: { environment: string }) 
 
       <SubTabs tabs={TABS} active={tab} onChange={setTab} />
 
+      {tab !== 'export' && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '0 0 0.75rem' }}>
+          {csvKind(tab) && (tab !== 'nominal' || accountId) ? (
+            <a className="btn btn-sm" href={csvHref(csvKind(tab) as string, range, accountId)}>
+              Download this report (CSV)
+            </a>
+          ) : (
+            <span style={muted}>Pick an account to download its history.</span>
+          )}
+        </div>
+      )}
+
       {tab === 'pl' && report && <ProfitAndLoss pl={report.profitAndLoss} monthly={report.monthly} taxGrouping={report.taxGrouping} onOpen={openAccount} />}
       {tab === 'bs' && report && <BalanceSheet bs={report.balanceSheet} onOpen={openAccount} />}
       {tab === 'tb' && tb && <TrialBalance payload={tb} onOpen={openAccount} />}
@@ -251,13 +302,38 @@ export default function ReportsScreen({ environment }: { environment: string }) 
           onSelect={setAccountId}
         />
       )}
-      {tab === 'aged' && aged && <AgedTables aged={aged} />}
-      {tab === 'export' && <Exports records={report?.records} />}
+      {tab === 'aged' && aged && <AgedTables aged={aged} range={range} />}
+      {tab === 'entries' && entries && report && <AllEntriesTable data={entries} summary={report.summary} range={range} />}
+      {tab === 'export' && <Exports records={report?.records} range={range} />}
     </div>
   )
 }
 
 // ---------------------------------------------------------------------------
+
+/** Which spreadsheet goes with which tab. The aged tab has two, so it offers its own. */
+function csvKind(tab: Tab): string | null {
+  switch (tab) {
+    case 'pl':
+      return 'profit-and-loss'
+    case 'bs':
+      return 'balance-sheet'
+    case 'tb':
+      return 'trial-balance'
+    case 'nominal':
+      return 'account-history'
+    case 'entries':
+      return 'all-entries'
+    default:
+      return null
+  }
+}
+
+function csvHref(kind: string, range: { from: string; to: string }, accountId = '') {
+  const query = new URLSearchParams({ from: range.from, to: range.to })
+  if (accountId) query.set('accountId', accountId)
+  return `/api/m/uk-bookkeeping/admin/reports/csv/${kind}?${query.toString()}`
+}
 
 function LedgerHealthNotice({ health }: { health: TrialBalancePayload['health'] }) {
   // Stranded settlements are a filing mistake, not an arithmetic one: the books
@@ -743,9 +819,13 @@ function NominalLedger({
   )
 }
 
-function AgedTables({ aged }: { aged: { owedToUs: Aged; weOwe: Aged } }) {
+function AgedTables({ aged, range }: { aged: { owedToUs: Aged; weOwe: Aged }; range: { from: string; to: string } }) {
   return (
     <>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', margin: '0 0 0.75rem', flexWrap: 'wrap' }}>
+        <a className="btn btn-sm" href={csvHref('aged-debtors', range)}>Download owed to the business (CSV)</a>
+        <a className="btn btn-sm" href={csvHref('aged-creditors', range)}>Download owed by the business (CSV)</a>
+      </div>
       <AgedTable title="Owed to the business" data={aged.owedToUs} />
       <AgedTable title="Owed by the business" data={aged.weOwe} />
       <p style={{ ...muted, margin: 0 }}>
@@ -811,8 +891,29 @@ function AgedTable({ title, data }: { title: string; data: Aged }) {
   )
 }
 
-function Exports({ records }: { records: Report['records'] | undefined }) {
+function Exports({
+  records,
+  range,
+}: {
+  records: Report['records'] | undefined
+  range: { from: string; to: string }
+}) {
   return (
+    <>
+    <div style={{ ...card, padding: '1.25rem', maxWidth: 640 }}>
+      <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Reports as spreadsheets</h3>
+      <p style={{ ...muted, margin: '0 0 0.75rem' }}>
+        Every report on this page, for the dates above. The account history has its own button on
+        its tab, because it needs an account picking first.
+      </p>
+      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+        {REPORT_EXPORTS.map(([kind, label]) => (
+          <a key={kind} className="btn btn-sm" href={csvHref(kind, range)}>
+            {label}
+          </a>
+        ))}
+      </div>
+    </div>
     <div style={{ ...card, padding: '1.25rem', maxWidth: 640 }}>
       <h3 style={{ margin: '0 0 0.5rem', fontSize: '0.9375rem' }}>Take a copy of everything</h3>
       <p style={{ ...muted, margin: '0 0 0.75rem' }}>
@@ -836,5 +937,166 @@ function Exports({ records }: { records: Report['records'] | undefined }) {
         </p>
       )}
     </div>
+    </>
+  )
+}
+
+function AllEntriesTable({
+  data,
+  summary,
+  range,
+}: {
+  data: AllEntries
+  summary: Report['summary']
+  range: { from: string; to: string }
+}) {
+  const [category, setCategory] = useState('')
+  const [search, setSearch] = useState('')
+
+  const categories = useMemo(
+    () => Array.from(new Set(data.rows.map((row) => row.categoryName ?? row.ledgerAccount ?? '')))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b)),
+    [data.rows],
+  )
+  const shown = useMemo(() => {
+    const needle = search.trim().toLowerCase()
+    return data.rows.filter((row) => {
+      const filed = row.categoryName ?? row.ledgerAccount ?? ''
+      if (category && filed !== category) return false
+      if (!needle) return true
+      return [row.counterparty, row.description, row.reference ?? '', filed]
+        .join(' ')
+        .toLowerCase()
+        .includes(needle)
+    })
+  }, [data.rows, category, search])
+
+  if (data.rows.length === 0) {
+    return (
+      <EmptyState title="Nothing in that range.">
+        <p style={{ margin: 0 }}>Try a wider set of dates.</p>
+      </EmptyState>
+    )
+  }
+
+  return (
+    <>
+      <div style={{ ...card, padding: '0.875rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <div>
+          <label htmlFor="bk-entries-category" style={{ display: 'block', ...muted }}>Category</label>
+          <SearchableSelect
+            id="bk-entries-category"
+            style={{ ...input, minWidth: 220 }}
+            value={category}
+            onChange={setCategory}
+            emptyLabel="All categories"
+            options={categories.map((name) => ({ value: name, label: name }))}
+          />
+        </div>
+        <div>
+          <label htmlFor="bk-entries-search" style={{ display: 'block', ...muted }}>Search</label>
+          <input id="bk-entries-search" style={{ ...input, minWidth: 220 }} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Who, what or reference" />
+        </div>
+        <p style={{ ...muted, margin: 0 }}>
+          {shown.length} of {data.rows.length} lines. Journals show the ledger account instead of a category.
+        </p>
+      </div>
+
+      {data.truncated && (
+        <div role="alert" style={{ ...card, padding: '0.75rem 1rem', fontSize: 'var(--text-sm)' }}>
+          This range is too long to show in full here. Download the CSV for every line, or narrow the dates.
+        </div>
+      )}
+
+      <div style={{ ...card, padding: 0, overflowX: 'auto' }}>
+        <table style={table}>
+          <thead>
+            <tr>
+              <th style={th}>Date</th>
+              <th style={th}>Type</th>
+              <th style={th}>Who</th>
+              <th style={th}>What</th>
+              <th style={th}>Category</th>
+              <th style={th}>Status</th>
+              <th style={thRight}>Net</th>
+              <th style={thRight}>VAT</th>
+              <th style={thRight}>Gross</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((row, index) => (
+              <tr key={`${row.entryId}-${index}`}>
+                <td style={{ ...td, whiteSpace: 'nowrap' }}>{formatDay(row.date)}</td>
+                <td style={{ ...td, whiteSpace: 'nowrap' }}>{row.kind}</td>
+                <td style={td}>{row.counterparty}</td>
+                <td style={td}>
+                  {row.description}
+                  {row.reference && <span style={{ ...muted, marginLeft: '0.5rem' }}>{row.reference}</span>}
+                </td>
+                <td style={td}>{row.categoryName ?? row.ledgerAccount ?? ''}</td>
+                <td style={td}>{row.status}</td>
+                {row.kind === 'Journal' ? (
+                  <>
+                    <td style={tdRight} colSpan={2}>
+                      {row.debit && row.debit !== '0.00' ? <>Dr <Money value={row.debit} /></> : null}
+                    </td>
+                    <td style={tdRight}>
+                      {row.credit && row.credit !== '0.00' ? <>Cr <Money value={row.credit} /></> : null}
+                    </td>
+                  </>
+                ) : (
+                  <>
+                    <td style={tdRight}><Money value={row.net} /></td>
+                    <td style={tdRight}><Money value={row.vat} /></td>
+                    <td style={tdRight}><Money value={row.gross} /></td>
+                  </>
+                )}
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr style={{ borderTop: '2px solid var(--color-border)' }}>
+              <td style={{ ...td, fontWeight: 600, borderBottom: 'none' }} colSpan={6}>
+                Net movement, all lines in range (money in less money out)
+              </td>
+              <td style={{ ...tdRight, borderBottom: 'none' }}><Money value={data.totals.net} bold /></td>
+              <td style={{ ...tdRight, borderBottom: 'none' }}><Money value={data.totals.vat} bold /></td>
+              <td style={{ ...tdRight, borderBottom: 'none' }}><Money value={data.totals.gross} bold /></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      {summary.length > 0 && (
+        <div style={{ ...card, padding: 0, overflowX: 'auto', maxWidth: 720 }}>
+          <table style={table}>
+            <thead>
+              <tr>
+                <th style={th}>Totals by category</th>
+                <th style={thRight}>Entries</th>
+                <th style={thRight}>Net</th>
+                <th style={thRight}>VAT</th>
+                <th style={thRight}>Gross</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summary.map((row) => (
+                <tr key={row.categoryId}>
+                  <td style={td}>{row.name}</td>
+                  <td style={tdRight}>{row.entries}</td>
+                  <td style={tdRight}><Money value={row.net} /></td>
+                  <td style={tdRight}><Money value={row.vat} /></td>
+                  <td style={tdRight}><Money value={row.gross} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p style={{ ...muted, margin: '0.5rem 1rem 0.75rem' }}>
+            <a href={csvHref('categories', range)}>Download these totals (CSV)</a>
+          </p>
+        </div>
+      )}
+    </>
   )
 }

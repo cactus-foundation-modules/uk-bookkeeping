@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
 import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
+import SearchableSelect from './SearchableSelect'
 import DocumentPicker from './DocumentPicker'
 import { type UnfiledDocument } from './documents-shared'
 import { ErrorNotice } from './Notices'
@@ -997,26 +998,21 @@ export default function TransactionForm({
               </div>
               <div>
                 <label style={label} htmlFor={`bk-line-${line.uid}-category`}>Category</label>
-                <select
+                <SearchableSelect
                   id={`bk-line-${line.uid}-category`}
-                  style={input}
+                  style={{ ...input, width: '100%' }}
                   value={line.categoryId}
-                  onChange={(e) => {
-                    const category = categories.find((c) => c.id === e.target.value)
+                  options={categories.map((category) => ({ value: category.id, label: category.name }))}
+                  onChange={(categoryId) => {
+                    const category = categories.find((c) => c.id === categoryId)
                     setCategoryTouched(true)
                     setLine(index, {
-                      categoryId: e.target.value,
+                      categoryId,
                       isCapital: category?.is_capital ?? false,
                       registerAsset: category?.is_capital ?? false,
                     })
                   }}
-                >
-                  {categories.map((category) => (
-                    <option key={category.id} value={category.id}>
-                      {category.name}
-                    </option>
-                  ))}
-                </select>
+                />
               </div>
               <div>
                 <label style={label} htmlFor={`bk-line-${line.uid}-rate`}>VAT rate</label>

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
 import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
+import SearchableSelect from './SearchableSelect'
 import { ErrorNotice, TriggerHealthNotice, type TriggerHealth } from './Notices'
 import { TabStrip } from '@/components/admin/TabStrip'
 import { SettingsHeaderActions, SettingsHeaderStatus } from '@/components/admin/SettingsHeaderActions'
@@ -1608,19 +1609,16 @@ export function BookkeepingSettingsTab() {
           <>
             <div className="settings-field" style={row}>
               <label htmlFor="bk-external-category">File them under</label>
-              <select
+              <SearchableSelect
                 id="bk-external-category"
                 style={input}
                 value={settings.externalSalesCategoryId ?? ''}
-                onChange={(e) => set('externalSalesCategoryId', e.target.value || null)}
-              >
-                <option value="">Sales and turnover (the usual one)</option>
-                {(categories ?? [])
+                emptyLabel="Sales and turnover (the usual one)"
+                options={(categories ?? [])
                   .filter((category) => category.direction !== 'expense' && !category.archived)
-                  .map((category) => (
-                    <option key={category.id} value={category.id}>{category.name}</option>
-                  ))}
-              </select>
+                  .map((category) => ({ value: category.id, label: category.name }))}
+                onChange={(categoryId) => set('externalSalesCategoryId', categoryId || null)}
+              />
             </div>
             <div className="settings-field" style={row}>
               <label htmlFor="bk-external-status">Record them as</label>

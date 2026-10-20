@@ -313,6 +313,51 @@ suite('categories and the accounts behind them, against a real database', () => 
     expect(stillNeeded.rows[0]!.evidence_not_required).toBe(false)
   })
 
+  it('answers every filter, sort and summary the entries screen sends', async () => {
+    const all = await lib.listTransactions({})
+    expect(all.rows.length).toBeGreaterThan(0)
+
+    // Free text finds by who; a wildcard typed by a person is just a character.
+    const found = await lib.listTransactions({ search: 'acme' })
+    expect(found.rows.length).toBeGreaterThan(0)
+    expect(found.rows.every((row) => row.counterparty.toLowerCase().includes('acme'))).toBe(true)
+    expect((await lib.listTransactions({ search: '%' })).rows).toHaveLength(0)
+
+    // Amount bounds, and a bad one is refused rather than ignored.
+    expect((await lib.listTransactions({ minAmount: '9999999.00' })).rows).toHaveLength(0)
+    const small = await lib.listTransactions({ maxAmount: '0.01' })
+    expect(small.rows.every((row) => Number(row.gross_total) <= 0.01)).toBe(true)
+    await expect(lib.listTransactions({ minAmount: 'lots' })).rejects.toThrow()
+
+    // Every sort, both ways, answers - and agrees on how many there are.
+    for (const sort of ['date', 'who', 'amount'] as const) {
+      for (const sortDirection of ['asc', 'desc'] as const) {
+        const sorted = await lib.listTransactions({ sort, sortDirection })
+        expect(sorted.total).toBe(all.total)
+      }
+    }
+    const byAmount = await lib.listTransactions({ sort: 'amount', sortDirection: 'desc' })
+    const grosses = byAmount.rows.map((row) => Number(row.gross_total))
+    expect(grosses).toEqual([...grosses].sort((a, b) => b - a))
+
+    // The two sides of the summary add up to the running total.
+    const gross = Number(all.summary.income_gross) + Number(all.summary.expense_gross)
+    expect(gross.toFixed(2)).toBe(all.totals.gross)
+    expect(all.summary.entries).toBeGreaterThan(0)
+    expect(all.rows[0]).toHaveProperty('category_names')
+
+    // Reconciled and not reconciled split the entries between them, and a
+    // transfer is in neither - it is never matched to a statement line.
+    const matched = await lib.listTransactions({ reconciled: true })
+    const unmatched = await lib.listTransactions({ reconciled: false })
+    expect(matched.rows.every((row) => row.reconciled)).toBe(true)
+    expect(unmatched.rows.every((row) => !row.reconciled && row.entry_kind === 'entry')).toBe(true)
+    expect(matched.total + unmatched.total).toBe(all.summary.entries)
+
+    // A bank account that does not exist matches nothing, entries or transfers.
+    expect((await lib.listTransactions({ bankAccountId: 'no-such-account' })).total).toBe(0)
+  })
+
   it('names entries that settled without saying which account the money moved through', async () => {
     // The books add up perfectly and are still wrong in a way somebody has to
     // be told about: with no account named, the money settles against the

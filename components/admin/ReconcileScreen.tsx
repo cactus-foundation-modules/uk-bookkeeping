@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAdminPath } from '@/components/admin/AdminPathContext'
+import SearchableSelect from './SearchableSelect'
 import { BookkeepingNav, EmptyState, ErrorNotice, SandboxBanner } from './Notices'
 import BalanceCheckPanel from './BalanceCheckPanel'
 import { addStrings, formatDate, poundsFromString } from './format'
@@ -567,19 +568,15 @@ export default function ReconcileScreen({
 
             <label style={{ fontSize: 'var(--text-sm)' }}>
               <span style={{ display: 'block', marginBottom: '0.25rem' }}>What they were for</span>
-              <select
+              <SearchableSelect
+                aria-label="What they were for"
                 value={bulkCategory}
-                onChange={(event) => setBulkCategory(event.target.value)}
+                onChange={setBulkCategory}
                 disabled={selected.size === 0}
                 style={controlStyle}
-              >
-                <option value="">Choose a category</option>
-                {bulkCategories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
+                emptyLabel="Choose a category"
+                options={bulkCategories.map((category) => ({ value: category.id, label: category.name }))}
+              />
             </label>
 
             {/* Not disabled with an empty selection: the per-line "Record it as
@@ -1284,19 +1281,14 @@ function StatementRow({
 
             {canRecord && (
               <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
-                <select
+                <SearchableSelect
                   aria-label={`What the ${formatDate(row.date)} line was for`}
                   value={categoryId}
-                  onChange={(event) => onCategory(event.target.value)}
+                  onChange={onCategory}
                   style={controlStyle}
-                >
-                  <option value="">Choose a category</option>
-                  {usable.map((category) => (
-                    <option key={category.id} value={category.id}>
-                      {category.name}
-                    </option>
-                  ))}
-                </select>
+                  emptyLabel="Choose a category"
+                  options={usable.map((category) => ({ value: category.id, label: category.name }))}
+                />
                 <button
                   type="button"
                   className="btn btn-sm"
@@ -1660,19 +1652,14 @@ function SettlePanel({
           {!settled && picked.size > 0 && (
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '0.5rem' }}>
               <span style={{ fontSize: 'var(--text-xs, 0.75rem)' }}>Record that difference as</span>
-              <select
+              <SearchableSelect
                 aria-label="What the difference was"
                 value={differenceCategoryId}
-                onChange={(event) => setChosenDifferenceCategory(event.target.value)}
+                onChange={setChosenDifferenceCategory}
                 style={controlStyle}
-              >
-                <option value="">Choose a category</option>
-                {usable.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
+                emptyLabel="Choose a category"
+                options={usable.map((category) => ({ value: category.id, label: category.name }))}
+              />
               <select
                 aria-label="VAT on the difference"
                 value={differenceVatRateCode}
