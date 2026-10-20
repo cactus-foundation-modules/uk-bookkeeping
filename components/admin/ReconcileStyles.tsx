@@ -38,7 +38,8 @@ const css = `
 .bkr-note-body ul{margin:.375rem 0 0;padding-left:1.25rem}
 
 /* Accounts */
-.bkr-accts{display:grid;gap:.75rem;grid-template-columns:repeat(auto-fill,minmax(15rem,1fr))}
+.bkr-accts{display:grid;gap:.75rem;grid-template-columns:repeat(12,minmax(0,1fr))}
+@media (max-width:40rem){.bkr-accts .bkr-acct{grid-column:1/-1!important}}
 .bkr-acct{appearance:none;text-align:left;font:inherit;color:var(--color-text);display:flex;align-items:center;gap:.75rem;padding:.75rem .875rem;border:1px solid var(--color-border);border-radius:12px;background:var(--color-surface);cursor:pointer;min-width:0}
 .bkr-acct:hover{border-color:var(--color-text-muted,var(--color-text))}
 .bkr-acct[aria-pressed="true"]{border-color:var(--color-primary,var(--color-text));box-shadow:0 0 0 1px var(--color-primary,var(--color-text))}

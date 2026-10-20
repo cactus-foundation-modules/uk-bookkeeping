@@ -179,6 +179,23 @@ const controlStyle: React.CSSProperties = {
   maxWidth: '100%',
 }
 
+/**
+ * Column span (of 12) for each account button so every row fills the width:
+ * at most four to a row, rows as even as possible, larger rows first
+ * (5 accounts = 3 + 2, 7 = 4 + 3).
+ */
+function accountRowSpans(count: number): number[] {
+  const rows = Math.ceil(count / 4)
+  const spans: number[] = []
+  let left = count
+  for (let row = 0; row < rows; row++) {
+    const inRow = Math.ceil(left / (rows - row))
+    for (let i = 0; i < inRow; i++) spans.push(12 / inRow)
+    left -= inRow
+  }
+  return spans
+}
+
 export default function ReconcileScreen({
   environment,
   canRecord,
@@ -483,11 +500,15 @@ export default function ReconcileScreen({
 
       {accounts.length > 1 && (
         <div className="bkr-accts" role="group" aria-label="Which account to reconcile">
-          {accounts.map((item) => (
+          {accountRowSpans(accounts.length).map((span, index) => {
+            const item = accounts[index]
+            if (!item) return null
+            return (
             <button
               key={item.id}
               type="button"
               className="bkr-acct"
+              style={{ gridColumn: `span ${span}` }}
               aria-pressed={item.id === accountId}
               onClick={() => changeView(() => setAccountId(item.id))}
             >
@@ -507,7 +528,8 @@ export default function ReconcileScreen({
                 </span>
               )}
             </button>
-          ))}
+            )
+          })}
         </div>
       )}
 
