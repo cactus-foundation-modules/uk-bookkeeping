@@ -226,8 +226,15 @@ hosting does pass it on (an RFC 7239 `Forwarded` header, or a source port
 appended to `X-Forwarded-For`) and omits it otherwise, rather than sending a
 server port dressed up as a client one.
 
-HMRC's own instruction in that situation is to write to them. Wording that says
-the true thing:
+**A site on its own server can supply it.** Give the bookkeeping screens a hostname
+that browsers reach directly, with Cloudflare's proxy off (cactus-host:
+`cactus-host domain add <site> <name> --direct`, see its runbook). Caddy then sees the
+visitor's own connection and passes the source port in a `Forwarded` header, which is
+the form this module already reads. Use that hostname for the HMRC calls and the
+header is sent with the real value. Behind a proxy or edge it still cannot be known.
+
+HMRC's own instruction where it genuinely cannot be supplied is to write to them. Wording
+that says the true thing:
 
 > Our software runs as a web application behind a hosted edge network. The end
 > user's TCP connection is terminated at the edge and only the client's public IP

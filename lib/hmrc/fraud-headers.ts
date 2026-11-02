@@ -242,7 +242,7 @@ export function describeMissingHeaders(headers: Record<string, string>): string[
     // Where it does not, HMRC's own instruction is to tell them why rather than
     // to invent a number, and the wording for that is in the README.
     notes.push(
-      'The port your browser connected from is not passed on by this site’s hosting, so it is left out. HMRC ask to be told why - the wording to send them is in this module’s notes.',
+      'The port your browser connected from is not passed on to this site, so it is left out. Reach the site on a hostname that is not behind Cloudflare’s proxy (see this module’s notes) to send it, or tell HMRC why - the wording is in the notes.',
     )
   }
   return notes
