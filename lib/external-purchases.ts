@@ -91,6 +91,11 @@ export type ExternalPurchasePayload = {
   lines: ExternalPurchaseLine[]
   description?: string
   document?: ExternalPurchaseDocument
+  /** What we sent the supplier to show the money left, where the purchase was
+   *  paid up front: a screenshot of the payment, or a remittance. Filed beside
+   *  their invoice, because for a purchase paid before it was invoiced the
+   *  payment is the tax point and the proof of it is part of the evidence. */
+  paymentProof?: ExternalPurchaseDocument
 }
 
 /** What a publisher hands over when it withdraws one. */
@@ -297,8 +302,26 @@ export function purchaseLines(
 // Evidence
 // ---------------------------------------------------------------------------
 
+/** How one kind of filed document is named on the entry and in what the
+ *  publisher is told. */
+type DocumentKind = { name: string; fallbackFilename: string; noun: string; filed: string }
+
+const SUPPLIER_INVOICE: DocumentKind = {
+  name: 'Supplier invoice',
+  fallbackFilename: 'supplier-invoice',
+  noun: 'Their invoice',
+  filed: 'Their invoice is attached to it.',
+}
+
+const PAYMENT_PROOF: DocumentKind = {
+  name: 'Proof of payment',
+  fallbackFilename: 'proof-of-payment',
+  noun: 'The proof of payment',
+  filed: 'The proof of payment is attached to it.',
+}
+
 /**
- * Files the supplier's own invoice against the entry it just made.
+ * Files one document the publisher handed over against the entry it just made.
  *
  * Nothing is uploaded and nothing is copied: the file is already in this site's
  * media library, put there by whoever attached it to the bill, and an attachment
@@ -308,27 +331,38 @@ export function purchaseLines(
  *
  * Never throws and never fails the purchase. An entry with no invoice behind it
  * is worth having; a purchase that vanished because a file reference was odd is
- * not. Idempotent on the filename, so the publisher's "try again" button files a
- * document that missed the first time without filing it twice.
+ * not. Idempotent on the media id where there is one and on the name and
+ * filename otherwise, so the publisher's "try again" button files a document
+ * that missed the first time without filing it twice - and an invoice and a
+ * proof that happen to share a filename ("document.pdf") are still both filed.
  */
 async function fileDocument(
   transactionId: string,
   document: ExternalPurchaseDocument | undefined,
+  kind: DocumentKind = SUPPLIER_INVOICE,
 ): Promise<string> {
   if (!document?.url) return ''
   try {
+    const filename = document.filename || kind.fallbackFilename
     const already = await listAttachments(transactionId)
-    if (already.some((row) => row.filename === document.filename)) return ''
+    const mediaId = document.mediaId ?? null
+    if (
+      already.some((row) =>
+        mediaId ? row.media_id === mediaId : row.name === kind.name && row.filename === filename,
+      )
+    ) {
+      return ''
+    }
 
     await createAttachment(
       {
         transactionId,
-        name: 'Supplier invoice',
-        filename: document.filename || 'supplier-invoice',
+        name: kind.name,
+        filename,
         url: document.url,
         mediaProvider: document.mediaProvider ?? null,
         mediaKey: document.mediaKey ?? null,
-        mediaId: document.mediaId ?? null,
+        mediaId,
         mimeType: document.mimeType || 'application/octet-stream',
         size: Number(document.sizeBytes) || 0,
         // The bytes never pass through here, so there is nothing to hash. Null
@@ -337,15 +371,24 @@ async function fileDocument(
       },
       null,
     )
-    return ' Their invoice is attached to it.'
+    return ` ${kind.filed}`
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     console.error('[uk-bookkeeping] could not attach an external purchase document:', message)
     const reason = message.replace(/\s+/g, ' ').trim().slice(0, 200)
     return reason
-      ? ` Their invoice itself could not be attached: ${reason}`
-      : ' Their invoice itself could not be attached.'
+      ? ` ${kind.noun} itself could not be attached: ${reason}`
+      : ` ${kind.noun} itself could not be attached.`
   }
+}
+
+/** Their invoice, then the proof of payment where there is one. One after the
+ *  other rather than at once: each takes the next position on the entry, and
+ *  two at once would both read the same "next". */
+async function fileDocuments(transactionId: string, payload: ExternalPurchasePayload): Promise<string> {
+  const invoice = await fileDocument(transactionId, payload.document, SUPPLIER_INVOICE)
+  const proof = await fileDocument(transactionId, payload.paymentProof, PAYMENT_PROOF)
+  return invoice + proof
 }
 
 /** What the entry calls the supplier, through whatever this site has learned.
@@ -392,7 +435,7 @@ export async function recordExternalPurchase(
     if (already) {
       // The try-again button lands here. Nothing is recorded twice, but a
       // document that never made it the first time gets another go.
-      const filed = await fileDocument(already, payload.document)
+      const filed = await fileDocuments(already, payload)
       return { ok: true, message: `Already in the books - nothing recorded twice.${filed}` }
     }
 
@@ -438,7 +481,7 @@ export async function recordExternalPurchase(
 
     try {
       const created = await createTransaction(input, null)
-      const filed = await fileDocument(created.id, payload.document)
+      const filed = await fileDocuments(created.id, payload)
       await learnAlias(payload.supplier?.name ?? '', counterparty, null)
       return {
         ok: true,
@@ -452,7 +495,7 @@ export async function recordExternalPurchase(
       // files the returns.
       if (error instanceof BackdatedIntoClosedPeriodError) {
         const draft = await createTransaction({ ...input, status: 'draft' }, null)
-        const filed = await fileDocument(draft.id, payload.document)
+        const filed = await fileDocuments(draft.id, payload)
         return {
           ok: false,
           message:
