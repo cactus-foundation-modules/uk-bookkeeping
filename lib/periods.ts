@@ -668,6 +668,24 @@ export type NetErrors = {
  * All three numbers are settings with those defaults, so a rule change is a
  * settings edit and not a release, and the wording is guidance with a link
  * rather than a determination.
+ *
+ * What counts is an error on a return already filed, put right on THIS return:
+ *
+ *   - Typed by a person. The Correct button is the only door that leaves source
+ *     'manual' and no source_ref. A credit note or void arriving from the shop or
+ *     from purchase orders always carries its own source and a source_ref, and is
+ *     an ordinary transaction of the period it happens in, not an error on anything,
+ *     whichever period the entry it reverses was in.
+ *   - Against an entry on an earlier return that was actually filed. The lock is the
+ *     proof: every road to 'submitted' locks the rows on that return.
+ *   - Sitting in this return, by the same membership rule as its boxes, so one
+ *     correction is not repeated on every return. A filed return goes on showing the
+ *     corrections it carried, which is why the row's own lock is not a filter here.
+ *   - Under the same VAT number. HMRC's sandbox files against its own test number,
+ *     and a rehearsal is not an earlier return. Compared with the viewed period's
+ *     number rather than the settings', because the settings say whatever the
+ *     sandbox connection last put there. A period laid out before any number was
+ *     set has none to compare, and is given the benefit of the doubt.
  */
 export async function computeNetErrors(period: BkVatPeriodRow): Promise<NetErrors> {
   const settings = await getSettings()
@@ -678,9 +696,15 @@ export async function computeNetErrors(period: BkVatPeriodRow): Promise<NetError
     ), 0)::numeric AS net
     FROM "bk_transaction_lines" l
     JOIN "bk_transactions" t ON t."id" = l."transaction_id"
+    JOIN "bk_transactions" original ON original."id" = t."corrects_transaction_id"
+    JOIN "bk_vat_periods" filed ON filed."id" = original."locked_period_id"
     WHERE t."entry_type" = 'adjustment'
-      AND t."locked_period_id" IS NULL
-      AND t."corrects_transaction_id" IS NOT NULL
+      AND t."source" = 'manual'
+      AND t."source_ref" IS NULL
+      AND ${periodMembership(period)}
+      AND filed."status" = 'submitted'
+      AND filed."end_date" < ${period.start_date}::date
+      AND (filed."vrn" IS NULL OR ${period.vrn}::text IS NULL OR filed."vrn" = ${period.vrn}::text)
   `
   const net = toMoney(row?.net ?? null).abs()
 

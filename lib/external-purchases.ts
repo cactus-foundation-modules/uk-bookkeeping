@@ -700,7 +700,10 @@ export async function recordExternalPurchaseCredit(
       (payload.reason?.trim() ? `: ${payload.reason.trim()}` : '')
 
     const input = {
-      entryType: 'adjustment' as const,
+      // A correction has to name what it corrects, so with no bill to name this
+      // is an ordinary entry, and its negative lines still bring the spend and
+      // the input VAT down.
+      entryType: originalId ? ('adjustment' as const) : ('normal' as const),
       direction: 'expense' as const,
       // The credit's own tax point - the day the money came back. Never the
       // purchase's: dating it back would reopen a return that has very probably
