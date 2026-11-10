@@ -1,3 +1,4 @@
+import { publishEntryRedated } from './entry-redated'
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import type { SessionUser } from '@/lib/auth/session'
@@ -851,6 +852,18 @@ export async function updateTransaction(
     },
     user,
   })
+
+  // An entry another module handed over keeps that module's copy of the date.
+  const beforeDay = before.tax_point_date.toISOString().slice(0, 10)
+  const afterDay = String(input.taxPointDate).slice(0, 10)
+  if (before.source_ref && beforeDay !== afterDay) {
+    await publishEntryRedated({
+      source: before.source,
+      sourceRef: before.source_ref,
+      taxPointDate: afterDay,
+      previousTaxPointDate: beforeDay,
+    })
+  }
 
   return (await getTransaction(id))!
 }
