@@ -33,8 +33,10 @@ type Listener = (payload: EntryRedatedPayload) => Promise<unknown> | unknown
  */
 export async function publishEntryRedated(payload: EntryRedatedPayload): Promise<void> {
   // Dynamic: the registry imports this module's own files, so a static import is a cycle.
-  const { modulePublicExtensionPointComponents } = await import('@/lib/modules/extension-points.public')
-  const fns = modulePublicExtensionPointComponents[ENTRY_REDATED_POINT] ?? {}
+  // The SERVER map, not the public one: a listener here writes to the database,
+  // so its provider is rightly `serverOnly` and absent from the public map.
+  const { moduleServerExtensionPointComponents } = await import('@/lib/modules/extension-points.server')
+  const fns = moduleServerExtensionPointComponents[ENTRY_REDATED_POINT] ?? {}
   if (Object.keys(fns).length === 0) return
   const modules = await getInstalledManifests()
   for (const mod of modules) {
