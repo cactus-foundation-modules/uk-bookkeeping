@@ -6,6 +6,7 @@ import { isOverdue, listPeriods, toDateOnly } from './periods'
 import { getSettings } from './settings'
 import { isHmrcConfigured } from './hmrc/endpoints'
 import { getConnection } from './hmrc/tokens'
+import { collectPrepaidVat, sumPrepaidVat } from './prepaid-vat'
 import { monthlyBreakdown } from './reports'
 import { listTransactions } from './transactions'
 import { assembleBoxes, computeVatTotals, netVatDirection } from './vat-boxes'
@@ -32,6 +33,10 @@ export type DashboardData = {
     direction: 'pay' | 'reclaim' | 'nil'
     box1: string
     box4: string
+    /** VAT paid to suppliers up front and not in the books yet. Counted in
+     *  netVatDue and direction, NOT in box4, which stays the books' own box 4.
+     *  Null when the setting is off. */
+    prepaid: { vat: string; count: number } | null
   } | null
   nextDue: {
     periodId: string
@@ -104,7 +109,18 @@ export async function getDashboard(): Promise<DashboardData> {
   let vat: DashboardData['vat'] = null
   if (current) {
     const totals = await computeVatTotals(current.start_date, current.end_date, current.scheme)
+    // VAT paid to suppliers up front, dated to the day it was paid, joins the
+    // reclaim side of the ESTIMATE only. The return screen computes its own
+    // boxes from the books and never sees this.
     const boxes = assembleBoxes(totals, settings.box_rounding)
+    let estimate = boxes
+    let prepaid: { vat: string; count: number } | null = null
+    if (settings.include_prepaid_vat) {
+      const items = await collectPrepaidVat(toDateOnly(current.start_date), toDateOnly(current.end_date))
+      const extra = sumPrepaidVat(items)
+      prepaid = { vat: formatMoney(extra), count: items.length }
+      estimate = assembleBoxes({ ...totals, box4: totals.box4.plus(extra) }, settings.box_rounding)
+    }
     vat = {
       periodId: current.id,
       start: toDateOnly(current.start_date),
@@ -112,10 +128,11 @@ export async function getDashboard(): Promise<DashboardData> {
       due: current.due_date ? toDateOnly(current.due_date) : null,
       status: current.status,
       overdue: isOverdue(current),
-      netVatDue: boxes.netVatDue,
-      direction: netVatDirection(boxes),
+      netVatDue: estimate.netVatDue,
+      direction: netVatDirection(estimate),
       box1: boxes.vatDueSales,
       box4: boxes.vatReclaimedCurrPeriod,
+      prepaid,
     }
   }
 

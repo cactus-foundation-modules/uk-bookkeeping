@@ -31,6 +31,8 @@ type Data = {
     direction: 'pay' | 'reclaim' | 'nil'
     box1: string
     box4: string
+    /** VAT paid to suppliers up front, not in the books yet: in netVatDue, not in box4. */
+    prepaid?: { vat: string; count: number } | null
   } | null
   nextDue: {
     periodId: string
@@ -355,6 +357,14 @@ export default function DashboardScreen({
                             : 'Nothing either way yet'
                         : 'No period covers today. Lay periods out on the VAT returns tab.'}
                     </p>
+                    {data.vat?.prepaid && data.vat.prepaid.count > 0 && (
+                      <p className="bko-hero-note">
+                        Counts {poundsFromString(data.vat.prepaid.vat)} VAT on{' '}
+                        {data.vat.prepaid.count === 1 ? 'one supplier order' : `${data.vat.prepaid.count} supplier orders`}{' '}
+                        paid up front this period, not in the books yet. The return will not include it until
+                        the invoice is.
+                      </p>
+                    )}
                   </div>
                   <div className="bko-hero-side">
                     <span className="bko-mini-label">Next return due</span>

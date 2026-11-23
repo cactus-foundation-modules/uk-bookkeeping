@@ -42,6 +42,7 @@ const FALLBACK: BkSettingsRow = {
   invoice_prefix: 'INV-',
   next_invoice_number: 1,
   auto_invoice_manual_income: true,
+  include_prepaid_vat: false,
   created_at: new Date(),
   updated_at: new Date(),
 }
@@ -91,6 +92,8 @@ export type SettingsPatch = {
   businessAddress?: string | null
   invoicePrefix?: string
   autoInvoiceManualIncome?: boolean
+  /** The overview's VAT estimate counts VAT paid up front - see lib/prepaid-vat.ts. */
+  includePrepaidVat?: boolean
 }
 
 /**
@@ -244,6 +247,7 @@ export async function updateSettings(patch: SettingsPatch): Promise<BkSettingsRo
       "business_address"        = ${patch.businessAddress === undefined ? current.business_address : patch.businessAddress?.trim() || null},
       "invoice_prefix"          = ${patch.invoicePrefix === undefined ? current.invoice_prefix : patch.invoicePrefix.trim()},
       "auto_invoice_manual_income" = ${patch.autoInvoiceManualIncome ?? current.auto_invoice_manual_income},
+      "include_prepaid_vat"     = ${patch.includePrepaidVat ?? current.include_prepaid_vat},
       "updated_at"              = NOW()
     WHERE "id" = 'singleton'
   `

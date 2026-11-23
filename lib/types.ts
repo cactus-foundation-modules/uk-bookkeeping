@@ -497,6 +497,8 @@ export type BkSettingsRow = {
   invoice_prefix: string
   next_invoice_number: number
   auto_invoice_manual_income: boolean
+  /** Count VAT paid to suppliers up front in the overview's estimate - see lib/prepaid-vat.ts. */
+  include_prepaid_vat: boolean
   created_at: Date
   updated_at: Date
 }

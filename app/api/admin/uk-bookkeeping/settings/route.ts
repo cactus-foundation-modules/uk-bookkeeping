@@ -50,6 +50,7 @@ export async function GET() {
       businessAddress: settings.business_address,
       invoicePrefix: settings.invoice_prefix,
       autoInvoiceManualIncome: settings.auto_invoice_manual_income,
+      includePrepaidVat: settings.include_prepaid_vat,
     },
     hmrc: {
       configured: isHmrcConfigured(),
@@ -96,6 +97,7 @@ const PatchBody = z.object({
   businessAddress: z.string().max(500).nullable().optional(),
   invoicePrefix: z.string().max(12).optional(),
   autoInvoiceManualIncome: z.boolean().optional(),
+  includePrepaidVat: z.boolean().optional(),
 })
 
 export async function PATCH(request: NextRequest) {

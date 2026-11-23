@@ -50,6 +50,8 @@ type Settings = {
   businessAddress: string | null
   invoicePrefix: string
   autoInvoiceManualIncome: boolean
+  /** The overview's VAT estimate counts VAT paid to suppliers up front. See lib/prepaid-vat.ts. */
+  includePrepaidVat: boolean
 }
 
 /**
@@ -1365,6 +1367,13 @@ export function BookkeepingSettingsTab() {
             <option value="nearest">To the nearest pound</option>
             <option value="down">Down, ignoring the pence</option>
           </select>
+        </div>
+        <div className="field field--beside-input">
+          <label className="settings-check">
+            <input id="bk-prepaid-vat" type="checkbox" checked={!!settings.includePrepaidVat} onChange={(e) => set('includePrepaidVat', e.target.checked)} />
+            Count VAT on supplier orders paid up front in the overview&rsquo;s estimate
+            <InfoTip>When you pay a supplier&rsquo;s proforma before their invoice arrives, the day you paid is the VAT date, so the VAT is yours to reclaim in that period. The books only hear about it when the invoice is approved, often weeks later. Tick this and the &ldquo;VAT this period&rdquo; figure on the overview includes the VAT on orders paid in the period that are not in the books yet, dated to the day you paid. It is an estimate only: the VAT return still counts nothing until the invoice is in the books, so get those approved before you file.</InfoTip>
+          </label>
         </div>
         {settings.schemeChangedAt && (
           <p style={{ margin: '0.75rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted, var(--color-text))' }}>
