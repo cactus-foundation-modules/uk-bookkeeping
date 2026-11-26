@@ -28,6 +28,7 @@ import type { HmrcCallContext, HmrcClient, VatLiability, VatObligation } from '.
 import { DirectHmrcClient } from './direct-client'
 import { isHmrcConfigured } from './endpoints'
 import { buildFraudHeaders, type FraudBag } from './fraud-headers'
+import { assertSubmissionHost } from './submission-host'
 import { MONEY_MAX_RANGE_DAYS, clampRange, toDateOnly as toDateOnlyString } from './limits'
 import { pickSandboxTestPeriod } from './sandbox-period'
 import { judgePeriodPayment, liabilityWindows } from './payment-match'
@@ -70,6 +71,9 @@ export async function buildCallContext(
   client: HmrcClient,
   inputs: CallInputs,
 ): Promise<HmrcCallContext & { vrn: string | null }> {
+  // Before the token or anything else: a call from the proxied address would
+  // reach HMRC without Gov-Client-Public-Port. See submission-host.ts.
+  assertSubmissionHost(inputs.request)
   const { accessToken, environment, vrn } = await getAccessToken(client)
   const fraudHeaders = await buildFraudHeaders({
     request: inputs.request,

@@ -65,6 +65,9 @@ export default function VatPeriodsScreen({
   const [periods, setPeriods] = useState<Period[] | null>(null)
   const [hmrc, setHmrc] = useState<HmrcStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // The right address to ask HMRC from, when the server refused this one
+  // (lib/hmrc/submission-host.ts).
+  const [errorUrl, setErrorUrl] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [lastChecked, setLastChecked] = useState<string | null>(null)
   const [syncSummary, setSyncSummary] = useState<string | null>(null)
@@ -120,11 +123,13 @@ export default function VatPeriodsScreen({
   async function refreshFromHmrc() {
     setBusy(true)
     setError(null)
+    setErrorUrl(null)
     try {
       const response = await hmrcFetch('/api/m/uk-bookkeeping/admin/hmrc/obligations', {})
       const payload = await response.json().catch(() => ({}))
       if (!response.ok) {
         setError(payload.error ?? 'HMRC could not be reached.')
+        setErrorUrl(typeof payload.url === 'string' ? payload.url : null)
         return
       }
       setLastChecked(new Date().toLocaleString('en-GB'))
@@ -141,6 +146,7 @@ export default function VatPeriodsScreen({
   async function layOutPeriods() {
     setBusy(true)
     setError(null)
+    setErrorUrl(null)
     try {
       const response = await fetch('/api/m/uk-bookkeeping/admin/periods', { method: 'POST' })
       const payload = await response.json().catch(() => ({}))
@@ -159,6 +165,7 @@ export default function VatPeriodsScreen({
   async function loadMoney() {
     setMoneyBusy(true)
     setError(null)
+    setErrorUrl(null)
     try {
       const to = new Date()
       const from = new Date(to.getTime())
@@ -177,6 +184,8 @@ export default function VatPeriodsScreen({
         setError(
           liabilitiesPayload.error ?? paymentsPayload.error ?? 'HMRC could not be asked just now.',
         )
+        const url = liabilitiesPayload.url ?? paymentsPayload.url
+        setErrorUrl(typeof url === 'string' ? url : null)
         return
       }
       setMoney({
@@ -197,7 +206,7 @@ export default function VatPeriodsScreen({
       <BookkeepingNav active="vat" />
       <SandboxBanner environment={environment} />
       <TriggerHealthNotice health={health} />
-      <ErrorNotice message={error} />
+      <ErrorNotice message={error} actionUrl={errorUrl} actionLabel="Open VAT returns there" />
 
       {hmrc && !hmrc.configured && (
         <div className="card" style={{ padding: '0.875rem 1rem', marginBottom: '1rem' }}>

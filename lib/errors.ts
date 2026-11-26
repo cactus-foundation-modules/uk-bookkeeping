@@ -115,6 +115,9 @@ export function toErrorResponse(error: unknown): Response {
       body.hmrcCode = error.hmrcCode
       body.correlationId = error.correlationId
     }
+    // WrongHostError (lib/hmrc/submission-host.ts) carries the address to go to,
+    // so the screen can offer it as a button rather than a URL in a sentence.
+    if ('url' in error && typeof error.url === 'string') body.url = error.url
     return Response.json(body, { status: error.status })
   }
   // A trigger firing looks like a plain database error, so translate the one

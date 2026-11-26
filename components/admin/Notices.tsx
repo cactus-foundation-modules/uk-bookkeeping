@@ -104,7 +104,16 @@ export function LockedNotice({
   )
 }
 
-export function ErrorNotice({ message }: { message: string | null }) {
+export function ErrorNotice({
+  message,
+  actionUrl,
+  actionLabel,
+}: {
+  message: string | null
+  /** A place to go and put it right - the direct hostname, for a refused HMRC call. */
+  actionUrl?: string | null
+  actionLabel?: string
+}) {
   if (!message) return null
   return (
     <div
@@ -116,6 +125,13 @@ export function ErrorNotice({ message }: { message: string | null }) {
       role="alert"
     >
       {message}
+      {actionUrl && (
+        <div style={{ marginTop: '0.5rem' }}>
+          <a className="btn btn-sm btn-primary" href={actionUrl}>
+            {actionLabel ?? 'Open it there'}
+          </a>
+        </div>
+      )}
     </div>
   )
 }

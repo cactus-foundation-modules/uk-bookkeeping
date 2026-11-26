@@ -230,8 +230,21 @@ server port dressed up as a client one.
 that browsers reach directly, with Cloudflare's proxy off (cactus-host:
 `cactus-host domain add <site> <name> --direct`, see its runbook). Caddy then sees the
 visitor's own connection and passes the source port in a `Forwarded` header, which is
-the form this module already reads. Use that hostname for the HMRC calls and the
-header is sent with the real value. Behind a proxy or edge it still cannot be known.
+the form this module already reads, and the header is sent with the real value.
+Behind a proxy or edge it still cannot be known.
+
+The module enforces the hostname rather than relying on anyone remembering it
+(`lib/hmrc/submission-host.ts`). cactus-host lists a site's direct hostnames in
+`CACTUS_HOST_DIRECT_HOSTS`; when that is set, the VAT screens redirect to the first
+one, and every HMRC call (`buildCallContext`) from any other hostname is refused
+with `409 wrong_host`, a sentence naming the right address, and a `url` the screen
+offers as a button - before a token is read or anything is sent. Going the other way,
+the VAT pages on the direct hostname mount `LeaveSubmissionHost`, which sends any
+same-origin link click (capture phase, ahead of Next's router) or back/forward to a
+path outside `/<admin>/m/uk-bookkeeping/vat` to the same path on `SITE_URL`. With the variable
+unset (Vercel, or a server site with no direct hostname) nothing changes. The
+Government Gateway connect flow is deliberately not covered: it has to start on the
+registered main address.
 
 HMRC's own instruction where it genuinely cannot be supplied is to write to them. Wording
 that says the true thing:

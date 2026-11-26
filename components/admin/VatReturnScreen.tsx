@@ -86,6 +86,9 @@ export default function VatReturnScreen({
   const [askConfirm, confirmNode] = useAdminConfirm()
   const [detail, setDetail] = useState<Detail | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Set when the server refused because this is not the address HMRC calls go
+  // from (lib/hmrc/submission-host.ts): the same screen on the right one.
+  const [errorUrl, setErrorUrl] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [expanded, setExpanded] = useState<number | null>(null)
@@ -140,6 +143,7 @@ export default function VatReturnScreen({
   ) {
     setBusy(true)
     setError(null)
+    setErrorUrl(null)
     setNotice(null)
     try {
       const response =
@@ -151,6 +155,7 @@ export default function VatReturnScreen({
 
       if (!response.ok) {
         setError(payload.error ?? 'That did not work.')
+        setErrorUrl(typeof payload.url === 'string' ? payload.url : null)
         setDuplicate(payload.hmrcCode === 'DUPLICATE_SUBMISSION')
         return null
       }
@@ -176,7 +181,7 @@ export default function VatReturnScreen({
       {confirmNode}
       <BookkeepingNav active="vat" />
       <SandboxBanner environment={environment} />
-      <ErrorNotice message={error} />
+      <ErrorNotice message={error} actionUrl={errorUrl} actionLabel="Open this return there" />
       {notice && (
         <div
           className="card"
